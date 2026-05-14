@@ -170,11 +170,11 @@ services:
     image: walkingd/cpa-helper:latest
     container_name: cpa-helper
     restart: always
+    # 如需改为bridge,需将容器内部端口 18317 映射至主机
+    # 程序默认访问地址为 `http://127.0.0.1:18317`
     network_mode: host
     environment:
       - TZ=Asia/Shanghai
-    ports:
-      - "18317:18317"
     volumes:
       - ./data:/app/data
 ```
