@@ -13,6 +13,8 @@ CPA Helper is a local self-hosted multi-user administration panel for CLIProxyAP
 
 It separates API keys and usage data by user: each user can create and manage their own keys and inspect their own requests, tokens and cost statistics, while administrators can create or disable regular accounts and review global plus per-user usage. It is built with FastAPI, SQLite, Vue 3 and Vite, with runtime data stored in the root-level `data/` directory by default.
 
+For clarity, model requests initiated by an Agent are still sent directly from that Agent to CPA. CPA Helper does not proxy or relay those requests; it only calls CPA management-style interfaces such as the usage queue, API key creation and deletion, and credential management for usage views, key management and credential maintenance.
+
 ## Table of Contents
 
 - [Features](#features)
