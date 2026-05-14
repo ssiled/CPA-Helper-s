@@ -358,8 +358,10 @@ onMounted(refresh)
 
     <section class="panel api-key-panel-shell">
       <div class="panel-inner api-key-panel">
-        <NAlert type="warning" :bordered="false">
-          API 密钥拥有当前账号的完整权限，请妥善保管。
+        <NAlert type="warning" :bordered="false" title="请求链路说明">
+          Agent 发起的模型请求仍需 Agent 直接发送到 CPA，CPA-Helper 不代理或中转这些请求；仅调用 CPA
+          的 usage 队列、API KEY 创建与删除、凭证管理等接口，用于用量查看、密钥创建和凭证维护。API
+          密钥拥有当前账号的完整权限，请妥善保管。
         </NAlert>
 
         <div v-if="generatedApiKey" class="generated-key-box">
