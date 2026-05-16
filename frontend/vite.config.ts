@@ -10,6 +10,7 @@ function readAppVersion(): string {
 
 const appVersion = readAppVersion()
 const logoUrl = `/logo.png?v=${encodeURIComponent(appVersion)}`
+const apiProxyTarget = process.env.CPA_HELPER_PROXY_TARGET?.trim() || 'http://127.0.0.1:18317'
 
 export default defineConfig({
   plugins: [
@@ -45,7 +46,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:18317',
+        target: apiProxyTarget,
         changeOrigin: true,
       },
     },

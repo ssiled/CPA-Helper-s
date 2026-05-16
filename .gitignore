@@ -6,6 +6,9 @@ frontend/dist/
 .vite/
 backend/dist/
 backend/build/
+backend/bin/
+backend/cpa-helper
+backend/cpa-helper.exe
 __pycache__/
 .pytest_cache/
 .ruff_cache/

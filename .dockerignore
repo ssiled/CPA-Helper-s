@@ -10,19 +10,14 @@ pictures
 
 .venv
 backend/.venv
-backend/.playwright-cli
-backend/.pytest_cache
-backend/.ruff_cache
+backend/bin
+backend/cpa-helper
+backend/cpa-helper.exe
 frontend/node_modules
 frontend/dist
 frontend/.playwright-cli
 frontend/.vite
 
-**/__pycache__
-**/.pytest_cache
-**/.ruff_cache
-**/*.pyc
-**/*.pyo
-**/*.pyd
+**/*.test
 **/*.log
 **/*.tsbuildinfo

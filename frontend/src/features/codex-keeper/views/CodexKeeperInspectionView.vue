@@ -106,6 +106,17 @@ const stateType = computed(() => {
   }
   return 'default'
 })
+const statusDetailText = computed(() => {
+  const detail = status.value?.detail
+  if (!detail) {
+    return '未运行'
+  }
+  return detail
+    .replace(/守护运行中/g, '自动巡检运行中')
+    .replace(/守护进程/g, '后台自动巡检')
+    .replace(/守护任务/g, '自动巡检任务')
+    .replace(/守护已启动/g, '已开始自动巡检')
+})
 
 watch(logText, () => {
   if (shouldFollowLatestLog.value) {
@@ -407,10 +418,10 @@ onBeforeUnmount(() => {
         <div class="metric-label">运行状态</div>
         <div class="metric-value">
           <NTag :type="stateType" size="small" :bordered="false">
-            {{ status?.detail ?? '未运行' }}
+            {{ statusDetailText }}
           </NTag>
         </div>
-        <div class="metric-footnote">守护进程</div>
+        <div class="metric-footnote">后台自动巡检</div>
       </div>
       <div class="metric-card">
         <div class="metric-icon" aria-hidden="true">
@@ -474,9 +485,9 @@ onBeforeUnmount(() => {
                 type="primary"
                 :loading="isActing"
                 :disabled="isRunning"
-                @click="runAction(startCodexKeeper, '守护已启动')"
+                @click="runAction(startCodexKeeper, '已开始自动巡检')"
               >
-                启动守护
+                开始自动巡检
               </NButton>
               <NButton
                 size="small"
@@ -533,11 +544,17 @@ onBeforeUnmount(() => {
                   </NFormItem>
                 </div>
                 <div class="switch-row">
-                  <NFormItem class="switch-form-item" label="演练模式">
-                    <NSwitch v-model:value="form.dry_run" />
+                  <NFormItem class="switch-form-item" label="只检查不修改">
+                    <div class="switch-control-stack">
+                      <NSwitch v-model:value="form.dry_run" />
+                      <p class="switch-help">开启后只模拟处理，不会禁用账号或调整优先级。</p>
+                    </div>
                   </NFormItem>
-                  <NFormItem class="switch-form-item" label="守护自动启动">
-                    <NSwitch v-model:value="form.auto_start_daemon" />
+                  <NFormItem class="switch-form-item" label="启动后自动巡检">
+                    <div class="switch-control-stack">
+                      <NSwitch v-model:value="form.auto_start_daemon" />
+                      <p class="switch-help">每次 CPA Helper 启动后，自动按上面的计划检查账号。</p>
+                    </div>
                   </NFormItem>
                 </div>
               </section>
@@ -751,6 +768,20 @@ onBeforeUnmount(() => {
   border: 1px solid var(--cpa-border);
   border-radius: 6px;
   background: var(--cpa-surface);
+}
+
+.switch-control-stack {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+
+.switch-help {
+  margin: 0;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  text-wrap: pretty;
 }
 
 .schedule-preview {

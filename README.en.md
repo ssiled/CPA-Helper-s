@@ -2,16 +2,15 @@
 
 English | [中文](README.md)
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Vue](https://img.shields.io/badge/Vue-3.5+-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Vite](https://img.shields.io/badge/Vite-5.4+-646cff?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Python](https://img.shields.io/badge/Python-3.12+-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 <a href="https://linux.do" alt="LINUX DO"><img src="https://shorturl.at/ggSqS" /></a>
 
 CPA Helper is a local self-hosted multi-user administration panel for CLIProxyAPI / CPA users. It centralizes usage analytics, request records, user accounts, API keys, model pricing, available models and Codex auth file inspection.
 
-It separates API keys and usage data by user: each user can create and manage their own keys and inspect their own requests, tokens and cost statistics, while administrators can create or disable regular accounts and review global plus per-user usage. It is built with FastAPI, SQLite, Vue 3 and Vite, with runtime data stored in the root-level `data/` directory by default.
+It separates API keys and usage data by user: each user can create and manage their own keys and inspect their own requests, tokens and cost statistics, while administrators can create or disable regular accounts and review global plus per-user usage. It is built with Go, SQLite, Vue 3 and Vite, with runtime data stored in the root-level `data/` directory by default.
 
 For clarity, model requests initiated by an Agent are still sent directly from that Agent to CPA. CPA Helper does not proxy or relay those requests; it only calls CPA management-style interfaces such as the usage queue, API key creation and deletion, and credential management for usage views, key management and credential maintenance.
 
@@ -38,7 +37,7 @@ For clarity, model requests initiated by an Agent are still sent directly from t
 - **Model pricing maintenance**: Maintain input, output, cached and reasoning prices in USD per million tokens; historical costs are recalculated with current prices.
 - **Available model aggregation**: Query available models through the current account's bound CPA API keys and enrich them with local pricing data.
 - **CLIProxyAPI / CPAMC integration**: Configure the service URL, management key, usage queue and local collector options to persist remote usage events into SQLite.
-- **Codex auth file inspection**: Support Cron scheduling, quota thresholds, dry-run mode, concurrent workers, priority rules, account enable/disable and deletion.
+- **Codex auth file inspection**: Support Cron scheduling, quota thresholds, check-only mode, concurrent workers, priority rules, account enable/disable and deletion.
 - **Local-first data storage**: Use SQLite and the `data/` directory by default, with `CPA_HELPER_DATA_DIR` available for overriding the runtime data path.
 - **Modern admin interface**: Built with Vue 3, Naive UI, ECharts and lucide icons, with light, dark and system theme modes.
 
@@ -124,7 +123,7 @@ View the current signed-in account and update the password.
 
 ## Tech Stack
 
-- **Backend**: FastAPI, SQLModel, SQLite, Alembic, httpx, croniter and uvicorn.
+- **Backend**: Go standard-library HTTP server, SQLite, robfig/cron and modernc.org/sqlite.
 - **Frontend**: Vue 3, Vite, TypeScript, Vue Router, Naive UI, ECharts and lucide-vue-next.
 - **Runtime data**: Stored in root-level `data/` by default; the SQLite database is `data/db/cpa_helper.sqlite3`.
 - **API shape**: The backend exposes `/api/*`; the Vite development server proxies API calls to `http://127.0.0.1:18317`.
@@ -133,11 +132,15 @@ View the current signed-in account and update the password.
 
 ```text
 CPA-Helper/
-├── backend/                 # FastAPI backend project
-│   ├── app/                 # APIs, services, models, configuration and database access
-│   ├── alembic/             # Alembic migrations
-│   ├── tests/               # Backend tests
-│   └── pyproject.toml       # Python project and dependency configuration
+├── backend/                 # Go backend project
+│   ├── cmd/cpa-helper/      # Application entrypoint
+│   ├── internal/app/        # App composition, routes, business logic and database access
+│   ├── internal/httpserver/ # HTTP server lifecycle and graceful shutdown
+│   ├── internal/platform/   # External-system infrastructure adapters
+│   ├── internal/security/   # Password, session and API-key security helpers
+│   ├── migrations/          # Embedded goose SQLite migrations
+│   ├── go.mod
+│   └── go.sum
 ├── frontend/                # Vue + Vite frontend project
 │   ├── src/                 # App, feature modules, shared utilities and styles
 │   ├── public/              # Static assets
@@ -152,8 +155,7 @@ CPA-Helper/
 
 ## Requirements
 
-- Python 3.12 or newer.
-- [uv](https://docs.astral.sh/uv/) for synchronizing the backend project environment.
+- Go 1.25 or newer.
 - Node.js 20 or newer.
 - npm.
 - An accessible CLIProxyAPI / CPA service. The default URL is `http://127.0.0.1:8317`.
@@ -207,9 +209,14 @@ Run all backend commands from `backend/`:
 
 ```powershell
 cd backend
-uv sync
-uv run alembic upgrade head
-uv run -m uvicorn app.main:app --host 0.0.0.0 --port 18317
+go mod download
+go run ./cmd/cpa-helper
+```
+
+For a local binary build, write the output to the ignored `backend/bin/` directory:
+
+```powershell
+go build -o bin/cpa-helper.exe ./cmd/cpa-helper
 ```
 
 Health check:
@@ -234,6 +241,14 @@ npm install
 npm run dev
 ```
 
+If a normal backend is already using `18317`, start the test backend on another
+port and point the Vite proxy to it:
+
+```powershell
+$env:CPA_HELPER_PROXY_TARGET="http://127.0.0.1:18318"
+npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
+```
+
 Open:
 
 ```text
@@ -244,7 +259,7 @@ On first visit, the application guides you through creating the first administra
 
 ### 5. Single-service preview or deployment
 
-To let FastAPI serve the frontend static files, build the frontend first:
+To let the Go backend serve the frontend static files, build the frontend first:
 
 ```powershell
 cd frontend
@@ -256,9 +271,7 @@ Then start the backend:
 
 ```powershell
 cd ../backend
-uv sync
-uv run alembic upgrade head
-uv run -m uvicorn app.main:app --host 0.0.0.0 --port 18317
+go run ./cmd/cpa-helper
 ```
 
 Open:
@@ -308,18 +321,45 @@ The Inspection Settings page manages Codex auth files:
 
 - Cron expressions define the automatic inspection schedule.
 - Quota thresholds decide when account priority should be degraded or restored.
-- Dry-run mode records planned actions without applying destructive changes.
+- Check-only mode records planned actions without disabling accounts or changing priorities.
 - Priority rules define default scheduling weights by account type.
 - The Account Status page shows health, quota, latest inspection, enabled state and manual priority.
 
 ## Development and Checks
 
+### Isolated Local Testing
+
+If a normal service is already running locally, do not reuse its ports or real
+data directory for tests. Start the backend with a temporary port and data
+directory:
+
+```powershell
+cd backend
+$env:CPA_HELPER_ADDR=":18318"
+$env:CPA_HELPER_DATA_DIR="$env:TEMP\cpa-helper-test-data"
+go run ./cmd/cpa-helper
+```
+
+Run the frontend test server on a separate port and point the Vite proxy at the
+test backend:
+
+```powershell
+cd frontend
+$env:CPA_HELPER_PROXY_TARGET="http://127.0.0.1:18318"
+npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
+```
+
+Automated validation should not use a real CPA URL or real management key by
+default. For account inspection, enable/disable, priority changes, or deletion
+flows, use a fake CLIProxyAPI / CPAMC test double and prefer check-only mode;
+connect to real CPA only after the risk is explicitly accepted.
+
 Backend:
 
 ```powershell
 cd backend
-uv run ruff check .
-uv run -m pytest
+go fmt ./...
+go test ./...
 ```
 
 Frontend:
@@ -330,21 +370,23 @@ npm run lint
 npm run build
 ```
 
-Database migrations:
+Database schema:
 
 ```powershell
 cd backend
-uv run alembic current
-uv run alembic upgrade head
+go test ./...
 ```
+
+The Go backend runs embedded goose SQLite migrations on startup; migration files live in `backend/migrations/`, and Alembic is no longer required.
+For Docker upgrades, keep mounting the existing `data/db/cpa_helper.sqlite3`; migration logic is packaged into the Go binary and does not read the old source tree.
 
 ## Contributing
 
 Issues and pull requests are welcome. Before submitting changes, please check:
 
-- Backend passes `uv run ruff check .` and `uv run -m pytest`.
+- Backend passes `go fmt ./...` and `go test ./...`.
 - Frontend passes `npm run lint` and `npm run build`.
-- Relational schema changes include Alembic migration files.
+- Relational schema changes add or update goose migrations under `backend/migrations/`.
 - Local runtime data, virtual environments, build outputs and secrets are not committed.
 
 ## Acknowledgements

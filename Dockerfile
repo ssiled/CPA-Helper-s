@@ -12,22 +12,31 @@ COPY frontend/ ./
 RUN npm run build
 
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS runtime
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PATH="/app/backend/.venv/bin:$PATH"
+FROM golang:1.26-bookworm AS backend-build
 
 WORKDIR /app/backend
 
-COPY backend/.python-version backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
 
 COPY backend/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cpa-helper ./cmd/cpa-helper
+
+
+FROM debian:bookworm-slim AS runtime
+
+ENV CPA_HELPER_DATA_DIR=/app/data \
+    CPA_HELPER_FRONTEND_DIST=/app/frontend/dist
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=backend-build /out/cpa-helper /app/cpa-helper
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 
 EXPOSE 18317
 
-CMD ["sh", "-c", "uv run --frozen --no-sync alembic upgrade head && uv run --frozen --no-sync -m uvicorn app.main:app --host 0.0.0.0 --port 18317"]
+CMD ["/app/cpa-helper"]

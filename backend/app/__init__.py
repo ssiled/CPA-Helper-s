@@ -1,2 +1,0 @@
-"""CPA Helper backend package."""
-
