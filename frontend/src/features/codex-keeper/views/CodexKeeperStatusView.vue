@@ -36,11 +36,15 @@ import { BEIJING_TIME_ZONE, formatDateTime, formatInteger } from '@/shared/utils
 type FixedPriorityFilter = 'all' | 'high' | 'minusOne' | 'low'
 type PriorityTypeFilter = `type:${string}`
 type PriorityFilter = FixedPriorityFilter | PriorityTypeFilter
+type AccountStatusFilter = 'all' | 'enabled' | 'disabled' | 'error'
+type AccountDisplaySize = 50 | 100 | 150 | 200 | 'all'
 type PriorityMode = 'low' | 'high' | 'default'
 type AccountAction = 'toggle' | 'priority' | 'delete'
 type QuotaWindowItem = { label: string; remainingPercent: number; resetAt: string | null }
 
-const accountTablePagination = { pageSize: 18, pageSlot: 7 }
+const ACCOUNT_TABLE_MIN_ROW_HEIGHT = 52
+const ACCOUNT_TABLE_MAX_HEIGHT = 'min(620px, max(320px, calc(100dvh - 430px)))'
+const ACCOUNT_TABLE_VIRTUAL_THRESHOLD = 200
 const disabledTableScrollX = 1810
 const normalTableScrollX = 1770
 const message = useMessage()
@@ -52,10 +56,12 @@ const priorityRules = ref<CodexKeeperPriorityRule[]>([])
 const selectedAccount = ref<CodexKeeperAccount | null>(null)
 const selectedDisabledAccountKeys = ref<DataTableRowKey[]>([])
 const detailOpen = ref(false)
+const accountDisplaySize = ref<AccountDisplaySize>(50)
 const filters = reactive({
   keyword: '',
   accountType: null as string | null,
   priority: 'all' as PriorityFilter,
+  status: 'all' as AccountStatusFilter,
 })
 const bulkDeleteDialog = reactive({
   show: false,
@@ -88,6 +94,13 @@ const priorityFilterOptions = computed<Array<{ label: string; value: PriorityFil
   { label: '临时降级 -1', value: 'minusOne' },
   { label: '手动低优先 <-1', value: 'low' },
 ])
+const accountDisplaySizeOptions: Array<{ label: string; value: AccountDisplaySize }> = [
+  { label: '50', value: 50 },
+  { label: '100', value: 100 },
+  { label: '150', value: 150 },
+  { label: '200', value: 200 },
+  { label: '全部', value: 'all' },
+]
 
 const accountTypeOptions = computed(() =>
   [...new Set(accounts.value.map((item) => item.account_type).filter(Boolean))]
@@ -107,7 +120,7 @@ const filteredAccounts = computed(() =>
     if (filters.accountType && account.account_type !== filters.accountType) {
       return false
     }
-    return matchesPriorityFilter(account, filters.priority)
+    return matchesPriorityFilter(account, filters.priority) && matchesStatusFilter(account, filters.status)
   }),
 )
 const filteredDisabledAccounts = computed(() =>
@@ -120,7 +133,11 @@ const tableLoading = computed(() => isLoading.value)
 const enabledAccountCount = computed(() => accounts.value.filter((account) => !account.disabled).length)
 const disabledAccountCount = computed(() => accounts.value.filter((account) => account.disabled).length)
 const hasDisabledAccounts = computed(() => disabledAccountCount.value > 0)
-const errorAccountCount = computed(() => accounts.value.filter((account) => account.last_error).length)
+const errorAccountCount = computed(() => accounts.value.filter(hasAccountError).length)
+const showDisabledSection = computed(
+  () => filters.status !== 'enabled' && (hasDisabledAccounts.value || filters.status === 'disabled'),
+)
+const showNormalSection = computed(() => filters.status !== 'disabled')
 const systemPriorityCount = computed(
   () =>
     accounts.value.filter(
@@ -137,11 +154,42 @@ const activeFilterCount = computed(
   () =>
     Number(filters.keyword.trim() !== '') +
     Number(filters.accountType !== null) +
-    Number(filters.priority !== 'all'),
+    Number(filters.priority !== 'all') +
+    Number(filters.status !== 'all'),
 )
-const disabledAccountPagination = computed(() =>
-  filteredDisabledAccounts.value.length > 8 ? { pageSize: 8, pageSlot: 5 } : false,
+const isDisplayAllAccounts = computed(() => accountDisplaySize.value === 'all')
+const disabledTableDisplayProps = computed(() =>
+  accountTableDisplayProps(visibleDisabledAccounts.value.length),
 )
+const normalTableDisplayProps = computed(() =>
+  accountTableDisplayProps(visibleNormalAccounts.value.length),
+)
+const displayLimit = computed(() =>
+  accountDisplaySize.value === 'all' ? Number.POSITIVE_INFINITY : accountDisplaySize.value,
+)
+const visibleDisabledAccounts = computed(() =>
+  filteredDisabledAccounts.value.slice(0, displayLimit.value),
+)
+const visibleNormalAccounts = computed(() =>
+  filteredNormalAccounts.value.slice(0, displayLimit.value),
+)
+const displaySizeHelpText = computed(() =>
+  isDisplayAllAccounts.value
+    ? '当前筛选结果全部展示，账号较多时自动使用虚拟滚动。'
+    : `每个分组最多显示 ${accountDisplaySize.value} 个账号。`,
+)
+
+function accountTableDisplayProps(rowCount: number) {
+  return isDisplayAllAccounts.value && rowCount > ACCOUNT_TABLE_VIRTUAL_THRESHOLD
+    ? {
+        virtualScroll: true,
+        maxHeight: ACCOUNT_TABLE_MAX_HEIGHT,
+        minRowHeight: ACCOUNT_TABLE_MIN_ROW_HEIGHT,
+      }
+    : {
+        virtualScroll: false,
+      }
+}
 const selectedDisabledAccountNames = computed(() =>
   selectedDisabledAccountKeys.value.map((key) => String(key)),
 )
@@ -217,6 +265,31 @@ function matchesPriorityFilter(account: CodexKeeperAccount, value: PriorityFilte
     )
   }
   return true
+}
+
+function matchesStatusFilter(account: CodexKeeperAccount, value: AccountStatusFilter): boolean {
+  if (value === 'enabled') {
+    return !account.disabled
+  }
+  if (value === 'disabled') {
+    return account.disabled
+  }
+  if (value === 'error') {
+    return hasAccountError(account)
+  }
+  return true
+}
+
+function hasAccountError(account: CodexKeeperAccount): boolean {
+  return (account.last_error?.trim() ?? '') !== ''
+}
+
+function toggleStatusFilter(value: Exclude<AccountStatusFilter, 'all'>) {
+  filters.status = filters.status === value ? 'all' : value
+}
+
+function isStatusFilterActive(value: Exclude<AccountStatusFilter, 'all'>): boolean {
+  return filters.status === value
 }
 
 function accountPriority(account: CodexKeeperAccount): number {
@@ -405,7 +478,7 @@ function handleDisabledSelectionUpdate(keys: DataTableRowKey[]) {
 }
 
 function pruneSelectedDisabledAccountKeys() {
-  const availableNames = new Set(filteredDisabledAccounts.value.map((account) => account.name))
+  const availableNames = new Set(visibleDisabledAccounts.value.map((account) => account.name))
   selectedDisabledAccountKeys.value = selectedDisabledAccountKeys.value.filter((key) =>
     availableNames.has(String(key)),
   )
@@ -743,7 +816,7 @@ const normalColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
   normalActionColumn,
 ])
 
-watch(filteredDisabledAccounts, pruneSelectedDisabledAccountKeys)
+watch(visibleDisabledAccounts, pruneSelectedDisabledAccountKeys)
 
 onMounted(loadAccounts)
 </script>
@@ -774,30 +847,48 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(accounts.length) }}</div>
         <div class="metric-footnote">全部 auth file</div>
       </div>
-      <div class="metric-card is-success">
+      <button
+        type="button"
+        class="metric-card metric-action is-success"
+        :class="{ 'is-active': isStatusFilterActive('enabled') }"
+        :aria-pressed="isStatusFilterActive('enabled')"
+        @click="toggleStatusFilter('enabled')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <Activity :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">启用中</div>
         <div class="metric-value">{{ formatInteger(enabledAccountCount) }}</div>
         <div class="metric-footnote">可参与调度</div>
-      </div>
-      <div class="metric-card is-warning">
+      </button>
+      <button
+        type="button"
+        class="metric-card metric-action is-warning"
+        :class="{ 'is-active': isStatusFilterActive('disabled') }"
+        :aria-pressed="isStatusFilterActive('disabled')"
+        @click="toggleStatusFilter('disabled')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <PauseCircle :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">已禁用</div>
         <div class="metric-value">{{ formatInteger(disabledAccountCount) }}</div>
         <div class="metric-footnote">停用账号</div>
-      </div>
-      <div class="metric-card is-danger">
+      </button>
+      <button
+        type="button"
+        class="metric-card metric-action is-danger"
+        :class="{ 'is-active': isStatusFilterActive('error') }"
+        :aria-pressed="isStatusFilterActive('error')"
+        @click="toggleStatusFilter('error')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <AlertTriangle :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">检测异常</div>
         <div class="metric-value">{{ formatInteger(errorAccountCount) }}</div>
         <div class="metric-footnote">最近错误</div>
-      </div>
+      </button>
       <div class="metric-card">
         <div class="metric-icon" aria-hidden="true">
           <Gauge :size="20" :stroke-width="2.2" />
@@ -849,12 +940,12 @@ onMounted(loadAccounts)
       </div>
 
       <div class="account-sections">
-        <section v-if="hasDisabledAccounts" class="account-section">
+        <section v-if="showDisabledSection" class="account-section">
           <div class="account-section-header">
             <div class="account-section-title-group">
               <h3 class="account-section-title">已禁用账号</h3>
               <p class="account-section-subtitle">
-                显示 {{ filteredDisabledAccounts.length }} / {{ disabledAccountCount }} 个账号
+                显示 {{ visibleDisabledAccounts.length }} / {{ filteredDisabledAccounts.length }} 个账号
               </p>
             </div>
             <div class="account-section-actions">
@@ -874,10 +965,11 @@ onMounted(loadAccounts)
             size="small"
             :loading="tableLoading"
             :columns="disabledColumns"
-            :data="filteredDisabledAccounts"
+            :data="visibleDisabledAccounts"
             :row-key="accountRowKey"
             :checked-row-keys="selectedDisabledAccountKeys"
-            :pagination="disabledAccountPagination"
+            :pagination="false"
+            v-bind="disabledTableDisplayProps"
             table-layout="fixed"
             :scroll-x="disabledTableScrollX"
             @update:checked-row-keys="handleDisabledSelectionUpdate"
@@ -888,12 +980,12 @@ onMounted(loadAccounts)
           </NDataTable>
         </section>
 
-        <section class="account-section">
+        <section v-if="showNormalSection" class="account-section">
           <div class="account-section-header">
             <div class="account-section-title-group">
               <h3 class="account-section-title">正常账号</h3>
               <p class="account-section-subtitle">
-                显示 {{ filteredNormalAccounts.length }} / {{ enabledAccountCount }} 个账号
+                显示 {{ visibleNormalAccounts.length }} / {{ filteredNormalAccounts.length }} 个账号
               </p>
             </div>
           </div>
@@ -902,16 +994,30 @@ onMounted(loadAccounts)
             size="small"
             :loading="tableLoading"
             :columns="normalColumns"
-            :data="filteredNormalAccounts"
-            :pagination="accountTablePagination"
+            :data="visibleNormalAccounts"
+            :pagination="false"
+            v-bind="normalTableDisplayProps"
             table-layout="fixed"
             :scroll-x="normalTableScrollX"
           >
             <template #empty>
-              <div class="empty-state">暂无正常账号</div>
+              <div class="empty-state">当前筛选下暂无正常账号</div>
             </template>
           </NDataTable>
         </section>
+      </div>
+
+      <div class="display-control-row">
+        <div class="display-control-copy">
+          <span class="display-control-label">展示数量</span>
+          <span class="display-control-help">{{ displaySizeHelpText }}</span>
+        </div>
+        <NSelect
+          v-model:value="accountDisplaySize"
+          class="display-size-select"
+          size="small"
+          :options="accountDisplaySizeOptions"
+        />
       </div>
     </section>
 
@@ -1032,6 +1138,33 @@ onMounted(loadAccounts)
   padding: 14px 12px;
 }
 
+.account-metrics .metric-action {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.account-metrics .metric-action:hover {
+  border-color: color-mix(in srgb, var(--metric-color, var(--cpa-primary)) 45%, var(--cpa-border));
+  transform: translateY(-1px);
+}
+
+.account-metrics .metric-action:focus-visible {
+  outline: 2px solid var(--metric-color, var(--cpa-primary));
+  outline-offset: 3px;
+}
+
+.account-metrics .metric-action.is-active {
+  border-color: color-mix(in srgb, var(--metric-color, var(--cpa-primary)) 65%, var(--cpa-border));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--metric-color, var(--cpa-primary)) 16%, transparent),
+    var(--cpa-shadow-card),
+    var(--cpa-shadow-hairline);
+}
+
 .account-metrics .metric-value {
   font-size: 20px;
 }
@@ -1078,6 +1211,42 @@ onMounted(loadAccounts)
   display: grid;
   gap: 14px;
   padding: 14px;
+}
+
+.display-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--cpa-border);
+  background: var(--cpa-surface-raised);
+}
+
+.display-control-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.display-control-label {
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.display-control-help {
+  min-width: 0;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+}
+
+.display-size-select {
+  flex-shrink: 0;
+  width: 112px;
 }
 
 .account-section {
