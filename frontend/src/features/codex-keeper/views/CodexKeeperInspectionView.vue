@@ -17,10 +17,10 @@ import {
 } from 'naive-ui'
 import {
   Activity,
-  AlertTriangle,
   Copy,
   Gauge,
-  Network,
+  PauseCircle,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   Users,
@@ -30,6 +30,7 @@ import {
   clearCodexKeeperLogs,
   getCodexKeeperSettings,
   getCodexKeeperStatus,
+  listCodexKeeperAccounts,
   previewCodexKeeperSchedule,
   runCodexKeeperOnce,
   startCodexKeeper,
@@ -37,6 +38,7 @@ import {
   updateCodexKeeperSettings,
 } from '@/features/codex-keeper/api/codexKeeperApi'
 import type {
+  CodexKeeperAccount,
   CodexKeeperPriorityRule,
   CodexKeeperSettingsUpdatePayload,
   CodexKeeperStatus,
@@ -61,6 +63,7 @@ const isLoading = ref(false)
 const isSaving = ref(false)
 const isActing = ref(false)
 const status = ref<CodexKeeperStatus | null>(null)
+const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
 const nextRunTimes = ref<string[]>([])
 const schedulePreviewError = ref('')
@@ -90,7 +93,15 @@ const form = reactive({
   auto_start_daemon: false,
 })
 
-const stats = computed(() => status.value?.stats)
+const accountTotalCount = computed(() => accounts.value.length)
+const enabledAccountCount = computed(() => accounts.value.filter((account) => !account.disabled).length)
+const disabledAccountCount = computed(() => accounts.value.filter((account) => account.disabled).length)
+const unauthorizedErrorAccountCount = computed(
+  () => accounts.value.filter((account) => account.last_status_code === 401).length,
+)
+const quotaExhaustedAccountCount = computed(
+  () => accounts.value.filter((account) => (account.priority ?? 0) === -1).length,
+)
 const isRunning = computed(() => status.value?.running === true)
 const runningModes = computed(() => new Set(status.value?.running_modes ?? []))
 const isDaemonRunning = computed(() => status.value?.daemon_running === true)
@@ -171,12 +182,14 @@ function applySettings(nextSettings: Awaited<ReturnType<typeof getCodexKeeperSet
 async function loadAll() {
   isLoading.value = true
   try {
-    const [settings, nextStatus] = await Promise.all([
+    const [settings, nextStatus, accountResponse] = await Promise.all([
       getCodexKeeperSettings(),
       getCodexKeeperStatus(),
+      listCodexKeeperAccounts(),
     ])
     applySettings(settings)
     status.value = nextStatus
+    accounts.value = accountResponse.items
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载账号巡检失败')
   } finally {
@@ -186,7 +199,12 @@ async function loadAll() {
 
 async function loadStatus() {
   try {
-    status.value = await getCodexKeeperStatus()
+    const [nextStatus, accountResponse] = await Promise.all([
+      getCodexKeeperStatus(),
+      listCodexKeeperAccounts(),
+    ])
+    status.value = nextStatus
+    accounts.value = accountResponse.items
   } catch {
     return
   }
@@ -512,40 +530,40 @@ onBeforeUnmount(() => {
           <Users :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">账号总数</div>
-        <div class="metric-value">{{ formatInteger(stats?.total ?? 0) }}</div>
-        <div class="metric-footnote">纳入巡检</div>
+        <div class="metric-value">{{ formatInteger(accountTotalCount) }}</div>
+        <div class="metric-footnote">全部 auth file</div>
       </div>
       <div class="metric-card is-green">
         <div class="metric-icon" aria-hidden="true">
           <ShieldCheck :size="20" :stroke-width="2.2" />
         </div>
-        <div class="metric-label">健康账号</div>
-        <div class="metric-value">{{ formatInteger(stats?.healthy ?? 0) }}</div>
-        <div class="metric-footnote">最近通过</div>
+        <div class="metric-label">启用中</div>
+        <div class="metric-value">{{ formatInteger(enabledAccountCount) }}</div>
+        <div class="metric-footnote">可参与调度</div>
       </div>
-      <div class="metric-card is-orange">
+      <div class="metric-card is-warning">
         <div class="metric-icon" aria-hidden="true">
-          <AlertTriangle :size="20" :stroke-width="2.2" />
+          <PauseCircle :size="20" :stroke-width="2.2" />
         </div>
-        <div class="metric-label">坏凭证禁用</div>
-        <div class="metric-value">{{ formatInteger(stats?.status_disabled ?? 0) }}</div>
-        <div class="metric-footnote">自动处理</div>
+        <div class="metric-label">已禁用</div>
+        <div class="metric-value">{{ formatInteger(disabledAccountCount) }}</div>
+        <div class="metric-footnote">停用账号</div>
+      </div>
+      <div class="metric-card is-danger">
+        <div class="metric-icon" aria-hidden="true">
+          <ShieldAlert :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">401报错</div>
+        <div class="metric-value">{{ formatInteger(unauthorizedErrorAccountCount) }}</div>
+        <div class="metric-footnote">HTTP 401</div>
       </div>
       <div class="metric-card is-purple">
         <div class="metric-icon" aria-hidden="true">
           <Gauge :size="20" :stroke-width="2.2" />
         </div>
-        <div class="metric-label">优先级降级</div>
-        <div class="metric-value">{{ formatInteger(stats?.priority_degraded ?? 0) }}</div>
-        <div class="metric-footnote">额度保护</div>
-      </div>
-      <div class="metric-card is-red">
-        <div class="metric-icon" aria-hidden="true">
-          <Network :size="20" :stroke-width="2.2" />
-        </div>
-        <div class="metric-label">网络错误</div>
-        <div class="metric-value">{{ formatInteger(stats?.network_error ?? 0) }}</div>
-        <div class="metric-footnote">本轮异常</div>
+        <div class="metric-label">额度耗尽</div>
+        <div class="metric-value">{{ formatInteger(quotaExhaustedAccountCount) }}</div>
+        <div class="metric-footnote">临时降级</div>
       </div>
     </div>
 

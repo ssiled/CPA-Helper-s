@@ -22,7 +22,6 @@ import {
 } from 'naive-ui'
 import {
   Activity,
-  AlertTriangle,
   ArrowLeft,
   BarChart3,
   ChevronDown,
@@ -30,10 +29,11 @@ import {
   Gauge,
   PauseCircle,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
   Table2,
   Trash2,
   Users,
-  Zap,
 } from 'lucide-vue-next'
 
 import {
@@ -51,6 +51,7 @@ import type {
   CodexKeeperAccount,
   CodexKeeperPriorityRule,
   CodexKeeperQuotaWindowUsage,
+  CodexKeeperStatus,
 } from '@/shared/types/api'
 import {
   BEIJING_TIME_ZONE,
@@ -63,7 +64,7 @@ import {
 type FixedPriorityFilter = 'all' | 'high' | 'minusOne' | 'low'
 type PriorityTypeFilter = `type:${string}`
 type PriorityFilter = FixedPriorityFilter | PriorityTypeFilter
-type AccountStatusFilter = 'all' | 'enabled' | 'disabled' | 'error'
+type AccountStatusFilter = 'all' | 'enabled' | 'disabled'
 type AccountDisplaySize = 50 | 100 | 150 | 200 | 'all'
 type AccountListViewMode = 'table' | 'bar' | 'ring'
 type AccountSortKey = 'quotaDay' | 'quotaWeek' | 'accountType' | 'status' | 'priority' | 'lastCheckedAt'
@@ -93,6 +94,7 @@ const ACCOUNT_TABLE_MAX_HEIGHT = 'min(620px, max(320px, calc(100dvh - 430px)))'
 const ACCOUNT_TABLE_VIRTUAL_THRESHOLD = 200
 const disabledTableScrollX = 1302
 const normalTableScrollX = 1816
+const KEEPER_STATUS_POLL_INTERVAL_MS = 3000
 const REFRESH_STATUS_POLL_INTERVAL_MS = 1500
 const message = useMessage()
 const isLoading = ref(false)
@@ -101,6 +103,7 @@ const isBulkRefreshing = ref(false)
 const actingActions = ref<Set<string>>(new Set())
 const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
+const keeperStatus = ref<CodexKeeperStatus | null>(null)
 const selectedAccount = ref<CodexKeeperAccount | null>(null)
 const selectedDisabledAccountKeys = ref<DataTableRowKey[]>([])
 const refreshSelectMode = ref(false)
@@ -141,6 +144,7 @@ const priorityDialog = reactive({
   value: null as number | null,
 })
 let refreshPollToken = 0
+let keeperStatusTimer: number | undefined
 
 const priorityRuleMap = computed(() =>
   Object.fromEntries(priorityRules.value.map((rule) => [rule.account_type, rule.priority])),
@@ -160,7 +164,7 @@ const priorityFilterOptions = computed<Array<{ label: string; value: PriorityFil
       label: `${formatInteger(rule.priority)} (${rule.account_type})`,
       value: priorityTypeFilter(rule.account_type),
     })),
-  { label: '临时降级 -1', value: 'minusOne' },
+  { label: '临时降级', value: 'minusOne' },
   { label: '手动低优先 <-1', value: 'low' },
 ])
 const accountDisplaySizeOptions: Array<{ label: string; value: AccountDisplaySize }> = [
@@ -214,22 +218,46 @@ const tableLoading = computed(() => isLoading.value)
 const enabledAccountCount = computed(() => accounts.value.filter((account) => !account.disabled).length)
 const disabledAccountCount = computed(() => accounts.value.filter((account) => account.disabled).length)
 const hasDisabledAccounts = computed(() => disabledAccountCount.value > 0)
-const errorAccountCount = computed(() => accounts.value.filter(hasAccountError).length)
 const showDisabledSection = computed(
   () => filters.status !== 'enabled' && (hasDisabledAccounts.value || filters.status === 'disabled'),
 )
 const showNormalSection = computed(() => filters.status !== 'disabled')
-const systemPriorityCount = computed(
-  () =>
-    accounts.value.filter(
-      (account) =>
-        !account.disabled &&
-        accountPriority(account) >= -1 &&
-        accountPriority(account) <= 20,
-    ).length,
+const isKeeperRunning = computed(() => keeperStatus.value?.running === true)
+const isKeeperDaemonRunning = computed(() => keeperStatus.value?.daemon_running === true)
+const keeperStateType = computed(() => {
+  if (isKeeperRunning.value || isKeeperDaemonRunning.value) {
+    return 'success'
+  }
+  if (keeperStatus.value?.state === 'error' || keeperStatus.value?.state === 'failed') {
+    return 'error'
+  }
+  if (keeperStatus.value?.state === 'stopping') {
+    return 'warning'
+  }
+  return 'default'
+})
+const keeperStatusDetailText = computed(() => {
+  const detail = keeperStatus.value?.detail
+  if (isKeeperDaemonRunning.value && !isKeeperRunning.value) {
+    return '自动巡检已开启'
+  }
+  if (!detail) {
+    return '未运行'
+  }
+  return detail
+    .replace(/守护运行中/g, '自动巡检运行中')
+    .replace(/守护进程/g, '后台自动巡检')
+    .replace(/守护任务/g, '自动巡检任务')
+    .replace(/守护已启动/g, '已开始自动巡检')
+})
+const keeperStatusFootnoteText = computed(() =>
+  isKeeperDaemonRunning.value ? '等待 Cron 调度' : '后台自动巡检',
 )
-const highPriorityCount = computed(
-  () => accounts.value.filter((account) => accountPriority(account) > 20).length,
+const unauthorizedErrorAccountCount = computed(
+  () => accounts.value.filter((account) => account.last_status_code === 401).length,
+)
+const quotaExhaustedAccountCount = computed(
+  () => accounts.value.filter((account) => accountPriority(account) === -1).length,
 )
 const activeFilterCount = computed(
   () =>
@@ -586,9 +614,6 @@ function matchesStatusFilter(account: CodexKeeperAccount, value: AccountStatusFi
   }
   if (value === 'disabled') {
     return account.disabled
-  }
-  if (value === 'error') {
-    return hasAccountError(account)
   }
   return true
 }
@@ -1095,16 +1120,26 @@ function renderLatestActionCell(account: CodexKeeperAccount) {
 async function loadAccounts() {
   isLoading.value = true
   try {
-    const [accountsResponse, settings] = await Promise.all([
+    const [accountsResponse, settings, nextStatus] = await Promise.all([
       listCodexKeeperAccounts(),
       getCodexKeeperSettings(),
+      getCodexKeeperStatus(),
     ])
     accounts.value = accountsResponse.items
     priorityRules.value = settings.priority_rules
+    keeperStatus.value = nextStatus
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载账号状态失败')
   } finally {
     isLoading.value = false
+  }
+}
+
+async function loadKeeperStatus() {
+  try {
+    keeperStatus.value = await getCodexKeeperStatus()
+  } catch {
+    return
   }
 }
 
@@ -1407,6 +1442,7 @@ async function pollRefreshUntilIdle() {
     }
     try {
       const status = await getCodexKeeperStatus()
+      keeperStatus.value = status
       const runningModes = status.running_modes ?? []
       const accountRefreshRunning =
         runningModes.length > 0 ? runningModes.includes('accounts') : status.running
@@ -1709,10 +1745,18 @@ watch(
 watch(visibleDisabledAccounts, pruneSelectedDisabledAccountKeys)
 watch(filteredAccounts, pruneSelectedRefreshAccountNames)
 
-onMounted(loadAccounts)
+onMounted(() => {
+  void loadAccounts()
+  keeperStatusTimer = window.setInterval(() => {
+    void loadKeeperStatus()
+  }, KEEPER_STATUS_POLL_INTERVAL_MS)
+})
 
 onBeforeUnmount(() => {
   refreshPollToken += 1
+  if (keeperStatusTimer !== undefined) {
+    window.clearInterval(keeperStatusTimer)
+  }
 })
 </script>
 
@@ -1736,6 +1780,18 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="metric-grid account-metrics">
+      <div class="metric-card inspection-status-card">
+        <div class="metric-icon" aria-hidden="true">
+          <Activity :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">运行状态</div>
+        <div class="metric-value inspection-status-value" :title="keeperStatusDetailText">
+          <NTag class="inspection-status-tag" :type="keeperStateType" size="small" :bordered="false">
+            {{ keeperStatusDetailText }}
+          </NTag>
+        </div>
+        <div class="metric-footnote">{{ keeperStatusFootnoteText }}</div>
+      </div>
       <div class="metric-card">
         <div class="metric-icon" aria-hidden="true">
           <Users :size="20" :stroke-width="2.2" />
@@ -1746,13 +1802,13 @@ onBeforeUnmount(() => {
       </div>
       <button
         type="button"
-        class="metric-card metric-action is-success"
+        class="metric-card metric-action is-green"
         :class="{ 'is-active': isStatusFilterActive('enabled') }"
         :aria-pressed="isStatusFilterActive('enabled')"
         @click="toggleStatusFilter('enabled')"
       >
         <div class="metric-icon" aria-hidden="true">
-          <Activity :size="20" :stroke-width="2.2" />
+          <ShieldCheck :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">启用中</div>
         <div class="metric-value">{{ formatInteger(enabledAccountCount) }}</div>
@@ -1772,35 +1828,21 @@ onBeforeUnmount(() => {
         <div class="metric-value">{{ formatInteger(disabledAccountCount) }}</div>
         <div class="metric-footnote">停用账号</div>
       </button>
-      <button
-        type="button"
-        class="metric-card metric-action is-danger"
-        :class="{ 'is-active': isStatusFilterActive('error') }"
-        :aria-pressed="isStatusFilterActive('error')"
-        @click="toggleStatusFilter('error')"
-      >
+      <div class="metric-card is-danger">
         <div class="metric-icon" aria-hidden="true">
-          <AlertTriangle :size="20" :stroke-width="2.2" />
+          <ShieldAlert :size="20" :stroke-width="2.2" />
         </div>
-        <div class="metric-label">检测异常</div>
-        <div class="metric-value">{{ formatInteger(errorAccountCount) }}</div>
-        <div class="metric-footnote">最近错误</div>
-      </button>
-      <div class="metric-card">
+        <div class="metric-label">401报错</div>
+        <div class="metric-value">{{ formatInteger(unauthorizedErrorAccountCount) }}</div>
+        <div class="metric-footnote">HTTP 401</div>
+      </div>
+      <div class="metric-card is-purple">
         <div class="metric-icon" aria-hidden="true">
           <Gauge :size="20" :stroke-width="2.2" />
         </div>
-        <div class="metric-label">巡检托管</div>
-        <div class="metric-value">{{ formatInteger(systemPriorityCount) }}</div>
-        <div class="metric-footnote">类型默认</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-icon" aria-hidden="true">
-          <Zap :size="20" :stroke-width="2.2" />
-        </div>
-        <div class="metric-label">手动优先</div>
-        <div class="metric-value">{{ formatInteger(highPriorityCount) }}</div>
-        <div class="metric-footnote">高优先级</div>
+        <div class="metric-label">额度耗尽</div>
+        <div class="metric-value">{{ formatInteger(quotaExhaustedAccountCount) }}</div>
+        <div class="metric-footnote">临时降级</div>
       </div>
     </div>
 
@@ -2489,6 +2531,35 @@ onBeforeUnmount(() => {
 
 .account-metrics .metric-value {
   font-size: 20px;
+}
+
+.inspection-status-card {
+  min-width: 0;
+}
+
+.inspection-status-value {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.inspection-status-tag {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.inspection-status-value :deep(.n-tag) {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.inspection-status-value :deep(.n-tag__content) {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-toolbar {
