@@ -3230,13 +3230,23 @@ onBeforeUnmount(() => {
 }
 
 .card-quota-ring-item {
+  --quota-ring-item-bg: color-mix(
+    in srgb,
+    var(--account-card-accent) 7%,
+    var(--account-card-inner-bg)
+  );
+  --quota-ring-item-border: color-mix(
+    in srgb,
+    var(--account-card-accent) 16%,
+    var(--account-card-inner-border)
+  );
   display: grid;
   grid-template-columns: 1fr;
   gap: 8px;
   min-width: 0;
   padding: 8px;
-  background: color-mix(in srgb, var(--cpa-surface-muted) 72%, var(--cpa-surface-raised));
-  border: 1px solid color-mix(in srgb, var(--cpa-border) 72%, transparent);
+  background: var(--quota-ring-item-bg);
+  border: 1px solid var(--quota-ring-item-border);
   border-radius: var(--cpa-radius-sm);
 }
 
@@ -3274,7 +3284,7 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 5px;
   content: "";
-  background: var(--cpa-surface-raised);
+  background: var(--quota-ring-item-bg, var(--account-card-inner-bg));
   border-radius: inherit;
 }
 
