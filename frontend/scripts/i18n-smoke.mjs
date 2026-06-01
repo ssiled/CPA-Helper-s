@@ -54,6 +54,8 @@ async function loadI18nWithBrowserStubs(options) {
 }
 
 try {
+  installBrowserStubs({ browserLanguages: ['en-US'] })
+
   let {
     localizedApiErrorMessage,
     localizedKeeperStatusDetail,
@@ -132,5 +134,6 @@ try {
   await server.close()
   delete globalThis.fetch
   delete globalThis.localStorage
+  delete globalThis.navigator
   delete globalThis.document
 }
