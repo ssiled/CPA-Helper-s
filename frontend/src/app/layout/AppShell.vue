@@ -32,6 +32,7 @@ import {
   Moon,
   Settings,
   Shield,
+  Store,
   Sun,
   UserRound,
   Users,
@@ -122,6 +123,7 @@ const adminMenuItems = computed<MenuOption[]>(() => [
   { label: t('请求明细', 'Request Records'), key: '/admin/records', icon: renderIcon(List) },
   { label: t('用户管理', 'Users'), key: '/admin/users', icon: renderIcon(Users) },
   { label: t('模型价格', 'Model Prices'), key: '/admin/pricing', icon: renderIcon(DollarSign) },
+  { label: t('卡网收录', 'Card Shops'), key: '/admin/card-shops', icon: renderIcon(Store) },
   { label: t('系统设置', 'System Settings'), key: '/admin/settings', icon: renderIcon(Settings) },
 ])
 
@@ -172,7 +174,7 @@ const menuOptions = computed<MenuOption[]>(() => {
   if (isAdmin.value) {
     groups.push({
       type: 'group',
-      label: t('统计中心', 'Analytics'),
+      label: t('管理中心', 'Admin Center'),
       key: 'admin-group',
       icon: renderIcon(Shield),
       children: adminMenuItems.value,
