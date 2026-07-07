@@ -90,6 +90,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testColumnExists(t, app.db, "user_card_shop_tags", "position") {
 		t.Fatal("user_card_shop_tags.position was not created")
 	}
+	if !testColumnExists(t, app.db, "codex_keeper_auth_states", "auth_index") {
+		t.Fatal("codex_keeper_auth_states.auth_index was not created")
+	}
 	if testColumnExists(t, app.db, "user_quota_charges", "total_deducted_usd") {
 		t.Fatal("old user_quota_charges.total_deducted_usd should not exist")
 	}
@@ -249,6 +252,9 @@ func TestRunMigrationsRepairsOldPythonSchemaWithoutOldCode(t *testing.T) {
 	}
 	if testTableExists(t, app.db, "alembic_version") {
 		t.Fatal("old alembic_version table should be removed")
+	}
+	if !testColumnExists(t, app.db, "codex_keeper_auth_states", "auth_index") {
+		t.Fatal("old schema migration did not create codex_keeper_auth_states.auth_index")
 	}
 
 	var username, storedAPIKey, usageUsername string
