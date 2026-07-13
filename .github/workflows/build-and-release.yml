@@ -285,7 +285,12 @@ jobs:
             exit 1
           fi
 
+          notes_args=(--generate-notes)
+          if [ -f RELEASE_NOTES.md ]; then
+            notes_args=(--notes-file RELEASE_NOTES.md)
+          fi
+
           gh release create "$APP_TAG" release/* \
             --target "$GITHUB_SHA" \
             --title "CPA-Helper $APP_TAG" \
-            --generate-notes
+            "${notes_args[@]}"
