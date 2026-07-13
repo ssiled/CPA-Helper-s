@@ -132,6 +132,7 @@ func (a *App) handleCardShopTags(w http.ResponseWriter, r *http.Request) error {
 func fetchCardShops(ctx context.Context) ([]map[string]any, error) {
 	headers := http.Header{}
 	headers.Set("Accept", "application/json")
+	headers.Set("User-Agent", "CPA-Helper/1.0 (+https://github.com/ssiled/CPA-Helper-s)")
 	response, payload, err := doJSON(ctx, httpClient(cardShopsTimeout), http.MethodGet, cardShopsSourceURL(), headers, nil)
 	if err != nil {
 		return nil, appError("upstream_error", http.StatusBadGateway, "卡网收录数据源暂时不可用")
@@ -160,7 +161,58 @@ func fetchCardShops(ctx context.Context) ([]map[string]any, error) {
 	if shops == nil {
 		shops = []map[string]any{}
 	}
+	normalizeCardShopProductItems(shops)
 	return shops, nil
+}
+
+func normalizeCardShopProductItems(shops []map[string]any) {
+	for _, shop := range shops {
+		if len(anySlice(shop["productItems"])) > 0 {
+			continue
+		}
+
+		items := cardShopPreviewItems(shop)
+		if len(items) == 0 {
+			continue
+		}
+		shop["productItems"] = items
+	}
+}
+
+func cardShopPreviewItems(shop map[string]any) []map[string]any {
+	summary, ok := shop["productSummary"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	items := []map[string]any{}
+	for _, rawGroup := range anySlice(summary["groups"]) {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			continue
+		}
+		groupName, _ := group["group"].(string)
+		for _, rawItem := range anySlice(group["previewItems"]) {
+			item, ok := rawItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			product := make(map[string]any, len(item)+1)
+			for key, value := range item {
+				product[key] = value
+			}
+			if _, exists := product["group"]; !exists && strings.TrimSpace(groupName) != "" {
+				product["group"] = groupName
+			}
+			items = append(items, product)
+		}
+	}
+	return items
+}
+
+func anySlice(value any) []any {
+	items, _ := value.([]any)
+	return items
 }
 
 func cardShopsSourceURL() string {

@@ -22,6 +22,9 @@ func TestCardShopsProxyReturnsUpstreamShopsForAdmin(t *testing.T) {
 		if got := r.Header.Get("Accept"); got != "application/json" {
 			t.Fatalf("Accept = %q, want application/json", got)
 		}
+		if got := r.Header.Get("User-Agent"); got == "" {
+			t.Fatal("User-Agent is empty")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"shops": []map[string]any{
@@ -87,6 +90,77 @@ func TestCardShopsProxyReturnsUpstreamShopsForAdmin(t *testing.T) {
 	}
 	if got := response.Shops[0].ProductItems[0]; got.Name != "Codex 接码" || got.Price != 3.5 || got.StockCount != 9 {
 		t.Fatalf("product item = %#v, want upstream product", got)
+	}
+}
+
+func TestCardShopsProxyNormalizesProductSummaryPreviewItems(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"shops": []map[string]any{
+				{
+					"id":              "ldxp-summary",
+					"shopName":        "Summary Shop",
+					"productItems":    []map[string]any{},
+					"productsInStock": []string{"fallback-only"},
+					"productSummary": map[string]any{
+						"groups": []map[string]any{
+							{
+								"group": "GPT/Codex",
+								"previewItems": []map[string]any{
+									{
+										"name":       "Codex Account",
+										"price":      2,
+										"stockCount": 76,
+										"salesCount": 3,
+										"itemUrl":    "https://pay.ldxp.cn/item/test",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+	t.Setenv("CPA_HELPER_CARD_SHOPS_URL", upstream.URL)
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "test-password",
+		"nickname": "Admin",
+	}, nil, nil)
+
+	var response struct {
+		Shops []struct {
+			ProductItems []struct {
+				Name       string  `json:"name"`
+				Price      float64 `json:"price"`
+				StockCount int     `json:"stockCount"`
+				SalesCount int     `json:"salesCount"`
+				ItemURL    string  `json:"itemUrl"`
+				Group      string  `json:"group"`
+			} `json:"productItems"`
+		} `json:"shops"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/card-shops", nil, cookies, &response)
+
+	if len(response.Shops) != 1 || len(response.Shops[0].ProductItems) != 1 {
+		t.Fatalf("productItems = %#v, want normalized preview item", response.Shops)
+	}
+	got := response.Shops[0].ProductItems[0]
+	if got.Name != "Codex Account" || got.Price != 2 || got.StockCount != 76 || got.SalesCount != 3 || got.ItemURL == "" || got.Group != "GPT/Codex" {
+		t.Fatalf("product item = %#v, want normalized preview item with price", got)
 	}
 }
 
