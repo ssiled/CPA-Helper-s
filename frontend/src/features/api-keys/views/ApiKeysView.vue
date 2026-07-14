@@ -257,9 +257,9 @@ const selectedPolicyModelRules = computed<KeyPolicyModelRule[]>(() => {
 const selectedPolicyModelsText = computed(() => {
   const count = selectedPolicyModelRules.value.length
   if (count === 0) {
-    return t('???????????????????????', 'No models selected; aliases can still be allowed by plugin alias rules')
+    return t('\u672a\u9009\u62e9\u6a21\u578b\uff1b\u5982\u4ec5\u586b\u5199\u522b\u540d\uff0c\u5219\u6309\u63d2\u4ef6\u522b\u540d\u89c4\u5219\u653e\u884c', 'No models selected; aliases can still be allowed by plugin alias rules')
   }
-  return t(`??? ${count} ???`, `${count} models selected`)
+  return t(`\u5df2\u9009\u62e9 ${count} \u4e2a\u6a21\u578b`, `${count} models selected`)
 })
 
 const requestTestReplyText = computed(() => {
@@ -871,16 +871,16 @@ onMounted(refresh)
             @keyup.enter="saveApiKey"
           />
         </NFormItem>
-        <NFormItem :label="t('?? RPM ??', 'Plugin RPM limit')">
+        <NFormItem :label="t('\u63d2\u4ef6 RPM \u9650\u5236', 'Plugin RPM limit')">
           <NInputNumber v-model:value="policyRPM" :min="0" :precision="0" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('?????USD?', 'Daily budget USD')">
+        <NFormItem :label="t('\u6bcf\u65e5\u9884\u7b97\uff08USD\uff09', 'Daily budget USD')">
           <NInputNumber v-model:value="policyDailyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('?????USD?', 'Weekly budget USD')">
+        <NFormItem :label="t('\u6bcf\u5468\u9884\u7b97\uff08USD\uff09', 'Weekly budget USD')">
           <NInputNumber v-model:value="policyWeeklyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('????', 'Allowed models')">
+        <NFormItem :label="t('\u5141\u8bb8\u6a21\u578b', 'Allowed models')">
           <div class="policy-model-picker">
             <NSelect
               v-model:value="selectedPolicyModelIds"
@@ -890,28 +890,28 @@ onMounted(refresh)
               :loading="isAvailableModelsLoading"
               :options="policyModelOptions"
               :disabled="isSaving"
-              :placeholder="t('???? CPA / ???????????? cpa-key-policy ??', 'Auto-load available CPA/plugin models and write cpa-key-policy rules')"
+              :placeholder="t('\u81ea\u52a8\u52a0\u8f7d CPA / \u63d2\u4ef6\u53ef\u7528\u6a21\u578b\uff0c\u9009\u62e9\u540e\u5199\u5165 cpa-key-policy \u89c4\u5219', 'Auto-load available CPA/plugin models and write cpa-key-policy rules')"
             />
             <div class="policy-model-actions">
               <span class="policy-model-summary">{{ selectedPolicyModelsText }}</span>
               <NSpace size="small">
                 <NButton size="tiny" secondary :disabled="isSaving || policyModelOptions.length === 0" @click="selectAllPolicyModels">
-                  {{ t('??', 'Select all') }}
+                  {{ t('\u5168\u9009', 'Select all') }}
                 </NButton>
                 <NButton size="tiny" tertiary :disabled="isSaving || selectedPolicyModelIds.length === 0" @click="clearPolicyModels">
-                  {{ t('??', 'Clear') }}
+                  {{ t('\u6e05\u7a7a', 'Clear') }}
                 </NButton>
               </NSpace>
             </div>
             <NAlert v-if="!isAvailableModelsLoading && policyModelOptions.length === 0" type="warning" :bordered="false">
-              {{ t('??? CPA ?????????????? API KEY ??????', 'No available models loaded from CPA yet. Check upstream API keys first.') }}
+              {{ t('\u6682\u672a\u4ece CPA \u83b7\u53d6\u5230\u53ef\u7528\u6a21\u578b\uff0c\u8bf7\u5148\u786e\u8ba4\u4e0a\u6e38 API KEY \u53ef\u67e5\u8be2\u6a21\u578b\u3002', 'No available models loaded from CPA yet. Check upstream API keys first.') }}
             </NAlert>
           </div>
         </NFormItem>
-        <NFormItem :label="t('??????', 'Allowed global aliases')">
-          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('????????? fast', 'One alias per line, for example fast')" />
+        <NFormItem :label="t('\u5141\u8bb8\u5168\u5c40\u522b\u540d', 'Allowed global aliases')">
+          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('\u6bcf\u884c\u4e00\u4e2a\u522b\u540d\uff0c\u4f8b\u5982 fast', 'One alias per line, for example fast')" />
         </NFormItem>
-        <NFormItem :label="t('???? /v1/models', 'Allow /v1/models')">
+        <NFormItem :label="t('\u5141\u8bb8\u8bbf\u95ee /v1/models', 'Allow /v1/models')">
           <NSwitch v-model:value="policyAllowModelsEndpoint" :disabled="isSaving" />
         </NFormItem>
         <div class="modal-actions">
