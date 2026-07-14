@@ -92,6 +92,72 @@ func TestAccountModelRequestGuideUsesConfiguredURL(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyUsesKeyPolicyPluginWhenInstalled(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	pluginCalls := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v0/management/plugins/cpa-key-policy/keys" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		pluginCalls++
+		if got := r.Header.Get("Authorization"); got != "Bearer mgmt-secret" {
+			t.Fatalf("Authorization = %q, want management bearer", got)
+		}
+		var payload struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if payload.ID != "cpa-helper-user-1" || payload.Name == "" || !payload.Enabled {
+			t.Fatalf("plugin payload = %#v", payload)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"plain_key": "cpa_plugin_test_key",
+			"generated": true,
+			"key":       map[string]any{"id": payload.ID, "name": payload.Name, "key_preview": "cpa_...key"},
+		})
+	}))
+	defer cpa.Close()
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "test-password",
+		"nickname": "Admin",
+	}, nil, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
+		"cliaproxy_url":     cpa.URL,
+		"model_request_url": cpa.URL,
+		"management_key":    "mgmt-secret",
+	}, cookies, nil)
+
+	created := apiKeyCreateResponse{}
+	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"description": "Plugin key",
+	}, cookies, &created)
+
+	if pluginCalls != 1 {
+		t.Fatalf("plugin calls = %d, want 1", pluginCalls)
+	}
+	if created.APIKey != "cpa_plugin_test_key" {
+		t.Fatalf("api key = %q, want plugin key", created.APIKey)
+	}
+}
+
 func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 

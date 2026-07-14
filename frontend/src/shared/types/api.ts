@@ -609,16 +609,39 @@ export interface UserQuotaPayload {
   monthly_quota_usd: number | null
 }
 
+export interface KeyPolicyModelRule {
+  alias: string
+  provider: string
+  target_model: string
+  group?: string
+}
+
+export interface KeyPolicyAliasRef {
+  alias: string
+}
+
+export interface KeyPolicyPayload {
+  rpm: number
+  models: KeyPolicyModelRule[]
+  aliases: KeyPolicyAliasRef[]
+  daily_limit_usd: number
+  weekly_limit_usd: number
+  allow_models_endpoint: boolean
+}
+
 export interface UserApiKeyBindPayload {
   api_key?: string
   api_key_hash?: string
   description: string
+  policy?: KeyPolicyPayload
 }
 
 export interface ApiKeyCreatePayload {
   description: string
+  policy?: KeyPolicyPayload
 }
 
 export interface ApiKeyUpdatePayload {
   description: string
+  policy?: KeyPolicyPayload
 }

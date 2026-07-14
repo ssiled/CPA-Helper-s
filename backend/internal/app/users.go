@@ -30,7 +30,8 @@ type userAPIKeyBindPayload struct {
 }
 
 type apiKeyPayload struct {
-	Description string `json:"description"`
+	Description string              `json:"description"`
+	Policy      keyPolicyAttributes `json:"policy"`
 }
 
 type UserRecord struct {
@@ -282,7 +283,7 @@ func (a *App) handleCurrentUserAPIKeys(w http.ResponseWriter, r *http.Request) e
 		if err := decodeJSON(r, &payload); err != nil {
 			return err
 		}
-		summary, err := a.createGeneratedAPIKeyForUser(r.Context(), user.ID, user.Username, payload.Description)
+		summary, err := a.createGeneratedAPIKeyForUser(r.Context(), user.ID, user.Username, payload.Description, payload.Policy)
 		if err != nil {
 			return err
 		}
@@ -308,7 +309,7 @@ func (a *App) handleCurrentUserAPIKeyByHash(w http.ResponseWriter, r *http.Reque
 		if err := decodeJSON(r, &payload); err != nil {
 			return err
 		}
-		summary, err := a.updateCurrentUserAPIKey(r.Context(), user, apiKeyHash, payload.Description)
+		summary, err := a.updateCurrentUserAPIKey(r.Context(), user, apiKeyHash, payload.Description, payload.Policy)
 		if err != nil {
 			return err
 		}
@@ -582,7 +583,7 @@ func (a *App) currentUserAPIKeys(ctx context.Context, user *AuthUser) ([]UserApi
 	return result, nil
 }
 
-func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, username, description string) (UserApiKeySummary, error) {
+func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, username, description string, policy keyPolicyAttributes) (UserApiKeySummary, error) {
 	description = strings.TrimSpace(description)
 	if description == "" {
 		return UserApiKeySummary{}, validationError("API KEY 描述不能为空")
@@ -594,16 +595,15 @@ func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, user
 	if err := a.ensureUserQuotaReadyForKeys(ctx, user.ID); err != nil {
 		return UserApiKeySummary{}, err
 	}
-	apiKey, err := a.generateUniqueAPIKey(ctx)
+	apiKey, err := a.createGeneratedOrPluginAPIKey(ctx, user.ID, username, description, policy)
 	if err != nil {
-		return UserApiKeySummary{}, err
-	}
-	if err := a.addRemoteAPIKey(ctx, apiKey); err != nil {
 		return UserApiKeySummary{}, err
 	}
 	apiKeyHash := hashAPIKey(apiKey)
 	if err := a.upsertUserAPIKey(ctx, user.ID, apiKeyHash, apiKey, description); err != nil {
-		_ = a.removeRemoteAPIKeyHash(ctx, apiKeyHash)
+		if strings.HasPrefix(apiKey, "sk-") {
+			_ = a.removeRemoteAPIKeyHash(ctx, apiKeyHash)
+		}
 		return UserApiKeySummary{}, err
 	}
 	summary, err := a.keySummaryByHash(ctx, apiKeyHash, &apiKey)
@@ -614,10 +614,30 @@ func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, user
 	return summary, nil
 }
 
-func (a *App) updateCurrentUserAPIKey(ctx context.Context, user *AuthUser, apiKeyHash, description string) (UserApiKeySummary, error) {
+func (a *App) createGeneratedOrPluginAPIKey(ctx context.Context, userID int, username, description string, policy keyPolicyAttributes) (string, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err == nil && strings.TrimSpace(cfg.Collector.ManagementKey) != "" {
+		if apiKey, pluginErr := a.createKeyPolicyPluginKey(ctx, cfg, userID, username, description, policy); pluginErr == nil {
+			return apiKey, nil
+		}
+	}
+	apiKey, err := a.generateUniqueAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := a.addRemoteAPIKey(ctx, apiKey); err != nil {
+		return "", err
+	}
+	return apiKey, nil
+}
+
+func (a *App) updateCurrentUserAPIKey(ctx context.Context, user *AuthUser, apiKeyHash, description string, policy keyPolicyAttributes) (UserApiKeySummary, error) {
 	description = strings.TrimSpace(description)
 	if description == "" {
 		return UserApiKeySummary{}, validationError("API KEY 描述不能为空")
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil {
+		_ = a.updateKeyPolicyPluginKey(ctx, cfg, user.ID, user.Username, description, policy)
 	}
 	result, err := a.db.ExecContext(ctx, `UPDATE user_api_keys SET description = ?, updated_at = ? WHERE user_id = ? AND api_key_hash = ?`, description, dbTime(time.Now()), user.ID, apiKeyHash)
 	if err != nil {

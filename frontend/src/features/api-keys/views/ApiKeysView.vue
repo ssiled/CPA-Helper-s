@@ -9,11 +9,13 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NInputNumber,
   NModal,
   NRadioButton,
   NRadioGroup,
   NSelect,
   NSpace,
+  NSwitch,
   useDialog,
   useMessage,
   type DataTableColumns,
@@ -80,6 +82,12 @@ const isAvailableModelsLoading = ref(false)
 const isRequestTesting = ref(false)
 const editingApiKeyHash = ref<string | null>(null)
 const apiKeyDescription = ref('VSCode')
+const policyRPM = ref(0)
+const policyDailyLimitUSD = ref(0)
+const policyWeeklyLimitUSD = ref(0)
+const policyModelsJSON = ref('[]')
+const policyAliasesText = ref('')
+const policyAllowModelsEndpoint = ref(false)
 const generatedApiKey = ref<string | null>(null)
 const generatedApiKeyHash = ref<string | null>(null)
 const visibleApiKeyHashes = ref<Set<string>>(new Set())
@@ -504,6 +512,41 @@ async function runRequestTest() {
   }
 }
 
+
+function resetPolicyForm() {
+  policyRPM.value = 0
+  policyDailyLimitUSD.value = 0
+  policyWeeklyLimitUSD.value = 0
+  policyModelsJSON.value = '[]'
+  policyAliasesText.value = ''
+  policyAllowModelsEndpoint.value = false
+}
+
+function policyPayload() {
+  let models = []
+  const rawModels = policyModelsJSON.value.trim()
+  if (rawModels && rawModels !== '[]') {
+    const parsed = JSON.parse(rawModels)
+    if (!Array.isArray(parsed)) {
+      throw new Error(t('??????? JSON ??', 'Model policy must be a JSON array'))
+    }
+    models = parsed
+  }
+  const aliases = policyAliasesText.value
+    .split(/[\n,]+/)
+    .map((alias) => alias.trim())
+    .filter(Boolean)
+    .map((alias) => ({ alias }))
+  return {
+    rpm: Math.max(0, Math.trunc(policyRPM.value || 0)),
+    models,
+    aliases,
+    daily_limit_usd: Math.max(0, policyDailyLimitUSD.value || 0),
+    weekly_limit_usd: Math.max(0, policyWeeklyLimitUSD.value || 0),
+    allow_models_endpoint: policyAllowModelsEndpoint.value,
+  }
+}
+
 function openCreateDialog() {
   if (!canCreateApiKey.value) {
     message.error(t('当前账号额度已用尽，API KEY 已暂停', 'This account has exhausted its quota, so API keys are paused'))
@@ -511,6 +554,7 @@ function openCreateDialog() {
   }
   editingApiKeyHash.value = null
   apiKeyDescription.value = 'VSCode'
+  resetPolicyForm()
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
@@ -568,14 +612,14 @@ async function saveApiKey() {
   isSaving.value = true
   try {
     if (editingApiKeyHash.value) {
-      await updateApiKey(editingApiKeyHash.value, { description })
+      await updateApiKey(editingApiKeyHash.value, { description, policy: policyPayload() })
       message.success(t('API 密钥已更新', 'API key updated'))
     } else {
       if (!canCreateApiKey.value) {
         message.error(t('当前账号额度已用尽，API KEY 已暂停', 'This account has exhausted its quota, so API keys are paused'))
         return
       }
-      const created = await createApiKey({ description })
+      const created = await createApiKey({ description, policy: policyPayload() })
       generatedApiKey.value = created.api_key ?? null
       generatedApiKeyHash.value = created.api_key_hash
       message.success(t('API 密钥已创建并同步到 CPA', 'API key created and synced to CPA'))
@@ -769,7 +813,7 @@ onMounted(refresh)
       :mask-closable="false"
       :closable="false"
       :title="editingApiKeyHash ? t('编辑 API 密钥', 'Edit API key') : t('新建 API 密钥', 'New API key')"
-      :style="{ width: 'min(520px, calc(100vw - 32px))' }"
+      :style="{ width: 'min(720px, calc(100vw - 32px))' }"
     >
       <NForm label-placement="top">
         <NFormItem :label="t('API KEY 描述', 'API key description')">
@@ -779,6 +823,24 @@ onMounted(refresh)
             :placeholder="t('例如：VSCode', 'Example: VSCode')"
             @keyup.enter="saveApiKey"
           />
+        </NFormItem>
+        <NFormItem :label="t('Plugin RPM limit', 'Plugin RPM limit')">
+          <NInputNumber v-model:value="policyRPM" :min="0" :precision="0" :disabled="isSaving" style="width: 100%" />
+        </NFormItem>
+        <NFormItem :label="t('Daily budget USD', 'Daily budget USD')">
+          <NInputNumber v-model:value="policyDailyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
+        </NFormItem>
+        <NFormItem :label="t('Weekly budget USD', 'Weekly budget USD')">
+          <NInputNumber v-model:value="policyWeeklyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
+        </NFormItem>
+        <NFormItem :label="t('Allowed model rules JSON', 'Allowed model rules JSON')">
+          <NInput v-model:value="policyModelsJSON" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" :disabled="isSaving" placeholder='[{"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}]' />
+        </NFormItem>
+        <NFormItem :label="t('Allowed global aliases', 'Allowed global aliases')">
+          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('One alias per line, for example fast', 'One alias per line, for example fast')" />
+        </NFormItem>
+        <NFormItem :label="t('Allow /v1/models', 'Allow /v1/models')">
+          <NSwitch v-model:value="policyAllowModelsEndpoint" :disabled="isSaving" />
         </NFormItem>
         <div class="modal-actions">
           <NButton secondary :disabled="isSaving" @click="editorVisible = false">{{ t('取消', 'Cancel') }}</NButton>
