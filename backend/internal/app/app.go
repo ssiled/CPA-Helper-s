@@ -267,6 +267,8 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/account/quota", a.wrap(a.handleCurrentUserQuota))
 	mux.HandleFunc("/api/api-keys", a.wrap(a.handleCurrentUserAPIKeys))
 	mux.HandleFunc("/api/api-keys/", a.wrap(a.handleCurrentUserAPIKeyByHash))
+	mux.HandleFunc("/api/auth-pools", a.wrap(a.handleAuthPools))
+	mux.HandleFunc("/api/auth-pools/", a.wrap(a.handleAuthPools))
 	mux.HandleFunc("/api/account/models", a.wrap(a.handleAvailableModels))
 	mux.HandleFunc("/api/account/model-request/test", a.wrap(a.handleCurrentModelRequestTest))
 	mux.HandleFunc("/api/account/model-request", a.wrap(a.handleCurrentModelRequestGuide))

@@ -74,6 +74,12 @@ export const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          path: 'admin/auth-pools',
+          name: 'admin-auth-pools',
+          component: () => import('@/features/auth-pools/views/AuthPoolsView.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 'admin/pricing',
           name: 'admin-pricing',
           component: () => import('@/features/pricing/views/ModelPricesView.vue'),

@@ -39,11 +39,14 @@ import {
   testModelRequest,
   updateApiKey,
 } from '@/features/api-keys/api/apiKeysApi'
+import { bindApiKeyToAuthPool, getAuthPoolStatus, unbindApiKeyFromAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listAvailableModels } from '@/features/models/api/availableModelsApi'
 import { getCurrentUserQuota } from '@/features/users/api/usersApi'
 import { getUsageOverview } from '@/features/usage/api/usageApi'
 import type {
   AvailableModel,
+  AuthPool,
+  AuthPoolBinding,
   AvailableModelsResponse,
   KeyPolicyModelRule,
   ModelRequestEndpoint,
@@ -67,6 +70,8 @@ const usageSummary = ref<UsageSummary | null>(null)
 const quotaStatus = ref<UserQuotaStatus | null>(null)
 const modelRequestGuide = ref<ModelRequestGuide | null>(null)
 const availableModels = ref<AvailableModelsResponse | null>(null)
+const authPools = ref<AuthPool[]>([])
+const authPoolBindings = ref<AuthPoolBinding[]>([])
 const editorVisible = ref(false)
 const requestTestVisible = ref(false)
 const requestTestApiKey = ref<UserApiKeySummary | null>(null)
@@ -83,6 +88,7 @@ const isAvailableModelsLoading = ref(false)
 const isRequestTesting = ref(false)
 const editingApiKeyHash = ref<string | null>(null)
 const apiKeyDescription = ref('VSCode')
+const selectedAuthPoolID = ref<string | null>(null)
 const policyRPM = ref(0)
 const policyDailyLimitUSD = ref(0)
 const policyWeeklyLimitUSD = ref(0)
@@ -94,6 +100,15 @@ const generatedApiKeyHash = ref<string | null>(null)
 const visibleApiKeyHashes = ref<Set<string>>(new Set())
 
 const requestLoadingText = computed(() => t('加载中', 'Loading'))
+
+const authPoolOptions = computed(() => authPools.value.map((pool) => ({
+  label: `${pool.name} (${pool.auth_ids.length})`,
+  value: pool.id,
+})))
+
+function authPoolIDForKey(apiKeyHash: string): string | null {
+  return authPoolBindings.value.find((binding) => binding.api_key_hash === apiKeyHash)?.pool_id ?? null
+}
 
 interface RequestEndpointOption {
   label: string
@@ -576,6 +591,7 @@ function resetPolicyForm() {
   selectedPolicyModelIds.value = []
   policyAliasesText.value = ''
   policyAllowModelsEndpoint.value = false
+  selectedAuthPoolID.value = null
 }
 
 function policyPayload() {
@@ -618,6 +634,7 @@ function closeGeneratedApiKey() {
 function editApiKey(row: UserApiKeySummary) {
   editingApiKeyHash.value = row.api_key_hash
   apiKeyDescription.value = row.description || 'VSCode'
+  selectedAuthPoolID.value = authPoolIDForKey(row.api_key_hash)
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
@@ -629,16 +646,21 @@ function editApiKey(row: UserApiKeySummary) {
 async function refresh() {
   isLoading.value = true
   try {
-    const [nextApiKeys, overview, quota, guide] = await Promise.all([
+    const [nextApiKeys, overview, quota, guide, authPoolStatus] = await Promise.all([
       listApiKeys(),
       getUsageOverview({ scope: 'account' }),
       getCurrentUserQuota(),
       getModelRequestGuide(),
+      getAuthPoolStatus().catch(() => null),
     ])
     apiKeys.value = nextApiKeys
     usageSummary.value = overview.summary
     quotaStatus.value = quota
     modelRequestGuide.value = guide
+    if (authPoolStatus) {
+      authPools.value = authPoolStatus.pools
+      authPoolBindings.value = authPoolStatus.bindings
+    }
     if (editingApiKeyHash.value) {
       const current = apiKeys.value.find((item) => item.api_key_hash === editingApiKeyHash.value)
       if (!current) {
@@ -650,6 +672,21 @@ async function refresh() {
     message.error(errorText(error, '加载 API 密钥失败', 'Failed to load API keys'))
   } finally {
     isLoading.value = false
+  }
+}
+
+
+async function syncAuthPoolBinding(apiKeyHash: string) {
+  if (selectedAuthPoolID.value) {
+    const binding = await bindApiKeyToAuthPool({ api_key_hash: apiKeyHash, pool_id: selectedAuthPoolID.value })
+    const next = authPoolBindings.value.filter((item) => item.api_key_hash !== apiKeyHash)
+    next.push(binding)
+    authPoolBindings.value = next
+    return
+  }
+  if (authPoolIDForKey(apiKeyHash)) {
+    await unbindApiKeyFromAuthPool(apiKeyHash)
+    authPoolBindings.value = authPoolBindings.value.filter((item) => item.api_key_hash !== apiKeyHash)
   }
 }
 
@@ -665,17 +702,19 @@ async function saveApiKey() {
   isSaving.value = true
   try {
     if (editingApiKeyHash.value) {
-      await updateApiKey(editingApiKeyHash.value, { description, policy: policyPayload() })
-      message.success(t('API 密钥已更新', 'API key updated'))
+      const updated = await updateApiKey(editingApiKeyHash.value, { description, policy: policyPayload() })
+      await syncAuthPoolBinding(updated.api_key_hash)
+      message.success(t('\u0041\u0050\u0049 \u5bc6\u94a5\u5df2\u66f4\u65b0', 'API key updated'))
     } else {
       if (!canCreateApiKey.value) {
-        message.error(t('当前账号额度已用尽，API KEY 已暂停', 'This account has exhausted its quota, so API keys are paused'))
+        message.error(t('\u5f53\u524d\u8d26\u53f7\u989d\u5ea6\u5df2\u7528\u5c3d\uff0cAPI KEY \u5df2\u6682\u505c', 'This account has exhausted its quota, so API keys are paused'))
         return
       }
       const created = await createApiKey({ description, policy: policyPayload() })
+      await syncAuthPoolBinding(created.api_key_hash)
       generatedApiKey.value = created.api_key ?? null
       generatedApiKeyHash.value = created.api_key_hash
-      message.success(t('API 密钥已创建并同步到 CPA', 'API key created and synced to CPA'))
+      message.success(t('\u0041\u0050\u0049 \u5bc6\u94a5\u5df2\u521b\u5efa\u5e76\u540c\u6b65\u5230 CPA', 'API key created and synced to CPA'))
     }
     editorVisible.value = false
     editingApiKeyHash.value = null
@@ -875,6 +914,16 @@ onMounted(refresh)
             :disabled="isSaving"
             :placeholder="t('例如：VSCode', 'Example: VSCode')"
             @keyup.enter="saveApiKey"
+          />
+        </NFormItem>
+        <NFormItem :label="t('\u8bf7\u6c42\u53f7\u6c60', 'Request pool')">
+          <NSelect
+            v-model:value="selectedAuthPoolID"
+            clearable
+            filterable
+            :options="authPoolOptions"
+            :disabled="isSaving"
+            :placeholder="t('\u4e0d\u9009\u62e9\u5219\u4f7f\u7528 CPA \u9ed8\u8ba4\u8c03\u5ea6', 'Leave empty to use CPA default scheduling')"
           />
         </NFormItem>
         <NFormItem :label="t('\u63d2\u4ef6 RPM \u9650\u5236', 'Plugin RPM limit')">

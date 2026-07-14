@@ -20,6 +20,7 @@ import {
   Activity,
   BarChart3,
   Cpu,
+  Folder,
   DollarSign,
   Github,
   KeyRound,

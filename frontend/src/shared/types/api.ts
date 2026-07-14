@@ -222,6 +222,39 @@ export interface CodexKeeperQuotaWindowUsage {
   window_source: string
 }
 
+
+export interface AuthPool {
+  id: string
+  name: string
+  description?: string
+  auth_ids: string[]
+  enabled: boolean
+}
+
+export interface AuthPoolBinding {
+  api_key_hash: string
+  pool_id: string
+  user_id?: number
+  username?: string
+}
+
+export interface AuthPoolStatus {
+  pools: AuthPool[]
+  bindings: AuthPoolBinding[]
+}
+
+export interface AuthPoolPayload {
+  id: string
+  name: string
+  description: string
+  auth_ids: string[]
+}
+
+export interface AuthPoolBindingPayload {
+  api_key_hash: string
+  pool_id: string
+}
+
 export interface CodexKeeperAccount {
   name: string
   email: string | null
