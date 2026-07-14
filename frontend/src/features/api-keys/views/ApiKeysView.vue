@@ -495,7 +495,7 @@ async function loadModelRequestGuide() {
   }
 }
 
-async function loadAvailableModelsForTest() {
+async function loadAvailableModels() {
   isAvailableModelsLoading.value = true
   try {
     availableModels.value = await listAvailableModels()
@@ -518,7 +518,7 @@ function openRequestTest(row: UserApiKeySummary) {
     void loadModelRequestGuide()
   }
   if (!availableModels.value) {
-    void loadAvailableModelsForTest()
+    void loadAvailableModels()
   } else {
     ensureRequestTestModel()
   }
@@ -605,6 +605,9 @@ function openCreateDialog() {
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
+  if (!availableModels.value) {
+    void loadAvailableModels()
+  }
 }
 
 function closeGeneratedApiKey() {
@@ -618,6 +621,9 @@ function editApiKey(row: UserApiKeySummary) {
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
+  if (!availableModels.value) {
+    void loadAvailableModels()
+  }
 }
 
 async function refresh() {
@@ -1036,7 +1042,7 @@ onMounted(refresh)
         </NAlert>
 
         <div class="modal-actions request-test-actions">
-          <NButton secondary :loading="isAvailableModelsLoading" @click="loadAvailableModelsForTest">
+          <NButton secondary :loading="isAvailableModelsLoading" @click="loadAvailableModels">
             {{ t('刷新模型', 'Refresh models') }}
           </NButton>
           <NButton
