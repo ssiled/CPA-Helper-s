@@ -45,6 +45,7 @@ import { getUsageOverview } from '@/features/usage/api/usageApi'
 import type {
   AvailableModel,
   AvailableModelsResponse,
+  KeyPolicyModelRule,
   ModelRequestEndpoint,
   ModelRequestGuide,
   ModelRequestTestResponse,
@@ -85,7 +86,7 @@ const apiKeyDescription = ref('VSCode')
 const policyRPM = ref(0)
 const policyDailyLimitUSD = ref(0)
 const policyWeeklyLimitUSD = ref(0)
-const policyModelsJSON = ref('[]')
+const selectedPolicyModelIds = ref<string[]>([])
 const policyAliasesText = ref('')
 const policyAllowModelsEndpoint = ref(false)
 const generatedApiKey = ref<string | null>(null)
@@ -234,6 +235,33 @@ const requestTestModelOptions = computed(() => {
     value: model.id,
   }))
 })
+
+const policyModelOptions = computed(() => {
+  return (availableModels.value?.models ?? []).map((model) => ({
+    label: policyModelOptionLabel(model),
+    value: model.id,
+  }))
+})
+
+const selectedPolicyModelRules = computed<KeyPolicyModelRule[]>(() => {
+  const selected = new Set(selectedPolicyModelIds.value)
+  return (availableModels.value?.models ?? [])
+    .filter((model) => selected.has(model.id))
+    .map((model) => ({
+      alias: model.name || model.id,
+      provider: providerForPolicyModel(model),
+      target_model: model.id,
+    }))
+})
+
+const selectedPolicyModelsText = computed(() => {
+  const count = selectedPolicyModelRules.value.length
+  if (count === 0) {
+    return t('???????????????????????', 'No models selected; aliases can still be allowed by plugin alias rules')
+  }
+  return t(`??? ${count} ???`, `${count} models selected`)
+})
+
 const requestTestReplyText = computed(() => {
   const reply = requestTestResult.value?.reply?.trim()
   return reply || t('模型返回成功，但没有可展示文本。', 'The model returned successfully, but there is no displayable text.')
@@ -340,6 +368,34 @@ function quotaFootnote(quota: UserQuotaStatus | null): string {
 
 function modelOptionLabel(model: AvailableModel): string {
   return model.id
+}
+
+function providerForPolicyModel(model: AvailableModel): string {
+  const metadataProvider = model.metadata.provider
+  if (model.price?.provider) {
+    return model.price.provider
+  }
+  if (typeof metadataProvider === 'string' && metadataProvider.trim()) {
+    return metadataProvider.trim()
+  }
+  if (model.owner?.trim()) {
+    return model.owner.trim()
+  }
+  return 'codex'
+}
+
+function policyModelOptionLabel(model: AvailableModel): string {
+  const provider = providerForPolicyModel(model)
+  const label = model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id
+  return `${provider} / ${label}`
+}
+
+function selectAllPolicyModels() {
+  selectedPolicyModelIds.value = policyModelOptions.value.map((option) => option.value)
+}
+
+function clearPolicyModels() {
+  selectedPolicyModelIds.value = []
 }
 
 function numberFromUsage(value: unknown): number | null {
@@ -517,21 +573,12 @@ function resetPolicyForm() {
   policyRPM.value = 0
   policyDailyLimitUSD.value = 0
   policyWeeklyLimitUSD.value = 0
-  policyModelsJSON.value = '[]'
+  selectedPolicyModelIds.value = []
   policyAliasesText.value = ''
   policyAllowModelsEndpoint.value = false
 }
 
 function policyPayload() {
-  let models = []
-  const rawModels = policyModelsJSON.value.trim()
-  if (rawModels && rawModels !== '[]') {
-    const parsed = JSON.parse(rawModels)
-    if (!Array.isArray(parsed)) {
-      throw new Error(t('??????? JSON ??', 'Model policy must be a JSON array'))
-    }
-    models = parsed
-  }
   const aliases = policyAliasesText.value
     .split(/[\n,]+/)
     .map((alias) => alias.trim())
@@ -539,7 +586,7 @@ function policyPayload() {
     .map((alias) => ({ alias }))
   return {
     rpm: Math.max(0, Math.trunc(policyRPM.value || 0)),
-    models,
+    models: selectedPolicyModelRules.value,
     aliases,
     daily_limit_usd: Math.max(0, policyDailyLimitUSD.value || 0),
     weekly_limit_usd: Math.max(0, policyWeeklyLimitUSD.value || 0),
@@ -824,22 +871,47 @@ onMounted(refresh)
             @keyup.enter="saveApiKey"
           />
         </NFormItem>
-        <NFormItem :label="t('Plugin RPM limit', 'Plugin RPM limit')">
+        <NFormItem :label="t('?? RPM ??', 'Plugin RPM limit')">
           <NInputNumber v-model:value="policyRPM" :min="0" :precision="0" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('Daily budget USD', 'Daily budget USD')">
+        <NFormItem :label="t('?????USD?', 'Daily budget USD')">
           <NInputNumber v-model:value="policyDailyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('Weekly budget USD', 'Weekly budget USD')">
+        <NFormItem :label="t('?????USD?', 'Weekly budget USD')">
           <NInputNumber v-model:value="policyWeeklyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
         </NFormItem>
-        <NFormItem :label="t('Allowed model rules JSON', 'Allowed model rules JSON')">
-          <NInput v-model:value="policyModelsJSON" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" :disabled="isSaving" placeholder='[{"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}]' />
+        <NFormItem :label="t('????', 'Allowed models')">
+          <div class="policy-model-picker">
+            <NSelect
+              v-model:value="selectedPolicyModelIds"
+              multiple
+              filterable
+              clearable
+              :loading="isAvailableModelsLoading"
+              :options="policyModelOptions"
+              :disabled="isSaving"
+              :placeholder="t('???? CPA / ???????????? cpa-key-policy ??', 'Auto-load available CPA/plugin models and write cpa-key-policy rules')"
+            />
+            <div class="policy-model-actions">
+              <span class="policy-model-summary">{{ selectedPolicyModelsText }}</span>
+              <NSpace size="small">
+                <NButton size="tiny" secondary :disabled="isSaving || policyModelOptions.length === 0" @click="selectAllPolicyModels">
+                  {{ t('??', 'Select all') }}
+                </NButton>
+                <NButton size="tiny" tertiary :disabled="isSaving || selectedPolicyModelIds.length === 0" @click="clearPolicyModels">
+                  {{ t('??', 'Clear') }}
+                </NButton>
+              </NSpace>
+            </div>
+            <NAlert v-if="!isAvailableModelsLoading && policyModelOptions.length === 0" type="warning" :bordered="false">
+              {{ t('??? CPA ?????????????? API KEY ??????', 'No available models loaded from CPA yet. Check upstream API keys first.') }}
+            </NAlert>
+          </div>
         </NFormItem>
-        <NFormItem :label="t('Allowed global aliases', 'Allowed global aliases')">
-          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('One alias per line, for example fast', 'One alias per line, for example fast')" />
+        <NFormItem :label="t('??????', 'Allowed global aliases')">
+          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('????????? fast', 'One alias per line, for example fast')" />
         </NFormItem>
-        <NFormItem :label="t('Allow /v1/models', 'Allow /v1/models')">
+        <NFormItem :label="t('???? /v1/models', 'Allow /v1/models')">
           <NSwitch v-model:value="policyAllowModelsEndpoint" :disabled="isSaving" />
         </NFormItem>
         <div class="modal-actions">
@@ -1053,6 +1125,26 @@ onMounted(refresh)
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.policy-model-picker {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.policy-model-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.policy-model-summary {
+  min-width: 0;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
 }
 
 .request-test {
