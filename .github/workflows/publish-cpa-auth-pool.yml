@@ -19,8 +19,12 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
+            cc: gcc
+            packages: gcc
           - goos: linux
             goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+            packages: gcc-aarch64-linux-gnu
 
     steps:
       - name: Checkout
@@ -30,7 +34,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: plugins/cpa-auth-pool/go.mod
-          cache-dependency-path: plugins/cpa-auth-pool/go.sum
+
+      - name: Install CGO toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }} zip
 
       - name: Build plugin
         id: build
@@ -38,6 +47,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
         run: |
           version="${GITHUB_REF_NAME#cpa-auth-pool-v}"
           if [ "$GITHUB_REF_TYPE" != "tag" ]; then
