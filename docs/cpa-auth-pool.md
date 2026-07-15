@@ -1,51 +1,25 @@
-﻿# CPA Auth Pool Plugin
+﻿# CPA Auth Pool integration
 
-`cpa-auth-pool` is a CPA scheduler plugin shipped with CPA-Helper-s. It groups CPA auth accounts into pools and lets each CPA-Helper-s API key bind to one pool.
+CPA-Helper-s does not ship or publish the `cpa-auth-pool` plugin from this repository. It only calls an already installed CPA plugin through CPA management APIs.
 
-## What it does
+Plugin repository and store source:
 
-- Manage CPA auth accounts as pools from CPA-Helper-s `Auth Pools`.
-- Bind an API key to a request pool when creating or editing the key.
-- At request time, the plugin hashes the incoming API key and schedules only auth candidates from the bound pool.
-- If a key is bound to a pool but that pool has no matching candidate, the plugin blocks fallback to other pools.
-- API keys without pool bindings keep CPA default scheduling behavior.
-
-## Build
-
-Build on Linux or WSL:
-
-```bash
-cd plugins/cpa-auth-pool
-make build-linux
+```text
+https://github.com/ssiled/-CPA-Auth-Pool-Plugin
+https://raw.githubusercontent.com/ssiled/-CPA-Auth-Pool-Plugin/main/registry.json
 ```
 
-Artifacts are written to `plugins/cpa-auth-pool/dist/`:
+## Required CPA plugin
 
-- `cpa-auth-pool_linux_amd64.so`
-- `cpa-auth-pool_linux_arm64.so`
-
-## Install in CPA
-
-Copy the `.so` file into CPA `plugins.dir`, then enable it in CPA config:
-
-```yaml
-plugins:
-  enabled: true
-  dir: "plugins"
-  configs:
-    cpa-auth-pool:
-      enabled: true
-      priority: 20
-      state_file: "cpa-auth-pool-state.json"
-```
-
-Restart CPA. CPA-Helper-s uses these management endpoints:
+Install and enable `cpa-auth-pool` in CPA first. CPA-Helper-s expects these management endpoints to exist:
 
 ```text
 /v0/management/plugins/cpa-auth-pool/status
 /v0/management/plugins/cpa-auth-pool/pools
 /v0/management/plugins/cpa-auth-pool/bindings
 ```
+
+If the plugin is not installed or disabled, CPA-Helper-s will show an error when opening Auth Pools or binding an API key to a pool.
 
 ## Use from CPA-Helper-s
 
@@ -58,5 +32,5 @@ Restart CPA. CPA-Helper-s uses these management endpoints:
 ## Notes
 
 - Pool account IDs must match CPA scheduler candidate auth IDs. The UI currently uses account names from CPA-Helper-s account inspection.
-- Bound pools intentionally fail closed: empty or unavailable pools do not fall back to other pools.
-- Back up `cpa-auth-pool-state.json` because it stores pool definitions and key bindings used by CPA runtime.
+- Bound pools intentionally fail closed in the plugin: empty or unavailable pools do not fall back to other pools.
+- Back up the plugin state file in CPA because it stores pool definitions and key bindings used by CPA runtime.
