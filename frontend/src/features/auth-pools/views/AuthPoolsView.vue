@@ -18,11 +18,18 @@ const poolID = ref('')
 const poolName = ref('')
 const poolDescription = ref('')
 const selectedAuthIDs = ref<string[]>([])
+const selectedBatchType = ref<string | null>(null)
 
 const accountOptions = computed(() => accounts.value.map((account) => ({
-  label: `${account.name}${account.email ? ` ? ${account.email}` : ''}${account.account_type ? ` ? ${account.account_type}` : ''}`,
+  label: accountLabel(account),
   value: account.name,
 })))
+
+const accountTypeOptions = computed(() => Array.from(new Set(accounts.value.map((account) => account.account_type?.trim()).filter(Boolean) as string[]))
+  .sort((left, right) => left.localeCompare(right))
+  .map((type) => ({ label: type, value: type })))
+
+const healthyAuthIDs = computed(() => accounts.value.filter((account) => !account.disabled && (!account.last_status_code || account.last_status_code < 400)).map((account) => account.name))
 
 const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
@@ -47,7 +54,7 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
 ])
 
 function hTag(id: string, status: string) {
-  return h(NTag, { size: 'small', type: status === '\u6b63\u5e38' ? 'success' : status === '\u7981\u7528' ? 'warning' : 'default', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${id} ? ${status}` })
+  return h(NTag, { size: 'small', type: status === '\u6b63\u5e38' ? 'success' : status === '\u7981\u7528' ? 'warning' : 'default', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${id} · ${status}` })
 }
 
 function hButton(label: string, onClick: () => void, type: 'default' | 'error' = 'default') {
@@ -60,6 +67,27 @@ function accountStatus(id: string): string {
   if (account.disabled) return '\u7981\u7528'
   if (account.last_status_code && account.last_status_code >= 400) return `\u5f02\u5e38 ${account.last_status_code}`
   return '\u6b63\u5e38'
+}
+
+function accountLabel(account: CodexKeeperAccount): string {
+  return [account.name, account.email, account.account_type].filter((item) => item && item.trim()).join(' · ')
+}
+
+function mergeSelectedAuthIDs(ids: string[]) {
+  selectedAuthIDs.value = Array.from(new Set([...selectedAuthIDs.value, ...ids]))
+}
+
+function selectAllHealthyAccounts() {
+  mergeSelectedAuthIDs(healthyAuthIDs.value)
+}
+
+function selectAccountsByType() {
+  if (!selectedBatchType.value) return
+  mergeSelectedAuthIDs(accounts.value.filter((account) => account.account_type === selectedBatchType.value).map((account) => account.name))
+}
+
+function clearSelectedAccounts() {
+  selectedAuthIDs.value = []
 }
 
 async function refresh() {
@@ -80,6 +108,7 @@ function openCreate() {
   poolName.value = ''
   poolDescription.value = ''
   selectedAuthIDs.value = []
+  selectedBatchType.value = null
   editorVisible.value = true
 }
 
@@ -88,6 +117,7 @@ function editPool(pool: AuthPool) {
   poolName.value = pool.name
   poolDescription.value = pool.description ?? ''
   selectedAuthIDs.value = [...pool.auth_ids]
+  selectedBatchType.value = null
   editorVisible.value = true
 }
 
@@ -155,7 +185,21 @@ onMounted(refresh)
           <NInput v-model:value="poolDescription" :disabled="isSaving" />
         </NFormItem>
         <NFormItem :label="t('\u9009\u62e9\u8d26\u53f7', 'Select accounts')">
-          <NSelect v-model:value="selectedAuthIDs" multiple filterable :options="accountOptions" :disabled="isSaving" :placeholder="t('\u9009\u62e9\u8981\u52a0\u5165\u8be5\u53f7\u6c60\u7684 CPA \u8d26\u53f7', 'Select CPA accounts for this pool')" />
+          <div class="account-picker">
+            <NSelect v-model:value="selectedAuthIDs" multiple filterable :options="accountOptions" :disabled="isSaving" :placeholder="t('\u9009\u62e9\u8981\u52a0\u5165\u8be5\u53f7\u6c60\u7684 CPA \u8d26\u53f7', 'Select CPA accounts for this pool')" />
+            <div class="batch-actions">
+              <NButton size="small" secondary :disabled="isSaving || healthyAuthIDs.length === 0" @click="selectAllHealthyAccounts">
+                {{ t('\u6279\u91cf\u52a0\u5165\u6b63\u5e38\u8d26\u53f7', 'Add healthy accounts') }}
+              </NButton>
+              <NSelect v-model:value="selectedBatchType" size="small" clearable filterable class="batch-type-select" :options="accountTypeOptions" :disabled="isSaving || accountTypeOptions.length === 0" :placeholder="t('\u6309\u8d26\u53f7\u7c7b\u578b\u6279\u91cf\u9009\u62e9', 'Select by account type')" />
+              <NButton size="small" secondary :disabled="isSaving || !selectedBatchType" @click="selectAccountsByType">
+                {{ t('\u52a0\u5165\u8be5\u7c7b\u578b', 'Add type') }}
+              </NButton>
+              <NButton size="small" quaternary :disabled="isSaving || selectedAuthIDs.length === 0" @click="clearSelectedAccounts">
+                {{ t('\u6e05\u7a7a', 'Clear') }}
+              </NButton>
+            </div>
+          </div>
         </NFormItem>
         <div class="modal-actions">
           <NButton secondary :disabled="isSaving" @click="editorVisible = false">{{ t('\u53d6\u6d88', 'Cancel') }}</NButton>
@@ -168,5 +212,8 @@ onMounted(refresh)
 
 <style scoped>
 .auth-pool-page { display: grid; gap: 16px; }
+.account-picker { display: grid; gap: 10px; width: 100%; }
+.batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.batch-type-select { min-width: 200px; max-width: 280px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
