@@ -12,12 +12,13 @@ import (
 const authPoolPluginID = "cpa-auth-pool"
 
 type authPool struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	AuthIDs     []string `json:"auth_ids"`
-	Enabled     bool     `json:"enabled"`
-	Accounts    []any    `json:"accounts,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description,omitempty"`
+	AuthIDs      []string `json:"auth_ids"`
+	AccountTypes []string `json:"account_types,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Accounts     []any    `json:"accounts,omitempty"`
 }
 
 type authPoolBinding struct {
@@ -33,10 +34,11 @@ type authPoolStatus struct {
 }
 
 type authPoolPayload struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	AuthIDs     []string `json:"auth_ids"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	AuthIDs      []string `json:"auth_ids"`
+	AccountTypes []string `json:"account_types"`
 }
 
 type authPoolBindingPayload struct {
@@ -141,7 +143,7 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 }
 
 func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (authPool, error) {
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, Enabled: true}
+	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}

@@ -19,6 +19,7 @@ const poolName = ref('')
 const poolDescription = ref('')
 const selectedAuthIDs = ref<string[]>([])
 const selectedBatchType = ref<string | null>(null)
+const selectedAccountTypes = ref<string[]>([])
 
 const accountOptions = computed(() => accounts.value.map((account) => ({
   label: accountLabel(account),
@@ -34,12 +35,12 @@ const healthyAuthIDs = computed(() => accounts.value.filter((account) => !accoun
 const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
   { title: t('ID', 'ID'), key: 'id' },
-  { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(row.auth_ids.length) },
+  { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(row.auth_ids.length + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
     key: 'accounts',
-    render: (row) => row.auth_ids.length
-      ? row.auth_ids.map((id) => hTag(id, accountStatus(id))).slice(0, 8)
+    render: (row) => row.auth_ids.length || row.account_types?.length
+      ? [...row.auth_ids.map((id) => hTag(id, accountStatus(id))), ...(row.account_types ?? []).map((type) => hTypeTag(type))].slice(0, 8)
       : t('\u6682\u65e0\u8d26\u53f7', 'No accounts'),
   },
   {
@@ -55,6 +56,10 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
 
 function hTag(id: string, status: string) {
   return h(NTag, { size: 'small', type: status === '\u6b63\u5e38' ? 'success' : status === '\u7981\u7528' ? 'warning' : 'default', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${id} · ${status}` })
+}
+
+function hTypeTag(type: string) {
+  return h(NTag, { size: 'small', type: 'info', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${type} · ${t('\u52a8\u6001\u7c7b\u578b', 'dynamic type')}` })
 }
 
 function hButton(label: string, onClick: () => void, type: 'default' | 'error' = 'default') {
@@ -73,6 +78,16 @@ function accountLabel(account: CodexKeeperAccount): string {
   return [account.name, account.email, account.account_type].filter((item) => item && item.trim()).join(' · ')
 }
 
+function dynamicTypeAccountCount(types: string[], manualAuthIDs: string[]): number {
+  const normalizedTypes = new Set(types.map((type) => type.trim().toLowerCase()).filter(Boolean))
+  if (normalizedTypes.size === 0) return 0
+  const manualIDs = new Set(manualAuthIDs)
+  return accounts.value.filter((account) => {
+    const accountType = account.account_type?.trim().toLowerCase()
+    return accountType && normalizedTypes.has(accountType) && !manualIDs.has(account.name)
+  }).length
+}
+
 function mergeSelectedAuthIDs(ids: string[]) {
   selectedAuthIDs.value = Array.from(new Set([...selectedAuthIDs.value, ...ids]))
 }
@@ -83,11 +98,14 @@ function selectAllHealthyAccounts() {
 
 function selectAccountsByType() {
   if (!selectedBatchType.value) return
-  mergeSelectedAuthIDs(accounts.value.filter((account) => account.account_type === selectedBatchType.value).map((account) => account.name))
+  const accountType = selectedBatchType.value.trim().toLowerCase()
+  if (!accountType) return
+  selectedAccountTypes.value = Array.from(new Set([...selectedAccountTypes.value, accountType]))
 }
 
 function clearSelectedAccounts() {
   selectedAuthIDs.value = []
+  selectedAccountTypes.value = []
 }
 
 async function refresh() {
@@ -109,6 +127,7 @@ function openCreate() {
   poolDescription.value = ''
   selectedAuthIDs.value = []
   selectedBatchType.value = null
+  selectedAccountTypes.value = []
   editorVisible.value = true
 }
 
@@ -118,6 +137,7 @@ function editPool(pool: AuthPool) {
   poolDescription.value = pool.description ?? ''
   selectedAuthIDs.value = [...pool.auth_ids]
   selectedBatchType.value = null
+  selectedAccountTypes.value = [...(pool.account_types ?? [])]
   editorVisible.value = true
 }
 
@@ -130,7 +150,7 @@ async function savePool() {
   }
   isSaving.value = true
   try {
-    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value })
+    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value })
     message.success(t('\u53f7\u6c60\u5df2\u4fdd\u5b58', 'Pool saved'))
     editorVisible.value = false
     await refresh()
@@ -193,11 +213,16 @@ onMounted(refresh)
               </NButton>
               <NSelect v-model:value="selectedBatchType" size="small" clearable filterable class="batch-type-select" :options="accountTypeOptions" :disabled="isSaving || accountTypeOptions.length === 0" :placeholder="t('\u6309\u8d26\u53f7\u7c7b\u578b\u6279\u91cf\u9009\u62e9', 'Select by account type')" />
               <NButton size="small" secondary :disabled="isSaving || !selectedBatchType" @click="selectAccountsByType">
-                {{ t('\u52a0\u5165\u8be5\u7c7b\u578b', 'Add type') }}
+                {{ t('\u81ea\u52a8\u68c0\u6d4b\u8be5\u7c7b\u578b', 'Auto-detect type') }}
               </NButton>
-              <NButton size="small" quaternary :disabled="isSaving || selectedAuthIDs.length === 0" @click="clearSelectedAccounts">
+              <NButton size="small" quaternary :disabled="isSaving || (selectedAuthIDs.length === 0 && selectedAccountTypes.length === 0)" @click="clearSelectedAccounts">
                 {{ t('\u6e05\u7a7a', 'Clear') }}
               </NButton>
+            </div>
+            <div v-if="selectedAccountTypes.length" class="selected-type-rules">
+              <NTag v-for="type in selectedAccountTypes" :key="type" size="small" closable type="info" @close="selectedAccountTypes = selectedAccountTypes.filter((item) => item !== type)">
+                {{ type }} · {{ t('\u81ea\u52a8\u52a0\u5165\u65b0\u8d26\u53f7', 'auto-add new accounts') }}
+              </NTag>
             </div>
           </div>
         </NFormItem>
@@ -215,5 +240,6 @@ onMounted(refresh)
 .account-picker { display: grid; gap: 10px; width: 100%; }
 .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .batch-type-select { min-width: 200px; max-width: 280px; }
+.selected-type-rules { display: flex; flex-wrap: wrap; gap: 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
