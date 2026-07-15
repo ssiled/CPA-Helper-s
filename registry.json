@@ -6,7 +6,7 @@
       "name": "CPA Auth Pool",
       "description": "Bind CPA-Helper-s API keys to CPA auth pools and schedule requests only within the selected pool.",
       "author": "ssiled",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "repository": "https://github.com/ssiled/CPA-Helper-s",
       "homepage": "https://github.com/ssiled/CPA-Helper-s/blob/main/docs/cpa-auth-pool.md",
       "license": "MIT",
