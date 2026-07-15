@@ -49,7 +49,7 @@ func (a *App) handleAuthPools(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	parts := splitPath(r.URL.Path, "/api/auth-pools/")
+	parts := authPoolPathParts(r.URL.Path)
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
@@ -116,6 +116,13 @@ func (a *App) handleAuthPools(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	return notFoundError("auth pool route not found")
+}
+
+func authPoolPathParts(path string) []string {
+	if path == "/api/auth-pools" || path == "/api/auth-pools/" {
+		return nil
+	}
+	return splitPath(path, "/api/auth-pools/")
 }
 
 func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatus, error) {
