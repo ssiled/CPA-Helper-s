@@ -9,13 +9,11 @@ import {
   NFormItem,
   NIcon,
   NInput,
-  NInputNumber,
   NModal,
   NRadioButton,
   NRadioGroup,
   NSelect,
   NSpace,
-  NSwitch,
   useDialog,
   useMessage,
   type DataTableColumns,
@@ -39,16 +37,12 @@ import {
   testModelRequest,
   updateApiKey,
 } from '@/features/api-keys/api/apiKeysApi'
-import { bindApiKeyToAuthPool, getAuthPoolStatus, unbindApiKeyFromAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listAvailableModels } from '@/features/models/api/availableModelsApi'
 import { getCurrentUserQuota } from '@/features/users/api/usersApi'
 import { getUsageOverview } from '@/features/usage/api/usageApi'
 import type {
   AvailableModel,
-  AuthPool,
-  AuthPoolBinding,
   AvailableModelsResponse,
-  KeyPolicyModelRule,
   ModelRequestEndpoint,
   ModelRequestGuide,
   ModelRequestTestResponse,
@@ -70,8 +64,6 @@ const usageSummary = ref<UsageSummary | null>(null)
 const quotaStatus = ref<UserQuotaStatus | null>(null)
 const modelRequestGuide = ref<ModelRequestGuide | null>(null)
 const availableModels = ref<AvailableModelsResponse | null>(null)
-const authPools = ref<AuthPool[]>([])
-const authPoolBindings = ref<AuthPoolBinding[]>([])
 const editorVisible = ref(false)
 const requestTestVisible = ref(false)
 const requestTestApiKey = ref<UserApiKeySummary | null>(null)
@@ -88,27 +80,11 @@ const isAvailableModelsLoading = ref(false)
 const isRequestTesting = ref(false)
 const editingApiKeyHash = ref<string | null>(null)
 const apiKeyDescription = ref('VSCode')
-const selectedAuthPoolID = ref<string | null>(null)
-const policyRPM = ref(0)
-const policyDailyLimitUSD = ref(0)
-const policyWeeklyLimitUSD = ref(0)
-const selectedPolicyModelIds = ref<string[]>([])
-const policyAliasesText = ref('')
-const policyAllowModelsEndpoint = ref(false)
 const generatedApiKey = ref<string | null>(null)
 const generatedApiKeyHash = ref<string | null>(null)
 const visibleApiKeyHashes = ref<Set<string>>(new Set())
 
 const requestLoadingText = computed(() => t('加载中', 'Loading'))
-
-const authPoolOptions = computed(() => authPools.value.map((pool) => ({
-  label: `${pool.name} (${pool.auth_ids.length})`,
-  value: pool.id,
-})))
-
-function authPoolIDForKey(apiKeyHash: string): string | null {
-  return authPoolBindings.value.find((binding) => binding.api_key_hash === apiKeyHash)?.pool_id ?? null
-}
 
 interface RequestEndpointOption {
   label: string
@@ -250,33 +226,6 @@ const requestTestModelOptions = computed(() => {
     value: model.id,
   }))
 })
-
-const policyModelOptions = computed(() => {
-  return (availableModels.value?.models ?? []).map((model) => ({
-    label: policyModelOptionLabel(model),
-    value: model.id,
-  }))
-})
-
-const selectedPolicyModelRules = computed<KeyPolicyModelRule[]>(() => {
-  const selected = new Set(selectedPolicyModelIds.value)
-  return (availableModels.value?.models ?? [])
-    .filter((model) => selected.has(model.id))
-    .map((model) => ({
-      alias: model.name || model.id,
-      provider: providerForPolicyModel(model),
-      target_model: model.id,
-    }))
-})
-
-const selectedPolicyModelsText = computed(() => {
-  const count = selectedPolicyModelRules.value.length
-  if (count === 0) {
-    return t('\u672a\u9009\u62e9\u6a21\u578b\uff1b\u5982\u4ec5\u586b\u5199\u522b\u540d\uff0c\u5219\u6309\u63d2\u4ef6\u522b\u540d\u89c4\u5219\u653e\u884c', 'No models selected; aliases can still be allowed by plugin alias rules')
-  }
-  return t(`\u5df2\u9009\u62e9 ${count} \u4e2a\u6a21\u578b`, `${count} models selected`)
-})
-
 const requestTestReplyText = computed(() => {
   const reply = requestTestResult.value?.reply?.trim()
   return reply || t('模型返回成功，但没有可展示文本。', 'The model returned successfully, but there is no displayable text.')
@@ -385,34 +334,6 @@ function modelOptionLabel(model: AvailableModel): string {
   return model.id
 }
 
-function providerForPolicyModel(model: AvailableModel): string {
-  const metadataProvider = model.metadata.provider
-  if (model.price?.provider) {
-    return model.price.provider
-  }
-  if (typeof metadataProvider === 'string' && metadataProvider.trim()) {
-    return metadataProvider.trim()
-  }
-  if (model.owner?.trim()) {
-    return model.owner.trim()
-  }
-  return 'codex'
-}
-
-function policyModelOptionLabel(model: AvailableModel): string {
-  const provider = providerForPolicyModel(model)
-  const label = model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id
-  return `${provider} / ${label}`
-}
-
-function selectAllPolicyModels() {
-  selectedPolicyModelIds.value = policyModelOptions.value.map((option) => option.value)
-}
-
-function clearPolicyModels() {
-  selectedPolicyModelIds.value = []
-}
-
 function numberFromUsage(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return null
@@ -510,7 +431,7 @@ async function loadModelRequestGuide() {
   }
 }
 
-async function loadAvailableModels() {
+async function loadAvailableModelsForTest() {
   isAvailableModelsLoading.value = true
   try {
     availableModels.value = await listAvailableModels()
@@ -533,7 +454,7 @@ function openRequestTest(row: UserApiKeySummary) {
     void loadModelRequestGuide()
   }
   if (!availableModels.value) {
-    void loadAvailableModels()
+    void loadAvailableModelsForTest()
   } else {
     ensureRequestTestModel()
   }
@@ -583,33 +504,6 @@ async function runRequestTest() {
   }
 }
 
-
-function resetPolicyForm() {
-  policyRPM.value = 0
-  policyDailyLimitUSD.value = 0
-  policyWeeklyLimitUSD.value = 0
-  selectedPolicyModelIds.value = []
-  policyAliasesText.value = ''
-  policyAllowModelsEndpoint.value = false
-  selectedAuthPoolID.value = null
-}
-
-function policyPayload() {
-  const aliases = policyAliasesText.value
-    .split(/[\n,]+/)
-    .map((alias) => alias.trim())
-    .filter(Boolean)
-    .map((alias) => ({ alias }))
-  return {
-    rpm: Math.max(0, Math.trunc(policyRPM.value || 0)),
-    models: selectedPolicyModelRules.value,
-    aliases,
-    daily_limit_usd: Math.max(0, policyDailyLimitUSD.value || 0),
-    weekly_limit_usd: Math.max(0, policyWeeklyLimitUSD.value || 0),
-    allow_models_endpoint: policyAllowModelsEndpoint.value,
-  }
-}
-
 function openCreateDialog() {
   if (!canCreateApiKey.value) {
     message.error(t('当前账号额度已用尽，API KEY 已暂停', 'This account has exhausted its quota, so API keys are paused'))
@@ -617,13 +511,9 @@ function openCreateDialog() {
   }
   editingApiKeyHash.value = null
   apiKeyDescription.value = 'VSCode'
-  resetPolicyForm()
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
-  if (!availableModels.value) {
-    void loadAvailableModels()
-  }
 }
 
 function closeGeneratedApiKey() {
@@ -634,33 +524,24 @@ function closeGeneratedApiKey() {
 function editApiKey(row: UserApiKeySummary) {
   editingApiKeyHash.value = row.api_key_hash
   apiKeyDescription.value = row.description || 'VSCode'
-  selectedAuthPoolID.value = authPoolIDForKey(row.api_key_hash)
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
-  if (!availableModels.value) {
-    void loadAvailableModels()
-  }
 }
 
 async function refresh() {
   isLoading.value = true
   try {
-    const [nextApiKeys, overview, quota, guide, authPoolStatus] = await Promise.all([
+    const [nextApiKeys, overview, quota, guide] = await Promise.all([
       listApiKeys(),
       getUsageOverview({ scope: 'account' }),
       getCurrentUserQuota(),
       getModelRequestGuide(),
-      getAuthPoolStatus().catch(() => null),
     ])
     apiKeys.value = nextApiKeys
     usageSummary.value = overview.summary
     quotaStatus.value = quota
     modelRequestGuide.value = guide
-    if (authPoolStatus) {
-      authPools.value = authPoolStatus.pools
-      authPoolBindings.value = authPoolStatus.bindings
-    }
     if (editingApiKeyHash.value) {
       const current = apiKeys.value.find((item) => item.api_key_hash === editingApiKeyHash.value)
       if (!current) {
@@ -672,21 +553,6 @@ async function refresh() {
     message.error(errorText(error, '加载 API 密钥失败', 'Failed to load API keys'))
   } finally {
     isLoading.value = false
-  }
-}
-
-
-async function syncAuthPoolBinding(apiKeyHash: string) {
-  if (selectedAuthPoolID.value) {
-    const binding = await bindApiKeyToAuthPool({ api_key_hash: apiKeyHash, pool_id: selectedAuthPoolID.value })
-    const next = authPoolBindings.value.filter((item) => item.api_key_hash !== apiKeyHash)
-    next.push(binding)
-    authPoolBindings.value = next
-    return
-  }
-  if (authPoolIDForKey(apiKeyHash)) {
-    await unbindApiKeyFromAuthPool(apiKeyHash)
-    authPoolBindings.value = authPoolBindings.value.filter((item) => item.api_key_hash !== apiKeyHash)
   }
 }
 
@@ -702,19 +568,17 @@ async function saveApiKey() {
   isSaving.value = true
   try {
     if (editingApiKeyHash.value) {
-      const updated = await updateApiKey(editingApiKeyHash.value, { description, policy: policyPayload() })
-      await syncAuthPoolBinding(updated.api_key_hash)
-      message.success(t('\u0041\u0050\u0049 \u5bc6\u94a5\u5df2\u66f4\u65b0', 'API key updated'))
+      await updateApiKey(editingApiKeyHash.value, { description })
+      message.success(t('API 密钥已更新', 'API key updated'))
     } else {
       if (!canCreateApiKey.value) {
-        message.error(t('\u5f53\u524d\u8d26\u53f7\u989d\u5ea6\u5df2\u7528\u5c3d\uff0cAPI KEY \u5df2\u6682\u505c', 'This account has exhausted its quota, so API keys are paused'))
+        message.error(t('当前账号额度已用尽，API KEY 已暂停', 'This account has exhausted its quota, so API keys are paused'))
         return
       }
-      const created = await createApiKey({ description, policy: policyPayload() })
-      await syncAuthPoolBinding(created.api_key_hash)
+      const created = await createApiKey({ description })
       generatedApiKey.value = created.api_key ?? null
       generatedApiKeyHash.value = created.api_key_hash
-      message.success(t('\u0041\u0050\u0049 \u5bc6\u94a5\u5df2\u521b\u5efa\u5e76\u540c\u6b65\u5230 CPA', 'API key created and synced to CPA'))
+      message.success(t('API 密钥已创建并同步到 CPA', 'API key created and synced to CPA'))
     }
     editorVisible.value = false
     editingApiKeyHash.value = null
@@ -905,7 +769,7 @@ onMounted(refresh)
       :mask-closable="false"
       :closable="false"
       :title="editingApiKeyHash ? t('编辑 API 密钥', 'Edit API key') : t('新建 API 密钥', 'New API key')"
-      :style="{ width: 'min(720px, calc(100vw - 32px))' }"
+      :style="{ width: 'min(520px, calc(100vw - 32px))' }"
     >
       <NForm label-placement="top">
         <NFormItem :label="t('API KEY 描述', 'API key description')">
@@ -915,59 +779,6 @@ onMounted(refresh)
             :placeholder="t('例如：VSCode', 'Example: VSCode')"
             @keyup.enter="saveApiKey"
           />
-        </NFormItem>
-        <NFormItem :label="t('\u8bf7\u6c42\u53f7\u6c60', 'Request pool')">
-          <NSelect
-            v-model:value="selectedAuthPoolID"
-            clearable
-            filterable
-            :options="authPoolOptions"
-            :disabled="isSaving"
-            :placeholder="t('\u4e0d\u9009\u62e9\u5219\u4f7f\u7528 CPA \u9ed8\u8ba4\u8c03\u5ea6', 'Leave empty to use CPA default scheduling')"
-          />
-        </NFormItem>
-        <NFormItem :label="t('\u63d2\u4ef6 RPM \u9650\u5236', 'Plugin RPM limit')">
-          <NInputNumber v-model:value="policyRPM" :min="0" :precision="0" :disabled="isSaving" style="width: 100%" />
-        </NFormItem>
-        <NFormItem :label="t('\u6bcf\u65e5\u9884\u7b97\uff08USD\uff09', 'Daily budget USD')">
-          <NInputNumber v-model:value="policyDailyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
-        </NFormItem>
-        <NFormItem :label="t('\u6bcf\u5468\u9884\u7b97\uff08USD\uff09', 'Weekly budget USD')">
-          <NInputNumber v-model:value="policyWeeklyLimitUSD" :min="0" :precision="4" :disabled="isSaving" style="width: 100%" />
-        </NFormItem>
-        <NFormItem :label="t('\u5141\u8bb8\u6a21\u578b', 'Allowed models')">
-          <div class="policy-model-picker">
-            <NSelect
-              v-model:value="selectedPolicyModelIds"
-              multiple
-              filterable
-              clearable
-              :loading="isAvailableModelsLoading"
-              :options="policyModelOptions"
-              :disabled="isSaving"
-              :placeholder="t('\u81ea\u52a8\u52a0\u8f7d CPA / \u63d2\u4ef6\u53ef\u7528\u6a21\u578b\uff0c\u9009\u62e9\u540e\u5199\u5165 cpa-key-policy \u89c4\u5219', 'Auto-load available CPA/plugin models and write cpa-key-policy rules')"
-            />
-            <div class="policy-model-actions">
-              <span class="policy-model-summary">{{ selectedPolicyModelsText }}</span>
-              <NSpace size="small">
-                <NButton size="tiny" secondary :disabled="isSaving || policyModelOptions.length === 0" @click="selectAllPolicyModels">
-                  {{ t('\u5168\u9009', 'Select all') }}
-                </NButton>
-                <NButton size="tiny" tertiary :disabled="isSaving || selectedPolicyModelIds.length === 0" @click="clearPolicyModels">
-                  {{ t('\u6e05\u7a7a', 'Clear') }}
-                </NButton>
-              </NSpace>
-            </div>
-            <NAlert v-if="!isAvailableModelsLoading && policyModelOptions.length === 0" type="warning" :bordered="false">
-              {{ t('\u6682\u672a\u4ece CPA \u83b7\u53d6\u5230\u53ef\u7528\u6a21\u578b\uff0c\u8bf7\u5148\u786e\u8ba4\u4e0a\u6e38 API KEY \u53ef\u67e5\u8be2\u6a21\u578b\u3002', 'No available models loaded from CPA yet. Check upstream API keys first.') }}
-            </NAlert>
-          </div>
-        </NFormItem>
-        <NFormItem :label="t('\u5141\u8bb8\u5168\u5c40\u522b\u540d', 'Allowed global aliases')">
-          <NInput v-model:value="policyAliasesText" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" :disabled="isSaving" :placeholder="t('\u6bcf\u884c\u4e00\u4e2a\u522b\u540d\uff0c\u4f8b\u5982 fast', 'One alias per line, for example fast')" />
-        </NFormItem>
-        <NFormItem :label="t('\u5141\u8bb8\u8bbf\u95ee /v1/models', 'Allow /v1/models')">
-          <NSwitch v-model:value="policyAllowModelsEndpoint" :disabled="isSaving" />
         </NFormItem>
         <div class="modal-actions">
           <NButton secondary :disabled="isSaving" @click="editorVisible = false">{{ t('取消', 'Cancel') }}</NButton>
@@ -1091,7 +902,7 @@ onMounted(refresh)
         </NAlert>
 
         <div class="modal-actions request-test-actions">
-          <NButton secondary :loading="isAvailableModelsLoading" @click="loadAvailableModels">
+          <NButton secondary :loading="isAvailableModelsLoading" @click="loadAvailableModelsForTest">
             {{ t('刷新模型', 'Refresh models') }}
           </NButton>
           <NButton
@@ -1180,26 +991,6 @@ onMounted(refresh)
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.policy-model-picker {
-  display: grid;
-  gap: 8px;
-  width: 100%;
-}
-
-.policy-model-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.policy-model-summary {
-  min-width: 0;
-  color: var(--cpa-text-muted);
-  font-size: 12px;
 }
 
 .request-test {

@@ -135,6 +135,7 @@ const accountInspectionMenuItems = computed<MenuOption[]>(() => [
     icon: renderIcon(Activity),
   },
   { label: t('账号状态', 'Account Status'), key: '/admin/account-status', icon: renderIcon(ListChecks) },
+  { label: t('\u53f7\u6c60\u7ba1\u7406', 'Auth Pools'), key: '/admin/auth-pools', icon: renderIcon(Folder) },
 ])
 
 const accountMenuItems = computed<MenuOption[]>(() => [
