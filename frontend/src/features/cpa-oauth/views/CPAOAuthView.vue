@@ -100,14 +100,15 @@ const isSubmittingCallback = ref(false)
 const errorMessage = ref<string | null>(null)
 const authURLResponse = ref<CPAOAuthAuthURLResponse | null>(null)
 const statusResponse = ref<CPAOAuthStatusResponse | null>(null)
+const callbackSuccessMessage = ref<string | null>(null)
 
 const providerCards = computed(() => providers.value.map(toProviderView))
 const activeProvider = computed(() => {
   return providerCards.value.find((provider) => provider.id === selectedProvider.value) ?? toProviderView({ id: selectedProvider.value, label: selectedProvider.value })
 })
-const authURL = computed(() => (typeof authURLResponse.value?.url === 'string' ? authURLResponse.value.url : ''))
-const authState = computed(() => (typeof authURLResponse.value?.state === 'string' ? authURLResponse.value.state : ''))
-const responseStatus = computed(() => (typeof authURLResponse.value?.status === 'string' ? authURLResponse.value.status : ''))
+const authURL = computed(() => getFirstString(authURLResponse.value, ['url', 'auth_url', 'authUrl', 'authorization_url', 'authorizationUrl', 'login_url', 'loginUrl']))
+const authState = computed(() => getFirstString(authURLResponse.value, ['state', 'oauth_state', 'oauthState']))
+const responseStatus = computed(() => getFirstString(authURLResponse.value, ['status', 'message', 'detail']))
 const statusValue = computed(() => {
   const status = statusResponse.value?.status
   return typeof status === 'string' ? status : ''
@@ -118,16 +119,20 @@ const needsProjectID = computed(() => selectedProvider.value === 'gemini')
 const hasActiveFlow = computed(() => Boolean(authURLResponse.value))
 const startButtonText = computed(() => t('开始授权', 'Start authorization'))
 const phaseText = computed(() => {
+  if (callbackSuccessMessage.value) {
+    return t('Callback submitted', 'Callback submitted')
+  }
   if (statusResponse.value) {
-    return statusValue.value || t('已返回状态', 'Status returned')
+    return statusValue.value || t('Status returned', 'Status returned')
   }
   if (authURLResponse.value) {
-    return authURL.value ? t('等待浏览器授权', 'Waiting for browser authorization') : t('等待按提示继续', 'Waiting for next step')
+    return authURL.value ? t('Waiting for browser authorization', 'Waiting for browser authorization') : t('Waiting for next step', 'Waiting for next step')
   }
-  return t('尚未开始', 'Not started')
+  return t('Not started', 'Not started')
 })
 const phaseType = computed<'default' | 'info' | 'success' | 'warning'>(() => {
   const normalized = statusValue.value.toLowerCase()
+  if (callbackSuccessMessage.value) return 'success'
   if (normalized.includes('success') || normalized.includes('complete') || normalized.includes('ok')) return 'success'
   if (authURLResponse.value) return 'warning'
   return 'default'
@@ -150,6 +155,62 @@ onMounted(async () => {
   }
 })
 
+
+function getFirstString(source: Record<string, unknown> | null | undefined, keys: string[]) {
+  if (!source) return ''
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return ''
+}
+
+function openPendingOAuthWindow(providerLabel: string) {
+  const popup = window.open('about:blank', '_blank')
+  if (!popup) return null
+
+  try {
+    popup.opener = null
+  } catch {
+    // Ignore browsers that restrict opener changes.
+  }
+
+  try {
+    popup.document.title = 'CPA OAuth'
+    popup.document.body.style.margin = '0'
+    popup.document.body.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
+    popup.document.body.innerHTML = `
+      <main style="min-height:100vh;display:grid;place-items:center;background:#f6f8fb;color:#1f2937">
+        <section style="max-width:420px;padding:28px;border:1px solid #d8dee9;border-radius:18px;background:white;box-shadow:0 18px 45px rgba(15,23,42,.10);text-align:center">
+          <h1 id="oauth-pending-title" style="margin:0 0 10px;font-size:20px"></h1>
+          <p style="margin:0;color:#64748b;line-height:1.6">CPA-Helper is creating the OAuth URL. This window will redirect automatically.</p>
+        </section>
+      </main>
+    `
+    const title = popup.document.getElementById('oauth-pending-title')
+    if (title) title.textContent = `Creating ${providerLabel} authorization link...`
+  } catch {
+    // Ignore browsers that disallow writing to the placeholder window.
+  }
+
+  return popup
+}
+
+function navigateOAuthWindow(popup: Window | null, url: string) {
+  if (popup && !popup.closed) {
+    popup.location.href = url
+    return true
+  }
+  const opened = window.open(url, '_blank', 'noopener')
+  return Boolean(opened)
+}
+
+function closeOAuthWindow(popup: Window | null) {
+  if (popup && !popup.closed) {
+    popup.close()
+  }
+}
+
 function toProviderView(provider: CPAOAuthProvider): ProviderView {
   const meta = providerMeta[provider.id] ?? providerMeta[provider.id.toLowerCase()]
   return {
@@ -167,6 +228,7 @@ function toProviderView(provider: CPAOAuthProvider): ProviderView {
 function selectProvider(providerID: string) {
   selectedProvider.value = providerID
   errorMessage.value = null
+  callbackSuccessMessage.value = null
 }
 
 function resetFlow() {
@@ -174,13 +236,17 @@ function resetFlow() {
   statusResponse.value = null
   redirectURL.value = ''
   errorMessage.value = null
+  callbackSuccessMessage.value = null
 }
 
 async function startOAuth(providerID = selectedProvider.value) {
   selectedProvider.value = providerID
+  const providerLabel = activeProvider.value.shortName || selectedProvider.value
+  const pendingWindow = openPendingOAuthWindow(providerLabel)
   isStarting.value = true
   errorMessage.value = null
   statusResponse.value = null
+  callbackSuccessMessage.value = null
   try {
     const payload: { provider: string; project_id?: string } = { provider: selectedProvider.value }
     if (needsProjectID.value && projectID.value.trim()) {
@@ -188,14 +254,21 @@ async function startOAuth(providerID = selectedProvider.value) {
     }
     const response = await createCPAOAuthURL(payload)
     authURLResponse.value = response
-    if (typeof response.url === 'string' && response.url) {
-      window.open(response.url, '_blank', 'noopener')
-      message.success(t('已打开 CPA OAuth 登录页', 'CPA OAuth sign-in page opened'))
+    const nextURL = authURL.value
+    if (nextURL) {
+      const opened = navigateOAuthWindow(pendingWindow, nextURL)
+      if (opened) {
+        message.success(t('CPA OAuth sign-in page opened', 'CPA OAuth sign-in page opened'))
+      } else {
+        message.warning(t('The browser blocked the popup. Click Reopen below.', 'The browser blocked the popup. Click Reopen below.'))
+      }
     } else {
-      message.info(t('CPA 已返回登录信息，请按页面提示继续', 'CPA returned sign-in information. Continue with the details below.'))
+      closeOAuthWindow(pendingWindow)
+      message.info(t('CPA returned sign-in information. Continue with the details below.', 'CPA returned sign-in information. Continue with the details below.'))
     }
   } catch (error) {
-    errorMessage.value = errorText(error, '创建 CPA OAuth 登录链接失败', 'Failed to create CPA OAuth sign-in URL')
+    closeOAuthWindow(pendingWindow)
+    errorMessage.value = errorText(error, 'Failed to create CPA OAuth sign-in URL', 'Failed to create CPA OAuth sign-in URL')
   } finally {
     isStarting.value = false
   }
@@ -208,6 +281,7 @@ async function checkStatus() {
   }
   isChecking.value = true
   errorMessage.value = null
+  callbackSuccessMessage.value = null
   try {
     statusResponse.value = await getCPAOAuthStatus(authState.value)
   } catch (error) {
@@ -219,19 +293,21 @@ async function checkStatus() {
 
 async function submitCallback() {
   if (!redirectURL.value.trim()) {
-    message.warning(t('请粘贴 OAuth 回调 URL', 'Paste the OAuth callback URL'))
+    message.warning(t('Paste the OAuth callback URL', 'Paste the OAuth callback URL'))
     return
   }
   isSubmittingCallback.value = true
   errorMessage.value = null
+  callbackSuccessMessage.value = null
   try {
     statusResponse.value = await submitCPAOAuthCallback({
       provider: selectedProvider.value,
       redirect_url: redirectURL.value.trim(),
     })
-    message.success(t('OAuth 回调已提交到 CPA', 'OAuth callback submitted to CPA'))
+    callbackSuccessMessage.value = t('OAuth callback submitted to CPA. The response is shown in the status panel.', 'OAuth callback submitted to CPA. The response is shown in the status panel.')
+    message.success(t('OAuth callback submitted to CPA', 'OAuth callback submitted to CPA'))
   } catch (error) {
-    errorMessage.value = errorText(error, '提交 OAuth 回调失败', 'Failed to submit OAuth callback')
+    errorMessage.value = errorText(error, 'Failed to submit OAuth callback', 'Failed to submit OAuth callback')
   } finally {
     isSubmittingCallback.value = false
   }
@@ -242,7 +318,9 @@ function openAuthURL() {
     message.warning(t('当前没有授权链接', 'No authorization URL available'))
     return
   }
-  window.open(authURL.value, '_blank', 'noopener')
+  if (!window.open(authURL.value, '_blank', 'noopener')) {
+    message.warning(t('The browser blocked the popup. Copy the link and open it manually.', 'The browser blocked the popup. Copy the link and open it manually.'))
+  }
 }
 
 async function copyText(text: string, emptyMessage: string) {
@@ -451,6 +529,9 @@ async function copyText(text: string, emptyMessage: string) {
                 {{ t('复制回调', 'Copy callback') }}
               </NButton>
             </div>
+            <NAlert v-if="callbackSuccessMessage" type="success" :bordered="false" closable @close="callbackSuccessMessage = null">
+              {{ callbackSuccessMessage }}
+            </NAlert>
           </div>
         </div>
       </section>
