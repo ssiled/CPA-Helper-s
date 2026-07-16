@@ -42,7 +42,7 @@ func TestListAPIKeysReturnsEmptyArrayForFreshAccount(t *testing.T) {
 	}
 }
 
-func TestAccountModelRequestGuideUsesConfiguredURL(t *testing.T) {
+func TestAccountModelRequestGuideUsesHelperURL(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
 	app, err := backendApp.New()
@@ -70,13 +70,13 @@ func TestAccountModelRequestGuideUsesConfiguredURL(t *testing.T) {
 		ChatCompletionsURL string `json:"chat_completions_url"`
 	}
 	requestJSON(t, handler, http.MethodGet, "/api/account/model-request", nil, cookies, &guide)
-	if guide.ModelRequestURL != "http://models.example.local/proxy" {
+	if guide.ModelRequestURL != "http://example.com" {
 		t.Fatalf("model_request_url = %q", guide.ModelRequestURL)
 	}
-	if guide.OpenAIBaseURL != "http://models.example.local/proxy/v1" {
+	if guide.OpenAIBaseURL != "http://example.com/v1" {
 		t.Fatalf("openai_base_url = %q", guide.OpenAIBaseURL)
 	}
-	if guide.ChatCompletionsURL != "http://models.example.local/proxy/v1/chat/completions" {
+	if guide.ChatCompletionsURL != "http://example.com/v1/chat/completions" {
 		t.Fatalf("chat_completions_url = %q", guide.ChatCompletionsURL)
 	}
 
@@ -84,10 +84,10 @@ func TestAccountModelRequestGuideUsesConfiguredURL(t *testing.T) {
 		"model_request_url": "http://models.example.local/v1",
 	}, cookies, nil)
 	requestJSON(t, handler, http.MethodGet, "/api/account/model-request", nil, cookies, &guide)
-	if guide.OpenAIBaseURL != "http://models.example.local/v1" {
+	if guide.OpenAIBaseURL != "http://example.com/v1" {
 		t.Fatalf("openai_base_url with existing /v1 = %q", guide.OpenAIBaseURL)
 	}
-	if guide.ChatCompletionsURL != "http://models.example.local/v1/chat/completions" {
+	if guide.ChatCompletionsURL != "http://example.com/v1/chat/completions" {
 		t.Fatalf("chat_completions_url with existing /v1 = %q", guide.ChatCompletionsURL)
 	}
 }
@@ -664,5 +664,75 @@ func TestCreateAPIKeyUsesPatchAppendWhenRemoteListIsEmpty(t *testing.T) {
 	}
 	if patchCalls != 1 || getCalls != 0 || putCalls != 0 {
 		t.Fatalf("remote call counts patch/get/put = %d/%d/%d, want 1/0/0", patchCalls, getCalls, putCalls)
+	}
+}
+
+func TestModelProxyModelsFiltersToBoundPool(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	var created apiKeyCreateResponse
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
+			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": []string{"ok"}})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pools": []map[string]any{{"id": "free", "name": "Free", "enabled": true, "models": []string{"gpt-free"}}},
+			})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": map[string]any{"api_key_hash": created.APIKeyHash, "pool_id": "free"}})
+		case r.URL.Path == "/v1/models" && r.Method == http.MethodGet:
+			if got := r.Header.Get("Authorization"); got != "Bearer "+created.APIKey {
+				t.Fatalf("Authorization = %q, want helper key forwarded", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{
+				{"id": "gpt-free", "object": "model"},
+				{"id": "gpt-other", "object": "model"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "password123",
+		"nickname": "Admin",
+	}, nil, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
+		"cliaproxy_url":     cpa.URL,
+		"management_key":    "mgmt-secret",
+		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{"description": "Proxy key"}, cookies, &created)
+	requestJSON(t, handler, http.MethodPost, "/api/auth-pools/bindings", map[string]any{
+		"api_key_hash": created.APIKeyHash,
+		"pool_id":      "free",
+	}, cookies, nil)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+created.APIKey)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if len(payload.Data) != 1 || payload.Data[0]["id"] != "gpt-free" {
+		t.Fatalf("models = %#v, want only gpt-free", payload.Data)
 	}
 }

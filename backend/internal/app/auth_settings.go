@@ -385,7 +385,7 @@ func (a *App) handleCurrentModelRequestGuide(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, modelRequestGuideResponse(cfg.ModelRequestURL))
+	writeJSON(w, http.StatusOK, modelRequestGuideResponse(helperModelRequestURL(r), cfg.ModelRequestURL))
 	return nil
 }
 
@@ -674,8 +674,11 @@ func normalizeModelRequestURL(value string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func modelRequestGuideResponse(modelRequestURL string) map[string]any {
-	requestURL := strings.TrimRight(strings.TrimSpace(modelRequestURL), "/")
+func modelRequestGuideResponse(requestURL string, upstreamURL string) map[string]any {
+	requestURL = strings.TrimRight(strings.TrimSpace(requestURL), "/")
+	if requestURL == "" {
+		requestURL = strings.TrimRight(strings.TrimSpace(upstreamURL), "/")
+	}
 	if requestURL == "" {
 		requestURL = defaultCPAURL
 	}
@@ -696,6 +699,30 @@ func modelRequestOpenAIBaseURL(requestURL string) string {
 		return normalized
 	}
 	return normalized + "/v1"
+}
+
+func helperModelRequestURL(r *http.Request) string {
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	if comma := strings.Index(scheme, ","); comma >= 0 {
+		scheme = strings.TrimSpace(scheme[:comma])
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	if comma := strings.Index(host, ","); comma >= 0 {
+		host = strings.TrimSpace(host[:comma])
+	}
+	if scheme == "" || host == "" {
+		return ""
+	}
+	return scheme + "://" + host
 }
 
 func (a *App) handleCollectorStatus(w http.ResponseWriter, r *http.Request) error {

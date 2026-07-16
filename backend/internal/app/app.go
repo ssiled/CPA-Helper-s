@@ -262,6 +262,9 @@ func (a *App) Routes() http.Handler {
 		return nil
 	}))
 
+	mux.HandleFunc("/v1/", a.wrap(a.handleModelProxy))
+	mux.HandleFunc("/v1", a.wrap(a.handleModelProxy))
+
 	mux.HandleFunc("/api/auth/", a.wrap(a.handleAuth))
 	mux.HandleFunc("/api/settings", a.wrap(a.handleSettings))
 	mux.HandleFunc("/api/collector/status", a.wrap(a.handleCollectorStatus))
