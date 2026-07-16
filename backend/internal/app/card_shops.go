@@ -44,7 +44,7 @@ func (a *App) handleCardShops(w http.ResponseWriter, r *http.Request) error {
 	if err := requireMethod(r, http.MethodGet); err != nil {
 		return err
 	}
-	if _, err := a.adminUser(r.Context(), r); err != nil {
+	if _, err := a.readyUser(r.Context(), r); err != nil {
 		return err
 	}
 

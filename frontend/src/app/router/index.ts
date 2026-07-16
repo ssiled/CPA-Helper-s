@@ -51,9 +51,7 @@ export const router = createRouter({
         },
         {
           path: 'admin/card-shops',
-          name: 'admin-card-shops',
-          component: () => import('@/features/card-shops/views/CardShopsView.vue'),
-          meta: { requiresAdmin: true },
+          redirect: '/account/card-shops',
         },
         {
           path: 'admin/users',
@@ -114,6 +112,11 @@ export const router = createRouter({
           component: () => import('@/features/models/views/AvailableModelsView.vue'),
         },
         {
+          path: 'account/card-shops',
+          name: 'account-card-shops',
+          component: () => import('@/features/card-shops/views/CardShopsView.vue'),
+        },
+        {
           path: 'account/channel-status',
           name: 'account-channel-status',
           component: () => import('@/features/codex-keeper/views/ChannelStatusView.vue'),
@@ -154,6 +157,12 @@ export const router = createRouter({
       name: 'legacy-pricing',
       component: () => import('@/app/layout/AppShell.vue'),
       meta: { adminTarget: '/admin/pricing', accountTarget: '/account/usage' },
+    },
+    {
+      path: '/card-shops',
+      name: 'legacy-card-shops',
+      component: () => import('@/app/layout/AppShell.vue'),
+      meta: { adminTarget: '/account/card-shops', accountTarget: '/account/card-shops' },
     },
     {
       path: '/settings',

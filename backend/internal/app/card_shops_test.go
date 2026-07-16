@@ -9,7 +9,7 @@ import (
 	backendApp "cpa-helper/backend/internal/app"
 )
 
-func TestCardShopsProxyReturnsUpstreamShopsForAdmin(t *testing.T) {
+func TestCardShopsProxyReturnsUpstreamShopsForLoggedInUser(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
 	upstreamCalls := 0
@@ -164,7 +164,7 @@ func TestCardShopsProxyNormalizesProductSummaryPreviewItems(t *testing.T) {
 	}
 }
 
-func TestCardShopsProxyRequiresAdmin(t *testing.T) {
+func TestCardShopsProxyRequiresLogin(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	upstreamCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -199,9 +199,13 @@ func TestCardShopsProxyRequiresAdmin(t *testing.T) {
 	}, nil, nil)
 
 	requestJSONExpectStatus(t, handler, http.MethodGet, "/api/card-shops", nil, nil, http.StatusUnauthorized)
-	requestJSONExpectStatus(t, handler, http.MethodGet, "/api/card-shops", nil, memberCookies, http.StatusForbidden)
-	if upstreamCalls != 0 {
-		t.Fatalf("upstream calls = %d, want 0 for unauthorized requests", upstreamCalls)
+
+	var response struct {
+		Shops []map[string]any `json:"shops"`
+	}
+	requestJSON(t, handler, http.MethodGet, "/api/card-shops", nil, memberCookies, &response)
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 for logged-in member", upstreamCalls)
 	}
 }
 

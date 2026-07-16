@@ -124,7 +124,6 @@ const adminMenuItems = computed<MenuOption[]>(() => [
   { label: t('请求明细', 'Request Records'), key: '/admin/records', icon: renderIcon(List) },
   { label: t('用户管理', 'Users'), key: '/admin/users', icon: renderIcon(Users) },
   { label: t('模型价格', 'Model Prices'), key: '/admin/pricing', icon: renderIcon(DollarSign) },
-  { label: t('卡网收录', 'Card Shops'), key: '/admin/card-shops', icon: renderIcon(Store) },
   { label: t('系统设置', 'System Settings'), key: '/admin/settings', icon: renderIcon(Settings) },
 ])
 
@@ -143,6 +142,7 @@ const accountMenuItems = computed<MenuOption[]>(() => [
   { label: t('我的明细', 'My Records'), key: '/account/records', icon: renderIcon(List) },
   { label: t('API 密钥', 'API Keys'), key: '/account/keys', icon: renderIcon(KeyRound) },
   { label: t('可用模型', 'Available Models'), key: '/account/models', icon: renderIcon(Cpu) },
+  { label: t('卡网收录', 'Card Shops'), key: '/account/card-shops', icon: renderIcon(Store) },
   { label: t('渠道状态', 'Channel Status'), key: '/account/channel-status', icon: renderIcon(Monitor) },
   { label: t('账户设置', 'Account Settings'), key: '/account/settings', icon: renderIcon(UserRound) },
 ])
