@@ -279,6 +279,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/account/models", a.wrap(a.handleAvailableModels))
 	mux.HandleFunc("/api/account/model-request/test", a.wrap(a.handleCurrentModelRequestTest))
 	mux.HandleFunc("/api/account/model-request", a.wrap(a.handleCurrentModelRequestGuide))
+	mux.HandleFunc("/api/cpa-oauth/", a.wrap(a.handleCPAOAuth))
 	mux.HandleFunc("/api/card-shops/favorites", a.wrap(a.handleCardShopFavorites))
 	mux.HandleFunc("/api/card-shops/tags", a.wrap(a.handleCardShopTags))
 	mux.HandleFunc("/api/card-shops", a.wrap(a.handleCardShops))

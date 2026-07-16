@@ -74,6 +74,35 @@ export interface ModelRequestTestResponse {
   usage?: Record<string, unknown>
 }
 
+export interface CPAOAuthProvider {
+  id: string
+  label: string
+}
+
+export interface CPAOAuthProvidersResponse {
+  providers: CPAOAuthProvider[]
+}
+
+export interface CPAOAuthAuthURLPayload {
+  provider: string
+  project_id?: string
+}
+
+export interface CPAOAuthAuthURLResponse {
+  provider: string
+  status?: string
+  url?: string
+  state?: string
+  [key: string]: unknown
+}
+
+export interface CPAOAuthCallbackPayload {
+  provider: string
+  redirect_url: string
+}
+
+export type CPAOAuthStatusResponse = Record<string, unknown>
+
 export interface CollectorStatus {
   enabled: boolean
   running: boolean

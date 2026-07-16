@@ -112,6 +112,11 @@ export const router = createRouter({
           component: () => import('@/features/models/views/AvailableModelsView.vue'),
         },
         {
+          path: 'account/cpa-oauth',
+          name: 'account-cpa-oauth',
+          component: () => import('@/features/cpa-oauth/views/CPAOAuthView.vue'),
+        },
+        {
           path: 'account/card-shops',
           name: 'account-card-shops',
           component: () => import('@/features/card-shops/views/CardShopsView.vue'),
@@ -163,6 +168,12 @@ export const router = createRouter({
       name: 'legacy-card-shops',
       component: () => import('@/app/layout/AppShell.vue'),
       meta: { adminTarget: '/account/card-shops', accountTarget: '/account/card-shops' },
+    },
+    {
+      path: '/cpa-oauth',
+      name: 'legacy-cpa-oauth',
+      component: () => import('@/app/layout/AppShell.vue'),
+      meta: { adminTarget: '/account/cpa-oauth', accountTarget: '/account/cpa-oauth' },
     },
     {
       path: '/settings',
