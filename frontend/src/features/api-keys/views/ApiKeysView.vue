@@ -37,10 +37,13 @@ import {
   testModelRequest,
   updateApiKey,
 } from '@/features/api-keys/api/apiKeysApi'
+import { bindApiKeyToAuthPool, getAuthPoolStatus, unbindApiKeyFromAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listAvailableModels } from '@/features/models/api/availableModelsApi'
 import { getCurrentUserQuota } from '@/features/users/api/usersApi'
 import { getUsageOverview } from '@/features/usage/api/usageApi'
 import type {
+  AuthPool,
+  AuthPoolBinding,
   AvailableModel,
   AvailableModelsResponse,
   ModelRequestEndpoint,
@@ -80,9 +83,30 @@ const isAvailableModelsLoading = ref(false)
 const isRequestTesting = ref(false)
 const editingApiKeyHash = ref<string | null>(null)
 const apiKeyDescription = ref('VSCode')
+const selectedPoolID = ref<string | null>(null)
 const generatedApiKey = ref<string | null>(null)
 const generatedApiKeyHash = ref<string | null>(null)
 const visibleApiKeyHashes = ref<Set<string>>(new Set())
+const authPools = ref<AuthPool[]>([])
+const authPoolBindings = ref<AuthPoolBinding[]>([])
+
+const authPoolOptions = computed(() => authPools.value.map((pool) => ({ label: pool.name ? `${pool.name} · ${pool.id}` : pool.id, value: pool.id })))
+
+const authPoolNameByID = computed(() => {
+  const names = new Map<string, string>()
+  for (const pool of authPools.value) {
+    names.set(pool.id, pool.name || pool.id)
+  }
+  return names
+})
+
+const authPoolIDByApiKeyHash = computed(() => {
+  const bindings = new Map<string, string>()
+  for (const binding of authPoolBindings.value) {
+    bindings.set(binding.api_key_hash, binding.pool_id)
+  }
+  return bindings
+})
 
 const requestLoadingText = computed(() => t('加载中', 'Loading'))
 
@@ -511,6 +535,7 @@ function openCreateDialog() {
   }
   editingApiKeyHash.value = null
   apiKeyDescription.value = 'VSCode'
+  selectedPoolID.value = null
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
@@ -524,6 +549,7 @@ function closeGeneratedApiKey() {
 function editApiKey(row: UserApiKeySummary) {
   editingApiKeyHash.value = row.api_key_hash
   apiKeyDescription.value = row.description || 'VSCode'
+  selectedPoolID.value = authPoolIDByApiKeyHash.value.get(row.api_key_hash) ?? null
   generatedApiKey.value = null
   generatedApiKeyHash.value = null
   editorVisible.value = true
@@ -532,16 +558,19 @@ function editApiKey(row: UserApiKeySummary) {
 async function refresh() {
   isLoading.value = true
   try {
-    const [nextApiKeys, overview, quota, guide] = await Promise.all([
+    const [nextApiKeys, overview, quota, guide, authPoolStatus] = await Promise.all([
       listApiKeys(),
       getUsageOverview({ scope: 'account' }),
       getCurrentUserQuota(),
       getModelRequestGuide(),
+      getAuthPoolStatus().catch(() => ({ pools: [], bindings: [] })),
     ])
     apiKeys.value = nextApiKeys
     usageSummary.value = overview.summary
     quotaStatus.value = quota
     modelRequestGuide.value = guide
+    authPools.value = authPoolStatus.pools
+    authPoolBindings.value = authPoolStatus.bindings
     if (editingApiKeyHash.value) {
       const current = apiKeys.value.find((item) => item.api_key_hash === editingApiKeyHash.value)
       if (!current) {
@@ -567,6 +596,7 @@ async function saveApiKey() {
   }
   isSaving.value = true
   try {
+    let savedApiKeyHash = editingApiKeyHash.value
     if (editingApiKeyHash.value) {
       await updateApiKey(editingApiKeyHash.value, { description })
       message.success(t('API 密钥已更新', 'API key updated'))
@@ -578,7 +608,15 @@ async function saveApiKey() {
       const created = await createApiKey({ description })
       generatedApiKey.value = created.api_key ?? null
       generatedApiKeyHash.value = created.api_key_hash
+      savedApiKeyHash = created.api_key_hash
       message.success(t('API 密钥已创建并同步到 CPA', 'API key created and synced to CPA'))
+    }
+    if (savedApiKeyHash) {
+      if (selectedPoolID.value) {
+        await bindApiKeyToAuthPool({ api_key_hash: savedApiKeyHash, pool_id: selectedPoolID.value })
+      } else if (authPoolIDByApiKeyHash.value.has(savedApiKeyHash)) {
+        await unbindApiKeyFromAuthPool(savedApiKeyHash)
+      }
     }
     editorVisible.value = false
     editingApiKeyHash.value = null
@@ -659,6 +697,16 @@ const columns = computed<DataTableColumns<UserApiKeySummary>>(() => [
     key: 'description',
     width: 240,
     render: (row) => row.description || '-',
+  },
+  {
+    title: t('请求号池', 'Auth pool'),
+    key: 'auth_pool',
+    width: 180,
+    render: (row) => {
+      const poolID = authPoolIDByApiKeyHash.value.get(row.api_key_hash)
+      if (!poolID) return t('默认调度', 'Default scheduling')
+      return authPoolNameByID.value.get(poolID) ?? poolID
+    },
   },
   {
     title: t('创建时间', 'Created at'),
@@ -778,6 +826,16 @@ onMounted(refresh)
             :disabled="isSaving"
             :placeholder="t('例如：VSCode', 'Example: VSCode')"
             @keyup.enter="saveApiKey"
+          />
+        </NFormItem>
+        <NFormItem :label="t('请求号池', 'Auth pool')">
+          <NSelect
+            v-model:value="selectedPoolID"
+            clearable
+            filterable
+            :options="authPoolOptions"
+            :disabled="isSaving || authPoolOptions.length === 0"
+            :placeholder="t('不选择则使用 CPA 默认调度', 'Leave empty to use CPA default scheduling')"
           />
         </NFormItem>
         <div class="modal-actions">
