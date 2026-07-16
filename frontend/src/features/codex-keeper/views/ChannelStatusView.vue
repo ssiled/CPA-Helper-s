@@ -77,7 +77,7 @@ function successRate(item: ChannelStatusItem): number {
 function sparkPoints(item: ChannelStatusItem): Array<'ok' | 'fail'> {
   const total = Math.max(item.window_records, 24)
   const failed = Math.min(item.window_failed_records, total)
-  return Array.from({ length: Math.min(total, 60) }, (_, index) => (index < total - failed ? 'ok' : 'fail'))
+  return Array.from({ length: Math.min(total, 36) }, (_, index) => (index < total - failed ? 'ok' : 'fail'))
 }
 
 function typeLabel(item: ChannelStatusItem): string {
@@ -131,12 +131,12 @@ onMounted(refresh)
           <header class="channel-panel__header">
             <div class="channel-panel__brand">
               <div class="channel-panel__icon">
-                <RadioTower :size="30" />
+                <RadioTower :size="24" />
               </div>
               <div class="channel-panel__title-block">
                 <div class="channel-panel__title-row">
                   <h2>{{ channel.name }}</h2>
-                  <NTag round size="large" :type="statusType(channel)">{{ statusLabel(channel) }}</NTag>
+                  <NTag round size="medium" :type="statusType(channel)">{{ statusLabel(channel) }}</NTag>
                 </div>
                 <div class="channel-panel__chips">
                   <NTag size="small">{{ channel.id }}</NTag>
@@ -211,7 +211,7 @@ onMounted(refresh)
 <style scoped>
 .channel-status-page {
   display: grid;
-  gap: 22px;
+  gap: 16px;
 }
 
 .summary-strip {
@@ -243,22 +243,23 @@ onMounted(refresh)
 
 .channel-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 360px));
+  justify-content: start;
+  gap: 14px;
 }
 
 .channel-panel {
   display: grid;
-  gap: 18px;
-  min-height: 420px;
-  padding: 22px;
+  gap: 12px;
+  min-height: 0;
+  padding: 16px;
   border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 30px;
+  border-radius: 16px;
   background:
     radial-gradient(circle at top left, rgba(214, 250, 229, 0.7), rgba(255, 255, 255, 0) 34%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 251, 0.96));
   box-shadow:
-    0 24px 60px rgba(15, 23, 42, 0.08),
+    0 14px 34px rgba(15, 23, 42, 0.07),
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
@@ -271,18 +272,18 @@ onMounted(refresh)
 
 .channel-panel__brand {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
   width: 100%;
 }
 
 .channel-panel__icon {
-  flex: 0 0 64px;
+  flex: 0 0 48px;
   display: grid;
   place-items: center;
-  width: 64px;
-  height: 64px;
-  border-radius: 20px;
+  width: 48px;
+  height: 48px;
+  border-radius: 16px;
   color: #3b9f7e;
   background: linear-gradient(180deg, rgba(220, 252, 231, 0.95), rgba(209, 250, 229, 0.78));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
@@ -290,7 +291,7 @@ onMounted(refresh)
 
 .channel-panel__title-block {
   display: grid;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
 }
@@ -299,12 +300,12 @@ onMounted(refresh)
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .channel-panel__title-row h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.1;
   color: #0f172a;
   text-wrap: balance;
@@ -313,19 +314,19 @@ onMounted(refresh)
 .channel-panel__chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .channel-panel__stats-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 10px;
 }
 
 .channel-stat-card {
-  padding: 18px 18px 16px;
+  padding: 12px 12px 10px;
   border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 22px;
+  border-radius: 16px;
   background: rgba(248, 250, 252, 0.86);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
 }
@@ -335,12 +336,12 @@ onMounted(refresh)
   align-items: center;
   gap: 8px;
   color: #94a3b8;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .channel-stat-card__value {
-  margin-top: 14px;
-  font-size: 24px;
+  margin-top: 8px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1;
   color: #0f172a;
@@ -349,7 +350,7 @@ onMounted(refresh)
 
 .channel-stat-card__value small {
   margin-left: 4px;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
   color: #64748b;
 }
@@ -369,17 +370,17 @@ onMounted(refresh)
 .channel-panel__eyebrow {
   margin: 0;
   color: #94a3b8;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .channel-panel__caption {
-  margin: 8px 0 0;
+  margin: 5px 0 0;
   color: #64748b;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .channel-panel__availability strong {
-  font-size: clamp(40px, 5vw, 64px);
+  font-size: clamp(30px, 4vw, 42px);
   line-height: 0.95;
   color: #56b947;
   letter-spacing: 0;
@@ -388,7 +389,7 @@ onMounted(refresh)
 
 .channel-panel__bars {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .channel-panel__bars-head {
@@ -397,41 +398,41 @@ onMounted(refresh)
   justify-content: space-between;
   gap: 10px;
   color: #94a3b8;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .channel-panel__sparkline {
   display: grid;
-  grid-template-columns: repeat(60, minmax(0, 1fr));
-  gap: 4px;
+  grid-template-columns: repeat(36, minmax(0, 1fr));
+  gap: 3px;
   align-items: end;
-  min-height: 58px;
+  min-height: 34px;
 }
 
 .channel-panel__sparkline i {
   display: block;
-  height: 40px;
+  height: 24px;
   border-radius: 999px;
   background: linear-gradient(180deg, #57c38a, #4cae7d);
 }
 
 .channel-panel__sparkline i.is-fail {
-  height: 18px;
+  height: 12px;
   background: linear-gradient(180deg, #f1b04c, #e48e2a);
 }
 
 .channel-panel__footer {
   margin-top: auto;
   display: grid;
-  gap: 10px;
+  gap: 7px;
 }
 
 .channel-panel__footer-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px 18px;
+  gap: 6px 12px;
   color: #64748b;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .channel-panel__footer-row.is-muted {
