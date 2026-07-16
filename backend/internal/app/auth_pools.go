@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -17,6 +19,7 @@ type authPool struct {
 	Description  string   `json:"description,omitempty"`
 	AuthIDs      []string `json:"auth_ids"`
 	AccountTypes []string `json:"account_types,omitempty"`
+	Models       []string `json:"models,omitempty"`
 	Enabled      bool     `json:"enabled"`
 	Accounts     []any    `json:"accounts,omitempty"`
 }
@@ -39,6 +42,7 @@ type authPoolPayload struct {
 	Description  string   `json:"description"`
 	AuthIDs      []string `json:"auth_ids"`
 	AccountTypes []string `json:"account_types"`
+	Models       []string `json:"models,omitempty"`
 }
 
 type authPoolBindingPayload struct {
@@ -132,6 +136,13 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
 		return authPoolStatus{}, err
 	}
+	if authPoolsNeedModelSync(status.Pools) {
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = a.syncAuthPoolModels(syncCtx)
+		}()
+	}
 	localBindings, err := a.localAuthPoolBindings(ctx, user)
 	if err != nil {
 		return authPoolStatus{}, err
@@ -143,7 +154,7 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 }
 
 func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (authPool, error) {
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Enabled: true}
+	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}
@@ -153,6 +164,7 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	_ = a.syncAuthPoolModels(ctx)
 	a.refreshChannelStatusAfterChange()
 	return response.Pool, nil
 }
@@ -163,6 +175,7 @@ func (a *App) deleteAuthPool(ctx context.Context, id string) error {
 	}
 	_, err := a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE pool_id = ?`, id)
 	if err == nil {
+		_ = a.syncAuthPoolModels(ctx)
 		a.refreshChannelStatusAfterChange()
 	}
 	return err
@@ -281,6 +294,121 @@ func (a *App) authPoolPluginRequest(ctx context.Context, method, path string, bo
 		}
 	}
 	return nil
+}
+
+func (a *App) syncAuthPoolModels(ctx context.Context) error {
+	var status authPoolStatus
+	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+		return err
+	}
+	accounts, err := a.listKeeperAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	authIDs := authIDsForModelSync(status.Pools, accounts)
+	if len(authIDs) == 0 {
+		return nil
+	}
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	authModels := map[string][]string{}
+	fetched := 0
+	for _, authID := range authIDs {
+		models, err := a.fetchAuthFileModels(ctx, cfg, authID)
+		if err != nil {
+			continue
+		}
+		authModels[authID] = models
+		fetched++
+	}
+	if fetched == 0 {
+		return nil
+	}
+	return a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{"auth_models": authModels}, nil)
+}
+
+func authPoolsNeedModelSync(pools []authPool) bool {
+	for _, pool := range pools {
+		if len(pool.AuthIDs) > 0 && len(pool.Models) == 0 {
+			return true
+		}
+	}
+	return false
+}
+func authIDsForModelSync(pools []authPool, accounts []keeperAccount) []string {
+	seen := map[string]bool{}
+	ids := []string{}
+	for _, pool := range pools {
+		manualIDs := normalizedLookup(pool.AuthIDs)
+		typeIDs := normalizedLookup(pool.AccountTypes)
+		for _, id := range pool.AuthIDs {
+			id = strings.TrimSpace(id)
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		if len(typeIDs) == 0 {
+			continue
+		}
+		for _, account := range accounts {
+			if !channelAccountMatchesPool(account, manualIDs, typeIDs) {
+				continue
+			}
+			id := strings.TrimSpace(account.Name)
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	sortStringsCaseInsensitive(ids)
+	return ids
+}
+
+func (a *App) fetchAuthFileModels(ctx context.Context, cfg AppConfig, authID string) ([]string, error) {
+	query := url.Values{}
+	query.Set("name", authID)
+	response, payload, err := doJSON(ctx, httpClient(modelListTimeout), http.MethodGet, makeURL(cfg.Collector.CLIProxyURL, "/v0/management/auth-files/models", query), managementHeaders(cfg.Collector.ManagementKey), nil)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("auth models request failed: HTTP %d", response.StatusCode)
+	}
+	var raw any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, err
+	}
+	items, err := extractAvailableModelItems(raw)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	models := []string{}
+	for _, item := range items {
+		model := parseAvailableModel(item, AvailableModelSource{})
+		if model == nil || strings.TrimSpace(model.ID) == "" || seen[model.ID] {
+			continue
+		}
+		seen[model.ID] = true
+		models = append(models, model.ID)
+	}
+	sortStringsCaseInsensitive(models)
+	return models, nil
+}
+
+func sortStringsCaseInsensitive(values []string) {
+	sort.Slice(values, func(i, j int) bool {
+		left := strings.ToLower(values[i])
+		right := strings.ToLower(values[j])
+		if left == right {
+			return values[i] < values[j]
+		}
+		return left < right
+	})
 }
 
 func urlQueryEscape(value string) string {
