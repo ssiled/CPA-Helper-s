@@ -270,6 +270,123 @@ func (a *App) localAuthPoolBindings(ctx context.Context, user *AuthUser) ([]auth
 	return bindings, rows.Err()
 }
 
+func (a *App) localAuthPoolIDForAPIKey(ctx context.Context, apiKeyHash string) (string, bool, error) {
+	apiKeyHash = strings.TrimSpace(apiKeyHash)
+	if apiKeyHash == "" {
+		return "", false, nil
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT pool_id FROM user_api_key_pools WHERE api_key_hash = ?`, apiKeyHash)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return "", false, rows.Err()
+	}
+	var poolID string
+	if err := rows.Scan(&poolID); err != nil {
+		return "", false, err
+	}
+	poolID = strings.TrimSpace(poolID)
+	return poolID, poolID != "", rows.Err()
+}
+
+func authPoolAllowsModel(pool authPool, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, allowed := range pool.Models {
+		if strings.EqualFold(strings.TrimSpace(allowed), model) {
+			return true
+		}
+	}
+	return false
+}
+
+func authPoolModelFilterAllows(filter map[string]bool, model string) bool {
+	if filter == nil {
+		return true
+	}
+	return filter[strings.ToLower(strings.TrimSpace(model))]
+}
+
+func authPoolModelFilter(pool authPool) map[string]bool {
+	filter := map[string]bool{}
+	for _, model := range pool.Models {
+		model = strings.TrimSpace(model)
+		if model != "" {
+			filter[strings.ToLower(model)] = true
+		}
+	}
+	return filter
+}
+
+func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes []string) (map[string]map[string]bool, error) {
+	filters := map[string]map[string]bool{}
+	if len(apiKeyHashes) == 0 {
+		return filters, nil
+	}
+	requested := map[string]bool{}
+	for _, hash := range apiKeyHashes {
+		if hash = strings.TrimSpace(hash); hash != "" {
+			requested[hash] = true
+		}
+	}
+	bindings, err := a.localAuthPoolBindings(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	keyPools := map[string]string{}
+	for _, binding := range bindings {
+		if requested[binding.APIKeyHash] {
+			keyPools[binding.APIKeyHash] = strings.TrimSpace(binding.PoolID)
+		}
+	}
+	if len(keyPools) == 0 {
+		return filters, nil
+	}
+	var status authPoolStatus
+	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+		return nil, err
+	}
+	poolFilters := map[string]map[string]bool{}
+	for _, pool := range status.Pools {
+		poolID := strings.TrimSpace(pool.ID)
+		if poolID != "" {
+			poolFilters[poolID] = authPoolModelFilter(pool)
+		}
+	}
+	for apiKeyHash, poolID := range keyPools {
+		filters[apiKeyHash] = poolFilters[poolID]
+		if filters[apiKeyHash] == nil {
+			filters[apiKeyHash] = map[string]bool{}
+		}
+	}
+	return filters, nil
+}
+
+func (a *App) ensureAPIKeyModelAllowedByPool(ctx context.Context, apiKeyHash string, model string) error {
+	poolID, bound, err := a.localAuthPoolIDForAPIKey(ctx, apiKeyHash)
+	if err != nil || !bound {
+		return err
+	}
+	var status authPoolStatus
+	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+		return err
+	}
+	for _, pool := range status.Pools {
+		if strings.TrimSpace(pool.ID) != poolID {
+			continue
+		}
+		if authPoolAllowsModel(pool, model) {
+			return nil
+		}
+		return validationError("测试模型不属于当前 API KEY 绑定的号池")
+	}
+	return validationError("当前 API KEY 绑定的号池不存在")
+}
+
 func (a *App) authPoolPluginRequest(ctx context.Context, method, path string, body any, target any) error {
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
@@ -326,12 +443,13 @@ func (a *App) syncAuthPoolModels(ctx context.Context) error {
 	if fetched == 0 {
 		return nil
 	}
-	return a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{"auth_models": authModels}, nil)
+	poolModels := authPoolModelsForSync(status.Pools, accounts, authModels)
+	return a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{"auth_models": authModels, "pool_models": poolModels}, nil)
 }
 
 func authPoolsNeedModelSync(pools []authPool) bool {
 	for _, pool := range pools {
-		if len(pool.AuthIDs) > 0 && len(pool.Models) == 0 {
+		if (len(pool.AuthIDs) > 0 || len(pool.AccountTypes) > 0) && len(pool.Models) == 0 {
 			return true
 		}
 	}
@@ -341,18 +459,31 @@ func authIDsForModelSync(pools []authPool, accounts []keeperAccount) []string {
 	seen := map[string]bool{}
 	ids := []string{}
 	for _, pool := range pools {
-		manualIDs := normalizedLookup(pool.AuthIDs)
-		typeIDs := normalizedLookup(pool.AccountTypes)
-		for _, id := range pool.AuthIDs {
+		for _, id := range authIDsForPoolModelSync(pool, accounts) {
 			id = strings.TrimSpace(id)
 			if id != "" && !seen[id] {
 				seen[id] = true
 				ids = append(ids, id)
 			}
 		}
-		if len(typeIDs) == 0 {
-			continue
+	}
+	sortStringsCaseInsensitive(ids)
+	return ids
+}
+
+func authIDsForPoolModelSync(pool authPool, accounts []keeperAccount) []string {
+	manualIDs := normalizedLookup(pool.AuthIDs)
+	typeIDs := normalizedLookup(pool.AccountTypes)
+	seen := map[string]bool{}
+	ids := []string{}
+	for _, id := range pool.AuthIDs {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
+	}
+	if len(typeIDs) > 0 {
 		for _, account := range accounts {
 			if !channelAccountMatchesPool(account, manualIDs, typeIDs) {
 				continue
@@ -366,6 +497,31 @@ func authIDsForModelSync(pools []authPool, accounts []keeperAccount) []string {
 	}
 	sortStringsCaseInsensitive(ids)
 	return ids
+}
+
+func authPoolModelsForSync(pools []authPool, accounts []keeperAccount, authModels map[string][]string) map[string][]string {
+	poolModels := map[string][]string{}
+	for _, pool := range pools {
+		poolID := strings.TrimSpace(pool.ID)
+		if poolID == "" {
+			continue
+		}
+		seen := map[string]bool{}
+		models := []string{}
+		for _, authID := range authIDsForPoolModelSync(pool, accounts) {
+			for _, model := range authModels[strings.TrimSpace(authID)] {
+				model = strings.TrimSpace(model)
+				if model == "" || seen[model] {
+					continue
+				}
+				seen[model] = true
+				models = append(models, model)
+			}
+		}
+		sortStringsCaseInsensitive(models)
+		poolModels[poolID] = models
+	}
+	return poolModels
 }
 
 func (a *App) fetchAuthFileModels(ctx context.Context, cfg AppConfig, authID string) ([]string, error) {

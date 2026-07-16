@@ -108,6 +108,14 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	if len(queryable) == 0 {
 		return response, nil
 	}
+	apiKeyHashes := make([]string, 0, len(queryable))
+	for _, binding := range queryable {
+		apiKeyHashes = append(apiKeyHashes, binding.APIKeyHash)
+	}
+	poolModelFilters, err := a.authPoolModelFiltersForAPIKeys(ctx, apiKeyHashes)
+	if err != nil {
+		return AvailableModelsResponse{}, err
+	}
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return AvailableModelsResponse{}, err
@@ -132,6 +140,9 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 		for _, raw := range models {
 			model := parseAvailableModel(raw, source)
 			if model == nil {
+				continue
+			}
+			if !authPoolModelFilterAllows(poolModelFilters[binding.APIKeyHash], model.ID) {
 				continue
 			}
 			existing, ok := modelsByID[model.ID]

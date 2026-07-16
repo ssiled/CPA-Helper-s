@@ -443,6 +443,9 @@ func (a *App) testCurrentUserModelRequest(ctx context.Context, user *AuthUser, p
 	if apiKey.APIKey == nil || strings.TrimSpace(*apiKey.APIKey) == "" {
 		return modelRequestTestResponse{}, conflictError("当前 API KEY 缺少完整密钥，无法发起测试")
 	}
+	if err := a.ensureAPIKeyModelAllowedByPool(ctx, apiKeyHash, model); err != nil {
+		return modelRequestTestResponse{}, err
+	}
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return modelRequestTestResponse{}, err

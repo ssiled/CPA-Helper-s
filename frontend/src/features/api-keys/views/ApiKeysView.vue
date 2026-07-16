@@ -92,6 +92,22 @@ const authPoolBindings = ref<AuthPoolBinding[]>([])
 
 const authPoolOptions = computed(() => authPools.value.map((pool) => ({ label: pool.name ? `${pool.name} · ${pool.id}` : pool.id, value: pool.id })))
 
+const authPoolByID = computed(() => {
+  const pools = new Map<string, AuthPool>()
+  for (const pool of authPools.value) {
+    pools.set(pool.id, pool)
+  }
+  return pools
+})
+
+const apiKeyPoolBindings = computed(() => {
+  const bindings = new Map<string, string>()
+  for (const binding of authPoolBindings.value) {
+    bindings.set(binding.api_key_hash, binding.pool_id)
+  }
+  return bindings
+})
+
 const authPoolNameByID = computed(() => {
   const names = new Map<string, string>()
   for (const pool of authPools.value) {
@@ -242,9 +258,15 @@ const sampleRequest = computed(() => {
 const requestTestModelOptions = computed(() => {
   const selectedHash = requestTestApiKey.value?.api_key_hash
   const models = availableModels.value?.models ?? []
-  const filtered = selectedHash
+  const selectedPoolID = selectedHash ? apiKeyPoolBindings.value.get(selectedHash) : null
+  const selectedPool = selectedPoolID ? authPoolByID.value.get(selectedPoolID) : null
+  const poolModels = selectedPoolID
+    ? new Set((selectedPool?.models ?? []).map((model) => model.trim().toLowerCase()).filter(Boolean))
+    : null
+  const keyModels = selectedHash
     ? models.filter((model) => model.sources.some((source) => source.api_key_hash === selectedHash))
     : models
+  const filtered = poolModels ? keyModels.filter((model) => poolModels.has(model.id.trim().toLowerCase())) : keyModels
   return filtered.map((model) => ({
     label: modelOptionLabel(model),
     value: model.id,
