@@ -56,6 +56,7 @@ type App struct {
 	frontendEnv      bool
 	collector        *CollectorRunner
 	keeper           *KeeperRunner
+	channelStatus    *ChannelStatusRunner
 	keeperUsageCache keeperWindowUsageCache
 }
 
@@ -153,9 +154,11 @@ func NewWithOptions(ctx context.Context, options NewOptions) (*App, error) {
 func (a *App) startBackground(ctx context.Context) {
 	a.collector = NewCollectorRunner(a)
 	a.keeper = NewKeeperRunner(a)
+	a.channelStatus = NewChannelStatusRunner(a)
 	a.collector.Start()
 	a.keeper.LoadPersistedState(ctx)
 	a.keeper.StartAutoIfConfigured()
+	a.channelStatus.Start()
 }
 
 func (a *App) Close() {
@@ -164,6 +167,9 @@ func (a *App) Close() {
 	}
 	if a.keeper != nil {
 		a.keeper.Stop()
+	}
+	if a.channelStatus != nil {
+		a.channelStatus.Stop()
 	}
 	if a.db != nil {
 		a.db.Close()

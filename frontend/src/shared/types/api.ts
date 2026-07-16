@@ -286,25 +286,34 @@ export interface CodexKeeperAccountsResponse {
 export interface ChannelStatusItem {
   id: string
   name: string
-  provider: string
-  account_type: string
+  description?: string
+  enabled: boolean
+  account_types: string[]
   status: string
   available: boolean
+  account_count: number
+  available_accounts: number
+  disabled_accounts: number
+  error_accounts: number
+  quota_exhausted_accounts: number
   status_code?: number
-  endpoint_ping_ms?: number
   primary_remaining_percent?: number
   secondary_remaining_percent?: number
+  window_start_at: string
+  window_end_at: string
   window_records: number
   window_success_records: number
   window_failed_records: number
   window_cost_usd: number
   last_checked_at?: string
   last_healthy_at?: string
+  last_error?: string
+  refreshed_at: string
 }
 
 export interface ChannelStatusResponse {
   items: ChannelStatusItem[]
-  refreshed_at: string
+  refreshed_at?: string
 }
 
 export interface CodexKeeperBulkDeletePayload {

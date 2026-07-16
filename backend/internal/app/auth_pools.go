@@ -153,6 +153,7 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	a.refreshChannelStatusAfterChange()
 	return response.Pool, nil
 }
 
@@ -161,6 +162,9 @@ func (a *App) deleteAuthPool(ctx context.Context, id string) error {
 		return err
 	}
 	_, err := a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE pool_id = ?`, id)
+	if err == nil {
+		a.refreshChannelStatusAfterChange()
+	}
 	return err
 }
 

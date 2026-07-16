@@ -679,6 +679,9 @@ func (r *KeeperRunner) runAccounts(mode string, authNames []string) {
 	if strings.TrimSpace(logMessage) != "" {
 		r.log(logMessage)
 	}
+	if r.app.channelStatus != nil {
+		r.app.channelStatus.RefreshAsync()
+	}
 }
 
 func (r *KeeperRunner) log(message string) {

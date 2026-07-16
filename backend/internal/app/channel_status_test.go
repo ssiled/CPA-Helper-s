@@ -5,93 +5,95 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestChannelStatusItemFromHidesIdentityAndMapsStatus(t *testing.T) {
-	accountType := "plus"
-	email := "secret@example.com"
-	name := "auth-secret-file.json"
+func TestBuildChannelStatusItemsUsesPoolsAndHidesAccounts(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, appTimeLocation)
+	plusType := "plus"
+	teamType := "team"
+	secretName := "secret-plus-auth.json"
+	secretEmail := "secret@example.com"
 	okStatus := http.StatusOK
+	errorStatus := http.StatusUnauthorized
 	usedPercent := 20
-	item := channelStatusItemFrom(0, keeperAccount{
-		Name:                 name,
-		Email:                &email,
-		AccountType:          &accountType,
-		LastStatusCode:       &okStatus,
-		PrimaryUsedPercent:   &usedPercent,
-		SecondaryUsedPercent: nil,
-	}, keeperQuotaWindowUsagePair{Primary: &keeperQuotaWindowUsage{
-		Records:          10,
-		SuccessRecords:   8,
-		FailedRecords:    2,
-		EstimatedCostUSD: 0.1234,
-	}})
+	exhaustedPercent := 100
 
-	if item.Name != "plus channel 1" {
-		t.Fatalf("Name = %q, want plus channel 1", item.Name)
+	items := buildChannelStatusItems([]authPool{
+		{ID: "plus-pool", Name: "Plus pool", AccountTypes: []string{"plus"}, Enabled: true},
+		{ID: "team-pool", Name: "Team pool", AuthIDs: []string{"team-auth.json"}, Enabled: true},
+	}, []keeperAccount{
+		{Name: secretName, Email: &secretEmail, AccountType: &plusType, LastStatusCode: &okStatus, PrimaryUsedPercent: &usedPercent},
+		{Name: "plus-exhausted.json", AccountType: &plusType, PrimaryUsedPercent: &exhaustedPercent},
+		{Name: "team-auth.json", AccountType: &teamType, LastStatusCode: &errorStatus},
+	}, []UsageRecord{
+		{SourceAccount: &secretEmail, Provider: chStringPtr("openai"), Model: chStringPtr("gpt-test"), InputTokens: 1_000_000, OutputTokens: 500_000, RawJSON: `{}`},
+		{AuthIndex: chStringPtr("team-auth.json"), Failed: true, RawJSON: `{}`},
+	}, map[[2]string]ModelPrice{
+		priceKey("openai", "gpt-test"): {Provider: "openai", Model: "gpt-test", InputUSDPerMillion: 2, OutputUSDPerMillion: 4},
+	}, now)
+
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
 	}
-	if item.Status != "normal" || !item.Available {
-		t.Fatalf("status = %q available = %v, want normal true", item.Status, item.Available)
+	plus := findChannelStatusItem(t, items, "plus-pool")
+	if plus.Name != "Plus pool" || plus.AccountCount != 2 || plus.AvailableAccounts != 1 {
+		t.Fatalf("plus snapshot = %+v", plus)
 	}
-	if item.PrimaryRemainingPercent == nil || *item.PrimaryRemainingPercent != 80 {
-		t.Fatalf("primary remaining = %v, want 80", item.PrimaryRemainingPercent)
+	if plus.Status != "degraded" || !plus.Available {
+		t.Fatalf("plus status = %q available = %v, want degraded true", plus.Status, plus.Available)
 	}
-	if item.WindowRecords != 10 || item.WindowSuccessRecords != 8 || item.WindowFailedRecords != 2 || item.WindowCostUSD != 0.1234 {
-		t.Fatalf("window stats = %+v", item)
+	if plus.WindowRecords != 1 || plus.WindowSuccessRecords != 1 || plus.WindowFailedRecords != 0 || plus.WindowCostUSD != 4 {
+		t.Fatalf("plus window = records %d success %d failed %d cost %f", plus.WindowRecords, plus.WindowSuccessRecords, plus.WindowFailedRecords, plus.WindowCostUSD)
+	}
+	if plus.PrimaryRemainingPercent == nil || *plus.PrimaryRemainingPercent != 80 {
+		t.Fatalf("plus remaining = %v, want 80", plus.PrimaryRemainingPercent)
 	}
 
-	payload, err := json.Marshal(item)
+	team := findChannelStatusItem(t, items, "team-pool")
+	if team.Status != "error" || team.Available || team.WindowFailedRecords != 1 {
+		t.Fatalf("team snapshot = %+v", team)
+	}
+
+	payload, err := json.Marshal(items)
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)
 	}
 	body := string(payload)
-	if strings.Contains(body, name) || strings.Contains(body, email) {
-		t.Fatalf("channel status leaked identity in %s", body)
+	for _, secret := range []string{secretName, secretEmail, "team-auth.json"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("channel status leaked account identity %q in %s", secret, body)
+		}
 	}
 }
 
-func TestChannelStatusItemFromUnavailableStates(t *testing.T) {
-	accountType := "team"
-	errorStatus := http.StatusInternalServerError
-	exhaustedPercent := 100
-
-	tests := []struct {
-		name    string
-		account keeperAccount
-		status  string
-	}{
-		{
-			name: "disabled",
-			account: keeperAccount{
-				AccountType: &accountType,
-				Disabled:    true,
-			},
-			status: "disabled",
-		},
-		{
-			name: "http error",
-			account: keeperAccount{
-				AccountType:    &accountType,
-				LastStatusCode: &errorStatus,
-			},
-			status: "error",
-		},
-		{
-			name: "quota exhausted",
-			account: keeperAccount{
-				AccountType:        &accountType,
-				PrimaryUsedPercent: &exhaustedPercent,
-			},
-			status: "quota_exhausted",
-		},
+func TestChannelPoolStatusUnavailableStates(t *testing.T) {
+	exhausted := channelStatusItem{Enabled: true, AccountCount: 2, QuotaExhaustedAccounts: 2}
+	if status, available := channelPoolStatus(&exhausted); status != "quota_exhausted" || available {
+		t.Fatalf("quota status = %q available = %v", status, available)
 	}
-
-	for index, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			item := channelStatusItemFrom(index, test.account, keeperQuotaWindowUsagePair{})
-			if item.Status != test.status || item.Available {
-				t.Fatalf("status = %q available = %v, want %q false", item.Status, item.Available, test.status)
-			}
-		})
+	empty := channelStatusItem{Enabled: true}
+	if status, available := channelPoolStatus(&empty); status != "empty" || available {
+		t.Fatalf("empty status = %q available = %v", status, available)
 	}
+	disabled := channelStatusItem{Enabled: false, AccountCount: 1}
+	applyChannelAccountStats(&disabled, []keeperAccount{{Name: "hidden.json"}})
+	if disabled.Status != "disabled" || disabled.Available {
+		t.Fatalf("disabled status = %q available = %v", disabled.Status, disabled.Available)
+	}
+}
+
+func findChannelStatusItem(t *testing.T, items []channelStatusItem, id string) channelStatusItem {
+	t.Helper()
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("missing item %s in %+v", id, items)
+	return channelStatusItem{}
+}
+
+func chStringPtr(value string) *string {
+	return &value
 }
