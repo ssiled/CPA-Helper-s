@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { NButton, NEmpty, NSpin, NTag, useMessage } from 'naive-ui'
-import { Activity, CheckCircle2, Clock3, FolderKanban, RadioTower } from 'lucide-vue-next'
+import { CheckCircle2, Clock3, FolderKanban, RadioTower, WalletCards } from 'lucide-vue-next'
 
 import { getChannelStatus } from '@/features/codex-keeper/api/codexKeeperApi'
 import type { ChannelStatusItem } from '@/shared/types/api'
@@ -17,7 +17,11 @@ const refreshedAt = ref<string | null>(null)
 const summary = computed(() => {
   const total = channels.value.length
   const available = channels.value.filter((item) => item.available).length
-  return { total, available, rate: total ? Math.round((available / total) * 10000) / 100 : 0 }
+  return {
+    total,
+    available,
+    rate: total ? Math.round((available / total) * 10000) / 100 : 0,
+  }
 })
 
 async function refresh() {
@@ -60,19 +64,28 @@ function remainingPercent(item: ChannelStatusItem): number | null {
   return null
 }
 
+function remainingText(item: ChannelStatusItem): string {
+  const value = remainingPercent(item)
+  return value === null ? '-' : `${value}%`
+}
+
 function successRate(item: ChannelStatusItem): number {
   if (!item.window_records) return item.available ? 100 : 0
   return Math.round((item.window_success_records / item.window_records) * 10000) / 100
 }
 
-function sparkPoints(item: ChannelStatusItem): boolean[] {
+function sparkPoints(item: ChannelStatusItem): Array<'ok' | 'fail'> {
   const total = Math.max(item.window_records, 24)
   const failed = Math.min(item.window_failed_records, total)
-  return Array.from({ length: Math.min(total, 60) }, (_, index) => index < total - failed)
+  return Array.from({ length: Math.min(total, 60) }, (_, index) => (index < total - failed ? 'ok' : 'fail'))
 }
 
 function typeLabel(item: ChannelStatusItem): string {
   return item.account_types.length ? item.account_types.join(' / ') : t('手动账号', 'Manual accounts')
+}
+
+function availabilityCaption(item: ChannelStatusItem): string {
+  return `${t('可用账号', 'Available accounts')} ${formatInteger(item.available_accounts)} / ${formatInteger(item.account_count)}`
 }
 
 onMounted(refresh)
@@ -109,55 +122,86 @@ onMounted(refresh)
     </div>
 
     <NSpin :show="isLoading">
-      <NEmpty v-if="!channels.length && !isLoading" :description="t('暂无号池状态快照，请确认 cpa-auth-pool 插件已启用并等待后台刷新。', 'No pool status snapshot yet. Confirm cpa-auth-pool is enabled and wait for background refresh.')" />
-      <div v-else class="channel-grid">
-        <article v-for="channel in channels" :key="channel.id" class="channel-card">
-          <div class="channel-head">
-            <div class="channel-icon"><RadioTower :size="24" /></div>
-            <div class="channel-title">
-              <h2>{{ channel.name }}</h2>
-              <div class="channel-tags">
-                <NTag size="small">{{ channel.id }}</NTag>
-                <NTag size="small" type="info">{{ typeLabel(channel) }}</NTag>
-                <NTag size="small" :type="statusType(channel)">{{ statusLabel(channel) }}</NTag>
+      <NEmpty
+        v-if="!channels.length && !isLoading"
+        :description="t('暂无号池状态快照，请确认 cpa-auth-pool 插件已启用并等待后台刷新。', 'No pool status snapshot yet. Confirm cpa-auth-pool is enabled and wait for background refresh.')"
+      />
+      <div v-else class="channel-card-grid">
+        <article v-for="channel in channels" :key="channel.id" class="channel-panel">
+          <header class="channel-panel__header">
+            <div class="channel-panel__brand">
+              <div class="channel-panel__icon">
+                <RadioTower :size="30" />
+              </div>
+              <div class="channel-panel__title-block">
+                <div class="channel-panel__title-row">
+                  <h2>{{ channel.name }}</h2>
+                  <NTag round size="large" :type="statusType(channel)">{{ statusLabel(channel) }}</NTag>
+                </div>
+                <div class="channel-panel__chips">
+                  <NTag size="small">{{ channel.id }}</NTag>
+                  <NTag size="small" type="info">{{ typeLabel(channel) }}</NTag>
+                  <NTag v-if="channel.description" size="small" type="default">{{ channel.description }}</NTag>
+                </div>
               </div>
             </div>
+          </header>
+
+          <div class="channel-panel__stats-row">
+            <section class="channel-stat-card">
+              <div class="channel-stat-card__label">
+                <WalletCards :size="16" />
+                <span>{{ t('可用账号', 'Available accounts') }}</span>
+              </div>
+              <div class="channel-stat-card__value">
+                {{ formatInteger(channel.available_accounts) }}<small>/{{ formatInteger(channel.account_count) }}</small>
+              </div>
+            </section>
+            <section class="channel-stat-card">
+              <div class="channel-stat-card__label">
+                <CheckCircle2 :size="16" />
+                <span>{{ t('剩余额度', 'Remaining') }}</span>
+              </div>
+              <div class="channel-stat-card__value">{{ remainingText(channel) }}</div>
+            </section>
           </div>
 
-          <div class="metric-grid">
-            <div class="metric-box">
-              <span>{{ t('可用账号', 'Available accounts') }}</span>
-              <strong>{{ formatInteger(channel.available_accounts) }}<small>/{{ formatInteger(channel.account_count) }}</small></strong>
+          <div class="channel-panel__divider" />
+
+          <section class="channel-panel__availability">
+            <div>
+              <p class="channel-panel__eyebrow">{{ t('可用性 · 7 天', 'Availability · 7 days') }}</p>
+              <p class="channel-panel__caption">{{ availabilityCaption(channel) }}</p>
             </div>
-            <div class="metric-box">
-              <span>{{ t('剩余额度', 'Remaining') }}</span>
-              <strong>{{ remainingPercent(channel) ?? '-' }}<small v-if="remainingPercent(channel) !== null">%</small></strong>
-            </div>
-          </div>
-
-          <div class="status-breakdown">
-            <span>{{ t('异常', 'Errors') }} {{ formatInteger(channel.error_accounts) }}</span>
-            <span>{{ t('停用', 'Disabled') }} {{ formatInteger(channel.disabled_accounts) }}</span>
-            <span>{{ t('耗尽', 'Exhausted') }} {{ formatInteger(channel.quota_exhausted_accounts) }}</span>
-          </div>
-
-          <div class="availability-row">
-            <span>{{ t('近 7 天成功率', '7-day success') }}</span>
             <strong>{{ successRate(channel) }}%</strong>
-          </div>
+          </section>
 
-          <div class="sparkline" :aria-label="t('近 7 天窗口记录', '7-day window records')">
-            <i v-for="(ok, index) in sparkPoints(channel)" :key="index" :class="ok ? 'is-ok' : 'is-fail'" />
-          </div>
+          <section class="channel-panel__bars">
+            <div class="channel-panel__bars-head">
+              <span>{{ t('窗口记录分布', 'Window record distribution') }}</span>
+              <span>{{ formatDateTime(channel.refreshed_at) }}</span>
+            </div>
+            <div class="channel-panel__sparkline" :aria-label="t('近 7 天窗口记录', '7-day window records')">
+              <i
+                v-for="(point, index) in sparkPoints(channel)"
+                :key="`${channel.id}-${index}`"
+                :class="point === 'ok' ? 'is-ok' : 'is-fail'"
+              />
+            </div>
+          </section>
 
-          <div class="channel-foot">
-            <span>{{ t('7 天请求', '7-day records') }} {{ formatInteger(channel.window_records) }}</span>
-            <span>{{ t('费用', 'Cost') }} {{ formatUsd(channel.window_cost_usd) }}</span>
-          </div>
-          <div class="channel-foot muted">
-            <span>{{ t('最近健康', 'Last healthy') }} {{ formatDateTime(channel.last_healthy_at ?? null) }}</span>
-            <span>{{ t('快照', 'Snapshot') }} {{ formatDateTime(channel.refreshed_at) }}</span>
-          </div>
+          <footer class="channel-panel__footer">
+            <div class="channel-panel__footer-row">
+              <span>{{ t('7 天请求', '7-day records') }} {{ formatInteger(channel.window_records) }}</span>
+              <span>{{ t('费用', 'Cost') }} {{ formatUsd(channel.window_cost_usd) }}</span>
+            </div>
+            <div class="channel-panel__footer-row is-muted">
+              <span>{{ t('异常', 'Errors') }} {{ formatInteger(channel.error_accounts) }}</span>
+              <span>{{ t('停用', 'Disabled') }} {{ formatInteger(channel.disabled_accounts) }}</span>
+              <span>{{ t('耗尽', 'Exhausted') }} {{ formatInteger(channel.quota_exhausted_accounts) }}</span>
+              <span>{{ t('最近健康', 'Last healthy') }} {{ formatDateTime(channel.last_healthy_at ?? null) }}</span>
+            </div>
+          </footer>
         </article>
       </div>
     </NSpin>
@@ -165,30 +209,269 @@ onMounted(refresh)
 </template>
 
 <style scoped>
-.channel-status-page { display: grid; gap: 18px; }
-.summary-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.summary-card { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: 14px; background: var(--surface-panel); }
-.summary-card span { color: var(--text-muted); }
-.summary-card strong { margin-left: auto; font-size: 18px; }
-.channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.channel-card { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border-subtle); border-radius: 18px; background: var(--surface-panel); box-shadow: var(--shadow-soft); }
-.channel-head { display: flex; gap: 12px; align-items: center; }
-.channel-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; color: #db6b1d; background: #fff3e6; }
-.channel-title { min-width: 0; }
-.channel-title h2 { margin: 0 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
-.channel-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.metric-box { padding: 14px; border: 1px solid var(--border-subtle); border-radius: 14px; background: var(--surface-muted); }
-.metric-box span, .availability-row span, .channel-foot, .status-breakdown { color: var(--text-muted); font-size: 13px; }
-.metric-box strong { display: block; margin-top: 8px; font-size: 22px; }
-.metric-box small { margin-left: 2px; font-size: 13px; }
-.status-breakdown { display: flex; flex-wrap: wrap; gap: 10px; }
-.availability-row { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--border-subtle); }
-.availability-row strong { font-size: 30px; }
-.sparkline { display: grid; grid-template-columns: repeat(30, 1fr); gap: 3px; align-items: end; min-height: 34px; }
-.sparkline i { display: block; height: 26px; border-radius: 999px; background: #5ac489; }
-.sparkline i.is-fail { height: 8px; background: #e75f5f; }
-.channel-foot { display: flex; justify-content: space-between; gap: 10px; }
-.channel-foot.muted { flex-wrap: wrap; justify-content: flex-start; }
-@media (max-width: 760px) { .summary-strip { grid-template-columns: 1fr; } }
+.channel-status-page {
+  display: grid;
+  gap: 22px;
+}
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(149, 157, 165, 0.18);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.9));
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+
+.summary-card span {
+  color: var(--text-muted);
+}
+
+.summary-card strong {
+  margin-left: auto;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 18px;
+}
+
+.channel-panel {
+  display: grid;
+  gap: 18px;
+  min-height: 420px;
+  padding: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 30px;
+  background:
+    radial-gradient(circle at top left, rgba(214, 250, 229, 0.7), rgba(255, 255, 255, 0) 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 251, 0.96));
+  box-shadow:
+    0 24px 60px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.channel-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.channel-panel__brand {
+  display: flex;
+  gap: 16px;
+  min-width: 0;
+  width: 100%;
+}
+
+.channel-panel__icon {
+  flex: 0 0 64px;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  color: #3b9f7e;
+  background: linear-gradient(180deg, rgba(220, 252, 231, 0.95), rgba(209, 250, 229, 0.78));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.channel-panel__title-block {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.channel-panel__title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.channel-panel__title-row h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.1;
+  color: #0f172a;
+  text-wrap: balance;
+}
+
+.channel-panel__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.channel-panel__stats-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.channel-stat-card {
+  padding: 18px 18px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 22px;
+  background: rgba(248, 250, 252, 0.86);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.channel-stat-card__label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.channel-stat-card__value {
+  margin-top: 14px;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-stat-card__value small {
+  margin-left: 4px;
+  font-size: 15px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.channel-panel__divider {
+  height: 1px;
+  background: linear-gradient(90deg, rgba(226, 232, 240, 0.72), rgba(226, 232, 240, 0.18));
+}
+
+.channel-panel__availability {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.channel-panel__eyebrow {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.channel-panel__caption {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.channel-panel__availability strong {
+  font-size: clamp(40px, 5vw, 64px);
+  line-height: 0.95;
+  color: #56b947;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-panel__bars {
+  display: grid;
+  gap: 12px;
+}
+
+.channel-panel__bars-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.channel-panel__sparkline {
+  display: grid;
+  grid-template-columns: repeat(60, minmax(0, 1fr));
+  gap: 4px;
+  align-items: end;
+  min-height: 58px;
+}
+
+.channel-panel__sparkline i {
+  display: block;
+  height: 40px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #57c38a, #4cae7d);
+}
+
+.channel-panel__sparkline i.is-fail {
+  height: 18px;
+  background: linear-gradient(180deg, #f1b04c, #e48e2a);
+}
+
+.channel-panel__footer {
+  margin-top: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.channel-panel__footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.channel-panel__footer-row.is-muted {
+  color: #94a3b8;
+}
+
+@media (max-width: 960px) {
+  .channel-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .summary-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-panel {
+    min-height: auto;
+    padding: 18px;
+    border-radius: 24px;
+  }
+
+  .channel-panel__title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .channel-panel__stats-row {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-panel__availability {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .channel-panel__bars-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
 </style>
