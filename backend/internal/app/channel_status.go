@@ -154,7 +154,7 @@ func (a *App) refreshChannelStatusSnapshot(ctx context.Context) error {
 	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
 		return err
 	}
-	accounts, err := a.listKeeperAccounts(ctx)
+	accounts, err := a.listAuthPoolAccounts(ctx)
 	if err != nil {
 		return err
 	}

@@ -199,6 +199,7 @@ func requireSchemaShape(ctx context.Context, db *sql.DB) error {
 		column string
 	}{
 		{"app_settings", "session_secret"},
+		{"app_settings", "auth_pool_proxy_api_key"},
 		{"users", "username"},
 		{"usage_records", "dedupe_key"},
 		{"usage_records", "ttft_ms"},

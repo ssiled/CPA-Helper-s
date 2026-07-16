@@ -36,6 +36,36 @@ type authPoolStatus struct {
 	Bindings []authPoolBinding `json:"bindings"`
 }
 
+type authPoolAccountsResponse struct {
+	Items []keeperAccountResponse `json:"items"`
+}
+
+type authPoolProxyConfigResponse struct {
+	CPAURL        string `json:"cpa_url"`
+	APIKeySet     bool   `json:"api_key_set"`
+	APIKeyPreview string `json:"api_key_preview"`
+}
+
+type authPoolProxyConfigPayload struct {
+	APIKey *string `json:"api_key"`
+}
+
+type authPoolAPIKeyAccountPayload struct {
+	Provider   string `json:"provider"`
+	APIKey     string `json:"api_key"`
+	Prefix     string `json:"prefix"`
+	BaseURL    string `json:"base_url"`
+	ProxyURL   string `json:"proxy_url"`
+	Priority   *int   `json:"priority"`
+	Websockets *bool  `json:"websockets"`
+}
+
+type authPoolAPIKeyAccountResponse struct {
+	Provider    string `json:"provider"`
+	AccountType string `json:"account_type"`
+	Count       int    `json:"count"`
+}
+
 type authPoolPayload struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
@@ -78,6 +108,65 @@ func (a *App) handleAuthPools(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 			writeJSON(w, http.StatusOK, pool)
+			return nil
+		default:
+			return methodNotAllowed()
+		}
+	}
+	if len(parts) == 1 && parts[0] == "accounts" {
+		if r.Method != http.MethodGet {
+			return methodNotAllowed()
+		}
+		if !user.IsAdmin {
+			return forbiddenError("admin required")
+		}
+		accounts, err := a.listAuthPoolAccounts(r.Context())
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, authPoolAccountsResponse{Items: keeperAccountResponses(accounts, nil)})
+		return nil
+	}
+	if len(parts) == 2 && parts[0] == "accounts" && parts[1] == "api-key" {
+		if r.Method != http.MethodPost {
+			return methodNotAllowed()
+		}
+		if !user.IsAdmin {
+			return forbiddenError("admin required")
+		}
+		var payload authPoolAPIKeyAccountPayload
+		if err := decodeJSON(r, &payload); err != nil {
+			return err
+		}
+		result, err := a.addAuthPoolAPIKeyAccount(r.Context(), payload)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, result)
+		return nil
+	}
+	if len(parts) == 1 && parts[0] == "proxy-config" {
+		if !user.IsAdmin {
+			return forbiddenError("admin required")
+		}
+		switch r.Method {
+		case http.MethodGet:
+			config, err := a.authPoolProxyConfig(r.Context())
+			if err != nil {
+				return err
+			}
+			writeJSON(w, http.StatusOK, config)
+			return nil
+		case http.MethodPut:
+			var payload authPoolProxyConfigPayload
+			if err := decodeJSON(r, &payload); err != nil {
+				return err
+			}
+			config, err := a.updateAuthPoolProxyConfig(r.Context(), payload)
+			if err != nil {
+				return err
+			}
+			writeJSON(w, http.StatusOK, config)
 			return nil
 		default:
 			return methodNotAllowed()
@@ -179,6 +268,127 @@ func (a *App) deleteAuthPool(ctx context.Context, id string) error {
 		a.refreshChannelStatusAfterChange()
 	}
 	return err
+}
+
+func (a *App) authPoolProxyConfig(ctx context.Context) (authPoolProxyConfigResponse, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return authPoolProxyConfigResponse{}, err
+	}
+	apiKey := strings.TrimSpace(cfg.AuthPoolProxyAPIKey)
+	return authPoolProxyConfigResponse{CPAURL: cfg.Collector.CLIProxyURL, APIKeySet: apiKey != "", APIKeyPreview: maskAPIKey(apiKey)}, nil
+}
+
+func (a *App) updateAuthPoolProxyConfig(ctx context.Context, payload authPoolProxyConfigPayload) (authPoolProxyConfigResponse, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return authPoolProxyConfigResponse{}, err
+	}
+	if payload.APIKey != nil {
+		cfg.AuthPoolProxyAPIKey = strings.TrimSpace(*payload.APIKey)
+	}
+	if err := a.saveConfig(ctx, cfg); err != nil {
+		return authPoolProxyConfigResponse{}, err
+	}
+	if strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "" {
+		_ = a.authPoolPluginRequest(ctx, http.MethodPost, "/proxy-keys", map[string]any{"api_key": cfg.AuthPoolProxyAPIKey}, nil)
+	}
+	return a.authPoolProxyConfig(ctx)
+}
+
+func maskAPIKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ""
+	}
+	runes := []rune(apiKey)
+	if len(runes) <= 10 {
+		return strings.Repeat("*", len(runes))
+	}
+	starCount := len(runes) - 9
+	if starCount < 3 {
+		starCount = 3
+	}
+	return string(runes[:5]) + strings.Repeat("*", starCount) + string(runes[len(runes)-4:])
+}
+
+func (a *App) addAuthPoolAPIKeyAccount(ctx context.Context, payload authPoolAPIKeyAccountPayload) (authPoolAPIKeyAccountResponse, error) {
+	provider, accountType, endpoint, responseKey, defaultBaseURL, err := normalizeAuthPoolAPIKeyProvider(payload.Provider)
+	if err != nil {
+		return authPoolAPIKeyAccountResponse{}, err
+	}
+	apiKey := strings.TrimSpace(payload.APIKey)
+	if apiKey == "" {
+		return authPoolAPIKeyAccountResponse{}, validationError("api key is required")
+	}
+	baseURL := strings.TrimSpace(payload.BaseURL)
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+	entry := map[string]any{"api-key": apiKey}
+	if prefix := strings.TrimSpace(payload.Prefix); prefix != "" {
+		entry["prefix"] = prefix
+	}
+	if baseURL != "" {
+		entry["base-url"] = baseURL
+	}
+	if proxyURL := strings.TrimSpace(payload.ProxyURL); proxyURL != "" {
+		entry["proxy-url"] = proxyURL
+	}
+	if payload.Priority != nil {
+		entry["priority"] = *payload.Priority
+	}
+	if provider == "xai" && payload.Websockets != nil {
+		entry["websockets"] = *payload.Websockets
+	}
+
+	var current map[string]json.RawMessage
+	if err := a.cpaManagementJSON(ctx, http.MethodGet, endpoint, nil, &current); err != nil {
+		return authPoolAPIKeyAccountResponse{}, err
+	}
+	items := upsertCPAConfigKeyItem(cpaConfigKeyItems(current, responseKey), entry, apiKey)
+	if err := a.cpaManagementJSON(ctx, http.MethodPut, endpoint, map[string]any{"items": items}, nil); err != nil {
+		return authPoolAPIKeyAccountResponse{}, err
+	}
+	_ = a.syncAuthPoolModels(ctx)
+	a.refreshChannelStatusAfterChange()
+	return authPoolAPIKeyAccountResponse{Provider: provider, AccountType: accountType, Count: len(items)}, nil
+}
+
+func normalizeAuthPoolAPIKeyProvider(value string) (provider string, accountType string, endpoint string, responseKey string, defaultBaseURL string, err error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "gemini", "google", "gemini-api-key", "google-api-key":
+		return "gemini", "gemini", "/v0/management/gemini-api-key", "gemini-api-key", "", nil
+	case "grok", "xai", "x.ai", "supergrok", "xai-api-key":
+		return "xai", "grok", "/v0/management/xai-api-key", "xai-api-key", "https://api.x.ai/v1", nil
+	default:
+		return "", "", "", "", "", validationError("unsupported account provider")
+	}
+}
+
+func cpaConfigKeyItems(raw map[string]json.RawMessage, responseKey string) []map[string]any {
+	if raw == nil {
+		return []map[string]any{}
+	}
+	var items []map[string]any
+	if data := raw[responseKey]; len(data) > 0 {
+		_ = json.Unmarshal(data, &items)
+	}
+	if items == nil {
+		items = []map[string]any{}
+	}
+	return items
+}
+
+func upsertCPAConfigKeyItem(items []map[string]any, entry map[string]any, apiKey string) []map[string]any {
+	apiKey = strings.TrimSpace(apiKey)
+	for index, item := range items {
+		if strings.TrimSpace(keeperString(item["api-key"])) == apiKey {
+			items[index] = entry
+			return items
+		}
+	}
+	return append(items, entry)
 }
 
 func (a *App) bindAPIKeyToAuthPool(ctx context.Context, user *AuthUser, payload authPoolBindingPayload) (authPoolBinding, error) {
@@ -413,12 +623,35 @@ func (a *App) authPoolPluginRequest(ctx context.Context, method, path string, bo
 	return nil
 }
 
+func (a *App) cpaManagementJSON(ctx context.Context, method, path string, body any, target any) error {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.Collector.CLIProxyURL) == "" || strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
+		return validationError("CPA URL and management key are required")
+	}
+	response, payload, err := doJSON(ctx, httpClient(apiKeySyncTimeout), method, makeURL(cfg.Collector.CLIProxyURL, path, nil), managementHeaders(cfg.Collector.ManagementKey), body)
+	if err != nil {
+		return remoteAPIKeyError("CPA management request failed", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return validationError(fmt.Sprintf("CPA management request failed: HTTP %d %s", response.StatusCode, strings.TrimSpace(string(payload))))
+	}
+	if target != nil && len(payload) > 0 {
+		if err := json.Unmarshal(payload, target); err != nil {
+			return validationError("CPA management returned invalid JSON")
+		}
+	}
+	return nil
+}
+
 func (a *App) syncAuthPoolModels(ctx context.Context) error {
 	var status authPoolStatus
 	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
 		return err
 	}
-	accounts, err := a.listKeeperAccounts(ctx)
+	accounts, err := a.listAuthPoolAccounts(ctx)
 	if err != nil {
 		return err
 	}
@@ -454,6 +687,151 @@ func authPoolsNeedModelSync(pools []authPool) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) listAuthPoolAccounts(ctx context.Context) ([]keeperAccount, error) {
+	localAccounts, err := a.listKeeperAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]keeperAccount, len(localAccounts))
+	for _, account := range localAccounts {
+		if name := strings.TrimSpace(account.Name); name != "" {
+			byName[name] = account
+		}
+	}
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	remoteAccounts, err := a.listKeeperRemoteAuthFiles(ctx, cfg)
+	if err != nil {
+		if len(localAccounts) > 0 {
+			return localAccounts, nil
+		}
+		return nil, err
+	}
+	for _, item := range remoteAccounts {
+		remote := authPoolAccountFromRemoteAuthFile(item)
+		name := strings.TrimSpace(remote.Name)
+		if name == "" {
+			continue
+		}
+		if local, ok := byName[name]; ok {
+			byName[name] = mergeAuthPoolAccount(local, remote)
+			continue
+		}
+		byName[name] = remote
+	}
+	accounts := make([]keeperAccount, 0, len(byName))
+	for _, account := range byName {
+		accounts = append(accounts, account)
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		leftType := strings.ToLower(stringPtrValue(accounts[i].AccountType))
+		rightType := strings.ToLower(stringPtrValue(accounts[j].AccountType))
+		if leftType == rightType {
+			return strings.ToLower(accounts[i].Name) < strings.ToLower(accounts[j].Name)
+		}
+		return leftType < rightType
+	})
+	return accounts, nil
+}
+
+func authPoolAccountFromRemoteAuthFile(item map[string]any) keeperAccount {
+	accountType := authPoolRemoteAccountType(item)
+	return keeperAccount{
+		Name:           firstKeeperString(item, "name", "file_name", "filename", "id", "path"),
+		Email:          keeperStringPtr(item["email"], item["account_email"], item["user_email"], item["username"], item["subject"]),
+		AuthIndex:      keeperRemoteAuthIndex(item),
+		AccountType:    &accountType,
+		Disabled:       keeperBool(item["disabled"]),
+		Priority:       keeperIntPtr(item["priority"]),
+		LastStatusCode: keeperIntPtr(item["last_status_code"], item["status_code"]),
+		LastError:      keeperStringPtr(item["last_error"], item["error"]),
+	}
+}
+
+func mergeAuthPoolAccount(local keeperAccount, remote keeperAccount) keeperAccount {
+	local.Disabled = remote.Disabled
+	if local.Email == nil {
+		local.Email = remote.Email
+	}
+	if local.AuthIndex == nil {
+		local.AuthIndex = remote.AuthIndex
+	}
+	if local.AccountType == nil || stringPtrValue(local.AccountType) == "unknown" {
+		local.AccountType = remote.AccountType
+	}
+	if local.Priority == nil {
+		local.Priority = remote.Priority
+	}
+	if local.LastStatusCode == nil {
+		local.LastStatusCode = remote.LastStatusCode
+	}
+	if local.LastError == nil {
+		local.LastError = remote.LastError
+	}
+	return local
+}
+
+func authPoolRemoteAccountType(item map[string]any) string {
+	values := []string{}
+	for _, key := range []string{"account_type", "accountType", "provider", "type", "kind", "source", "service", "channel", "name", "file_name", "filename", "id"} {
+		if value := keeperString(item[key]); value != "" {
+			values = append(values, value)
+		}
+	}
+	if path := keeperString(item["path"]); path != "" {
+		values = append(values, path)
+	}
+	text := strings.ToLower(strings.Join(values, " "))
+	switch {
+	case strings.Contains(text, "gemini") || strings.Contains(text, "google"):
+		return "gemini"
+	case strings.Contains(text, "grok") || strings.Contains(text, "xai") || strings.Contains(text, "x.ai"):
+		return "grok"
+	case strings.Contains(text, "claude") || strings.Contains(text, "anthropic"):
+		return "claude"
+	}
+	if value := accountTypeFromKeeperDetail(item, nil); value != nil && strings.TrimSpace(*value) != "unknown" {
+		return strings.TrimSpace(*value)
+	}
+	if value := sanitizeAuthPoolAccountType(text); value != "" {
+		return value
+	}
+	return "unknown"
+}
+
+func sanitizeAuthPoolAccountType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("-", "_", " ", "_", ".", "_", "@", "_", "/", "_", "\\", "_").Replace(value)
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == '_' })
+	cleaned := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	return strings.Join(cleaned, "_")
+}
+
+func firstKeeperString(item map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value := keeperString(item[key])
+		if value == "" {
+			continue
+		}
+		if key == "path" {
+			parts := strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' })
+			if len(parts) > 0 {
+				value = parts[len(parts)-1]
+			}
+		}
+		return value
+	}
+	return ""
 }
 func authIDsForModelSync(pools []authPool, accounts []keeperAccount) []string {
 	seen := map[string]bool{}

@@ -60,6 +60,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testColumnExists(t, app.db, "app_settings", "model_request_url") {
 		t.Fatal("app_settings.model_request_url was not created")
 	}
+	if !testColumnExists(t, app.db, "app_settings", "auth_pool_proxy_api_key") {
+		t.Fatal("app_settings.auth_pool_proxy_api_key was not created")
+	}
 	if !testColumnExists(t, app.db, "users", "quota_lifetime_usd") {
 		t.Fatal("users.quota_lifetime_usd was not created")
 	}

@@ -16,6 +16,7 @@ var cpaOAuthProviders = map[string]string{
 	"gemini":      "/v0/management/gemini-cli-auth-url",
 	"antigravity": "/v0/management/antigravity-auth-url",
 	"kimi":        "/v0/management/kimi-auth-url",
+	"xai":         "/v0/management/xai-auth-url",
 }
 
 type cpaOAuthAuthURLRequest struct {
@@ -157,6 +158,8 @@ func normalizeCPAOAuthProvider(value string) (string, string, error) {
 		provider = "gemini"
 	case "openai":
 		provider = "codex"
+	case "grok", "supergrok", "x.ai":
+		provider = "xai"
 	}
 	endpoint, ok := cpaOAuthProviders[provider]
 	if !ok {
@@ -171,6 +174,7 @@ func cpaOAuthProviderList() []map[string]string {
 		{"id": "anthropic", "label": "Claude"},
 		{"id": "gemini", "label": "Gemini CLI"},
 		{"id": "antigravity", "label": "Antigravity"},
+		{"id": "xai", "label": "Grok / xAI"},
 		{"id": "kimi", "label": "Kimi"},
 	}
 }

@@ -274,6 +274,10 @@ export interface AuthPoolStatus {
   bindings: AuthPoolBinding[]
 }
 
+export interface AuthPoolAccountsResponse {
+  items: CodexKeeperAccount[]
+}
+
 export interface AuthPoolPayload {
   id: string
   name: string

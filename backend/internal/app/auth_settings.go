@@ -450,8 +450,13 @@ func (a *App) testCurrentUserModelRequest(ctx context.Context, user *AuthUser, p
 	if err != nil {
 		return modelRequestTestResponse{}, err
 	}
-	target := strings.TrimRight(modelRequestOpenAIBaseURL(cfg.ModelRequestURL), "/") + modelRequestEndpointPath(endpoint)
-	headers := modelRequestEndpointHeaders(endpoint, strings.TrimSpace(*apiKey.APIKey))
+	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg, strings.TrimSpace(*apiKey.APIKey))
+	if err != nil {
+		return modelRequestTestResponse{}, err
+	}
+	target := strings.TrimRight(modelRequestOpenAIBaseURL(cfg.Collector.CLIProxyURL), "/") + modelRequestEndpointPath(endpoint)
+	headers := modelRequestEndpointHeaders(endpoint, upstreamAPIKey)
+	headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
 	requestBody := modelRequestEndpointBody(endpoint, model, message)
 
 	start := time.Now()
