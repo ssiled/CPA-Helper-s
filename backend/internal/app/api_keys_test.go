@@ -42,7 +42,7 @@ func TestListAPIKeysReturnsEmptyArrayForFreshAccount(t *testing.T) {
 	}
 }
 
-func TestAccountModelRequestGuideUsesHelperURL(t *testing.T) {
+func TestAccountModelRequestGuideUsesConfiguredURL(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
 	app, err := backendApp.New()
@@ -70,13 +70,13 @@ func TestAccountModelRequestGuideUsesHelperURL(t *testing.T) {
 		ChatCompletionsURL string `json:"chat_completions_url"`
 	}
 	requestJSON(t, handler, http.MethodGet, "/api/account/model-request", nil, cookies, &guide)
-	if guide.ModelRequestURL != "http://example.com" {
+	if guide.ModelRequestURL != "http://models.example.local/proxy" {
 		t.Fatalf("model_request_url = %q", guide.ModelRequestURL)
 	}
-	if guide.OpenAIBaseURL != "http://example.com/v1" {
+	if guide.OpenAIBaseURL != "http://models.example.local/proxy/v1" {
 		t.Fatalf("openai_base_url = %q", guide.OpenAIBaseURL)
 	}
-	if guide.ChatCompletionsURL != "http://example.com/v1/chat/completions" {
+	if guide.ChatCompletionsURL != "http://models.example.local/proxy/v1/chat/completions" {
 		t.Fatalf("chat_completions_url = %q", guide.ChatCompletionsURL)
 	}
 
@@ -84,10 +84,13 @@ func TestAccountModelRequestGuideUsesHelperURL(t *testing.T) {
 		"model_request_url": "http://models.example.local/v1",
 	}, cookies, nil)
 	requestJSON(t, handler, http.MethodGet, "/api/account/model-request", nil, cookies, &guide)
-	if guide.OpenAIBaseURL != "http://example.com/v1" {
+	if guide.ModelRequestURL != "http://models.example.local/v1" {
+		t.Fatalf("model_request_url with existing /v1 = %q", guide.ModelRequestURL)
+	}
+	if guide.OpenAIBaseURL != "http://models.example.local/v1" {
 		t.Fatalf("openai_base_url with existing /v1 = %q", guide.OpenAIBaseURL)
 	}
-	if guide.ChatCompletionsURL != "http://example.com/v1/chat/completions" {
+	if guide.ChatCompletionsURL != "http://models.example.local/v1/chat/completions" {
 		t.Fatalf("chat_completions_url with existing /v1 = %q", guide.ChatCompletionsURL)
 	}
 }

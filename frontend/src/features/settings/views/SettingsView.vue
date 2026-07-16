@@ -175,7 +175,7 @@ onMounted(refresh)
                 <div class="field-label">{{ t('模型请求地址（填写 CPA-Helper 域名）', 'Model request URL (CPA-Helper domain)') }}</div>
                 <NInput
                   v-model:value="settingsForm.model_request_url"
-                  :placeholder="t('例如：https://silenceapi.site', 'Example: https://silenceapi.site')"
+                  :placeholder="t('例如：https://your-helper.example.com', 'Example: https://your-helper.example.com')"
                 />
               </div>
               <NFormItem :label="t('管理密钥', 'Management key')">
