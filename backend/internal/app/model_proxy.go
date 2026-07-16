@@ -30,7 +30,7 @@ func (a *App) handleModelProxy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if apiKey.APIKey == nil || strings.TrimSpace(*apiKey.APIKey) == "" {
-		return authenticationError("API KEY 不可用")
+		return authenticationError("API KEY unavailable")
 	}
 	if r.URL.Path == "/v1/models" && r.Method == http.MethodGet {
 		return a.handleModelProxyModels(w, r, apiKey)
@@ -44,11 +44,11 @@ func (a *App) modelProxyAPIKey(ctx context.Context, r *http.Request) (UserAPIKey
 		apiKey = strings.TrimSpace(r.Header.Get("x-api-key"))
 	}
 	if apiKey == "" {
-		return UserAPIKey{}, authenticationError("API KEY 不能为空")
+		return UserAPIKey{}, authenticationError("API KEY is required")
 	}
 	binding, err := a.getAPIKey(ctx, hashAPIKey(apiKey))
 	if err != nil {
-		return UserAPIKey{}, authenticationError("API KEY 不正确")
+		return UserAPIKey{}, authenticationError("API KEY unavailable")
 	}
 	if err := a.ensureAPIKeyUserActive(ctx, binding.UserID); err != nil {
 		return UserAPIKey{}, err
@@ -74,7 +74,7 @@ func (a *App) ensureAPIKeyUserActive(ctx context.Context, userID int) error {
 		return err
 	}
 	if user.DisabledAt != nil {
-		return authenticationError("API KEY 不可用")
+		return authenticationError("API KEY unavailable")
 	}
 	user, err = a.ensureQuotaMonth(ctx, user)
 	if err != nil {
@@ -89,7 +89,7 @@ func (a *App) ensureAPIKeyUserActive(ctx context.Context, userID int) error {
 	}
 	if user.QuotaPausedAt != nil || !quotaHasAvailable(user) {
 		_ = a.pauseUserKeysForQuota(ctx, user.ID, quotaPauseReasonExhausted)
-		return forbiddenError("用户额度已用尽，API KEY 已暂停")
+		return forbiddenError("User quota exhausted; API KEY paused")
 	}
 	return nil
 }
@@ -99,7 +99,7 @@ func (a *App) handleModelProxyModels(w http.ResponseWriter, r *http.Request, api
 	if err != nil {
 		return err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg, strings.TrimSpace(*apiKey.APIKey))
+	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (a *App) handleModelProxyModels(w http.ResponseWriter, r *http.Request, api
 	headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
 	response, payload, err := doJSON(r.Context(), httpClient(modelListTimeout), http.MethodGet, makeURL(cfg.Collector.CLIProxyURL, "/v1/models", r.URL.Query()), headers, nil)
 	if err != nil {
-		return validationError("CPA 模型列表请求失败：" + err.Error())
+		return validationError("CPA model list request failed: " + err.Error())
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		writeRawProxyResponse(w, response, payload)
@@ -125,7 +125,7 @@ func (a *App) handleModelProxyModels(w http.ResponseWriter, r *http.Request, api
 	}
 	filtered, err := filterRawModelItems(payload, filter)
 	if err != nil {
-		return validationError("CPA 模型列表响应格式无效")
+		return validationError("Invalid CPA model list response")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": filtered})
 	return nil
@@ -154,7 +154,7 @@ func filterRawModelItems(payload []byte, filter map[string]bool) ([]any, error) 
 func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, apiKey UserAPIKey) error {
 	body, err := readLimitedProxyBody(r)
 	if err != nil {
-		return validationError("请求体过大")
+		return validationError("Request body too large")
 	}
 	if model := modelFromProxyBody(body); model != "" {
 		if err := a.ensureAPIKeyModelAllowedByPool(r.Context(), apiKey.APIKeyHash, model); err != nil {
@@ -165,7 +165,7 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	if err != nil {
 		return err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg, strings.TrimSpace(*apiKey.APIKey))
+	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	request.Header = modelProxyRequestHeaders(r, upstreamAPIKey, apiKey.APIKeyHash)
 	response, err := httpClient(0).Do(request)
 	if err != nil {
-		return validationError("CPA 请求失败：" + err.Error())
+		return validationError("CPA request failed: " + err.Error())
 	}
 	defer response.Body.Close()
 	copyProxyHeaders(w.Header(), response.Header)
@@ -210,13 +210,10 @@ func modelFromProxyBody(body []byte) string {
 	return strings.TrimSpace(model)
 }
 
-func authPoolProxyUpstreamAPIKey(cfg AppConfig, fallback string) (string, error) {
+func authPoolProxyUpstreamAPIKey(cfg AppConfig) (string, error) {
 	apiKey := strings.TrimSpace(cfg.AuthPoolProxyAPIKey)
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(fallback)
-	}
-	if apiKey == "" {
-		return "", validationError("???? CPA ?? API KEY ????? API KEY")
+		return "", validationError("Set CPA forwarding API KEY in auth-pool plugin settings first")
 	}
 	return apiKey, nil
 }

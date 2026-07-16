@@ -287,11 +287,13 @@ func (a *App) updateAuthPoolProxyConfig(ctx context.Context, payload authPoolPro
 	if payload.APIKey != nil {
 		cfg.AuthPoolProxyAPIKey = strings.TrimSpace(*payload.APIKey)
 	}
+	if strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "" {
+		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/proxy-keys", map[string]any{"api_key": cfg.AuthPoolProxyAPIKey}, nil); err != nil {
+			return authPoolProxyConfigResponse{}, err
+		}
+	}
 	if err := a.saveConfig(ctx, cfg); err != nil {
 		return authPoolProxyConfigResponse{}, err
-	}
-	if strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "" {
-		_ = a.authPoolPluginRequest(ctx, http.MethodPost, "/proxy-keys", map[string]any{"api_key": cfg.AuthPoolProxyAPIKey}, nil)
 	}
 	return a.authPoolProxyConfig(ctx)
 }

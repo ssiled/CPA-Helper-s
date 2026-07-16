@@ -450,7 +450,7 @@ func (a *App) testCurrentUserModelRequest(ctx context.Context, user *AuthUser, p
 	if err != nil {
 		return modelRequestTestResponse{}, err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg, strings.TrimSpace(*apiKey.APIKey))
+	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
 	if err != nil {
 		return modelRequestTestResponse{}, err
 	}

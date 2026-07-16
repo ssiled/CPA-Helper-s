@@ -1,11 +1,9 @@
 package app_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	backendApp "cpa-helper/backend/internal/app"
@@ -153,38 +151,32 @@ func TestCreateAPIKeyUsesKeyPolicyPluginWhenInstalled(t *testing.T) {
 		"description": "Plugin key",
 	}, cookies, &created)
 
-	if pluginCalls != 1 {
-		t.Fatalf("plugin calls = %d, want 1", pluginCalls)
+	if pluginCalls != 0 {
+		t.Fatalf("plugin calls = %d, want 0", pluginCalls)
 	}
-	if created.APIKey != "cpa_plugin_test_key" {
-		t.Fatalf("api key = %q, want plugin key", created.APIKey)
+	if created.APIKey == "" || created.APIKey == "cpa_plugin_test_key" {
+		t.Fatalf("api key = %q, want local helper key", created.APIKey)
 	}
 }
 
 func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
-	var expectedAuth string
-	remoteKeys := []string{}
+	const proxyKey = "sk-cpa-proxy"
+	var expectedHash string
 	chatCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
-			var payload struct {
-				Old string `json:"old"`
-				New string `json:"new"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			remoteKeys = append(remoteKeys, payload.New)
-			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": remoteKeys})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
 		case r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost:
 			chatCalls++
-			if got := r.Header.Get("Authorization"); got != expectedAuth {
-				t.Fatalf("Authorization = %q, want %q", got, expectedAuth)
+			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
+				t.Fatalf("Authorization = %q, want proxy key", got)
+			}
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != expectedHash {
+				t.Fatalf("helper key hash header = %q, want %q", got, expectedHash)
 			}
 			var payload struct {
 				Model    string `json:"model"`
@@ -228,21 +220,24 @@ func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 	handler := app.Routes()
 	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
 		"username": "admin",
-		"password": "test-password",
+		"password": "password123",
 		"nickname": "Admin",
 	}, nil, nil)
 	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
 		"cliaproxy_url":     cpa.URL,
 		"model_request_url": cpa.URL,
-		"management_key":    "test-management-key",
+		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"api_key": proxyKey,
 	}, cookies, nil)
 
 	created := apiKeyCreateResponse{}
 	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
 		"description": "VSCode",
 	}, cookies, &created)
-	expectedAuth = "Bearer " + created.APIKey
+	expectedHash = created.APIKeyHash
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -275,27 +270,21 @@ func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 func TestAccountModelRequestTestSupportsResponsesEndpoint(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
-	var expectedAuth string
-	remoteKeys := []string{}
+	const proxyKey = "sk-cpa-proxy"
+	var expectedHash string
 	responsesCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
-			var payload struct {
-				Old string `json:"old"`
-				New string `json:"new"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			remoteKeys = append(remoteKeys, payload.New)
-			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": remoteKeys})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
 		case r.URL.Path == "/v1/responses" && r.Method == http.MethodPost:
 			responsesCalls++
-			if got := r.Header.Get("Authorization"); got != expectedAuth {
-				t.Fatalf("Authorization = %q, want %q", got, expectedAuth)
+			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
+				t.Fatalf("Authorization = %q, want proxy key", got)
+			}
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != expectedHash {
+				t.Fatalf("helper key hash header = %q, want %q", got, expectedHash)
 			}
 			var payload struct {
 				Model  string `json:"model"`
@@ -334,21 +323,24 @@ func TestAccountModelRequestTestSupportsResponsesEndpoint(t *testing.T) {
 	handler := app.Routes()
 	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
 		"username": "admin",
-		"password": "test-password",
+		"password": "password123",
 		"nickname": "Admin",
 	}, nil, nil)
 	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
 		"cliaproxy_url":     cpa.URL,
 		"model_request_url": cpa.URL,
-		"management_key":    "test-management-key",
+		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"api_key": proxyKey,
 	}, cookies, nil)
 
 	created := apiKeyCreateResponse{}
 	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
 		"description": "VSCode",
 	}, cookies, &created)
-	expectedAuth = "Bearer " + created.APIKey
+	expectedHash = created.APIKeyHash
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -378,27 +370,21 @@ func TestAccountModelRequestTestSupportsResponsesEndpoint(t *testing.T) {
 func TestAccountModelRequestTestSupportsClaudeMessagesEndpoint(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
-	var expectedAPIKey string
-	remoteKeys := []string{}
+	const proxyKey = "sk-cpa-proxy"
+	var expectedHash string
 	claudeCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
-			var payload struct {
-				Old string `json:"old"`
-				New string `json:"new"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			remoteKeys = append(remoteKeys, payload.New)
-			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": remoteKeys})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
 		case r.URL.Path == "/v1/messages" && r.Method == http.MethodPost:
 			claudeCalls++
-			if got := r.Header.Get("x-api-key"); got != expectedAPIKey {
-				t.Fatalf("x-api-key = %q, want %q", got, expectedAPIKey)
+			if got := r.Header.Get("x-api-key"); got != proxyKey {
+				t.Fatalf("x-api-key = %q, want proxy key", got)
+			}
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != expectedHash {
+				t.Fatalf("helper key hash header = %q, want %q", got, expectedHash)
 			}
 			if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
 				t.Fatalf("anthropic-version = %q, want 2023-06-01", got)
@@ -445,21 +431,24 @@ func TestAccountModelRequestTestSupportsClaudeMessagesEndpoint(t *testing.T) {
 	handler := app.Routes()
 	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
 		"username": "admin",
-		"password": "test-password",
+		"password": "password123",
 		"nickname": "Admin",
 	}, nil, nil)
 	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
 		"cliaproxy_url":     cpa.URL,
 		"model_request_url": cpa.URL,
-		"management_key":    "test-management-key",
+		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"api_key": proxyKey,
 	}, cookies, nil)
 
 	created := apiKeyCreateResponse{}
 	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
 		"description": "VSCode",
 	}, cookies, &created)
-	expectedAPIKey = created.APIKey
+	expectedHash = created.APIKeyHash
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -540,7 +529,7 @@ func TestAccountModelRequestTestRejectsOtherUserAPIKey(t *testing.T) {
 	}, memberCookies, http.StatusNotFound)
 }
 
-func TestCreateAPIKeyWithoutCPAConfigGuidesToSettings(t *testing.T) {
+func TestCreateGeneratedAPIKeyDoesNotRequireCPAConfig(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
 	app, err := backendApp.New()
@@ -552,84 +541,28 @@ func TestCreateAPIKeyWithoutCPAConfigGuidesToSettings(t *testing.T) {
 	handler := app.Routes()
 	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
 		"username": "admin",
-		"password": "test-password",
+		"password": "password123",
 		"nickname": "Admin",
 	}, nil, nil)
 
-	body, err := json.Marshal(map[string]any{"description": "VSCode"})
-	if err != nil {
-		t.Fatalf("marshal request body: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, "/api/api-keys", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	for _, cookie := range cookies {
-		request.AddCookie(cookie)
-	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-
-	if recorder.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("POST /api/api-keys returned %d: %s", recorder.Code, recorder.Body.String())
-	}
-	message := recorder.Body.String()
-	if !strings.Contains(message, "CPA 配置未完成") ||
-		!strings.Contains(message, "系统设置") ||
-		!strings.Contains(message, "CLIProxyAPI 地址和管理密钥") {
-		t.Fatalf("missing actionable CPA config guidance in response: %s", message)
+	created := apiKeyCreateResponse{}
+	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"description": "VSCode",
+	}, cookies, &created)
+	if created.APIKey == "" || created.APIKeyHash == "" {
+		t.Fatalf("created API key response is missing key fields: %#v", created)
 	}
 }
 
-func TestCreateAPIKeyUsesPatchAppendWhenRemoteListIsEmpty(t *testing.T) {
+func TestCreateGeneratedAPIKeyDoesNotSyncToCPA(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
-	remoteKeys := []string{}
-	getCalls := 0
-	putCalls := 0
-	patchCalls := 0
-	badPatchPayload := ""
+	remoteCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/management/api-keys" {
-			http.NotFound(w, r)
-			return
+		if r.URL.Path == "/v0/management/api-keys" {
+			remoteCalls++
 		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.Method {
-		case http.MethodPatch:
-			patchCalls++
-			var payload struct {
-				Old string `json:"old"`
-				New string `json:"new"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if payload.Old == "" || payload.New == "" || payload.Old != payload.New {
-				badPatchPayload = "old/new key must be the same non-empty value"
-				http.Error(w, badPatchPayload, http.StatusBadRequest)
-				return
-			}
-			replaced := false
-			for index, key := range remoteKeys {
-				if key == payload.Old {
-					remoteKeys[index] = payload.New
-					replaced = true
-					break
-				}
-			}
-			if !replaced {
-				remoteKeys = append(remoteKeys, payload.New)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": remoteKeys})
-		case http.MethodGet:
-			getCalls++
-			http.Error(w, "GET should not be needed to create the first API key", http.StatusInternalServerError)
-		case http.MethodPut:
-			putCalls++
-			http.Error(w, "PUT should not be needed to create the first API key", http.StatusInternalServerError)
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
+		http.NotFound(w, r)
 	}))
 	defer cpa.Close()
 
@@ -642,12 +575,12 @@ func TestCreateAPIKeyUsesPatchAppendWhenRemoteListIsEmpty(t *testing.T) {
 	handler := app.Routes()
 	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
 		"username": "admin",
-		"password": "test-password",
+		"password": "password123",
 		"nickname": "Admin",
 	}, nil, nil)
 	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
 		"cliaproxy_url":     cpa.URL,
-		"management_key":    "test-management-key",
+		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
 	}, cookies, nil)
 
@@ -659,14 +592,8 @@ func TestCreateAPIKeyUsesPatchAppendWhenRemoteListIsEmpty(t *testing.T) {
 	if created.APIKey == "" || created.APIKeyHash == "" {
 		t.Fatalf("created API key response is missing key fields: %#v", created)
 	}
-	if len(remoteKeys) != 1 || remoteKeys[0] != created.APIKey {
-		t.Fatalf("remote keys = %#v, want the created key %#v", remoteKeys, created.APIKey)
-	}
-	if badPatchPayload != "" {
-		t.Fatal(badPatchPayload)
-	}
-	if patchCalls != 1 || getCalls != 0 || putCalls != 0 {
-		t.Fatalf("remote call counts patch/get/put = %d/%d/%d, want 1/0/0", patchCalls, getCalls, putCalls)
+	if remoteCalls != 0 {
+		t.Fatalf("CPA api-key sync calls = %d, want 0", remoteCalls)
 	}
 }
 
@@ -677,8 +604,8 @@ func TestModelProxyModelsFiltersToBoundPool(t *testing.T) {
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch:
-			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": []string{"ok"}})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
 		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"pools": []map[string]any{{"id": "free", "name": "Free", "enabled": true, "models": []string{"gpt-free"}}},
@@ -686,8 +613,11 @@ func TestModelProxyModelsFiltersToBoundPool(t *testing.T) {
 		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"binding": map[string]any{"api_key_hash": created.APIKeyHash, "pool_id": "free"}})
 		case r.URL.Path == "/v1/models" && r.Method == http.MethodGet:
-			if got := r.Header.Get("Authorization"); got != "Bearer "+created.APIKey {
-				t.Fatalf("Authorization = %q, want helper key forwarded", got)
+			if got := r.Header.Get("Authorization"); got != "Bearer sk-cpa-proxy" {
+				t.Fatalf("Authorization = %q, want proxy key forwarded", got)
+			}
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != created.APIKeyHash {
+				t.Fatalf("helper key hash header = %q, want %q", got, created.APIKeyHash)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{
 				{"id": "gpt-free", "object": "model"},
@@ -715,6 +645,9 @@ func TestModelProxyModelsFiltersToBoundPool(t *testing.T) {
 		"cliaproxy_url":     cpa.URL,
 		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"api_key": "sk-cpa-proxy",
 	}, cookies, nil)
 	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{"description": "Proxy key"}, cookies, &created)
 	requestJSON(t, handler, http.MethodPost, "/api/auth-pools/bindings", map[string]any{

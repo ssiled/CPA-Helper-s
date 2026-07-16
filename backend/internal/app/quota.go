@@ -274,20 +274,7 @@ func (a *App) pauseUserKeysForQuota(ctx context.Context, userID int, reason stri
 		    quota_pause_reason = ?, quota_sync_error = NULL, updated_at = ?
 		WHERE id = ?
 	`, now, reason, now, userID)
-	if err != nil {
-		return err
-	}
-	keys, err := a.userAPIKeys(ctx, userID)
-	if err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if err := a.removeRemoteAPIKeyHash(ctx, key.APIKeyHash); err != nil {
-			_ = a.setQuotaSyncError(ctx, userID, err)
-			return nil
-		}
-	}
-	return nil
+	return err
 }
 
 func (a *App) restoreQuotaPausedUserIfAvailable(ctx context.Context, userID int) error {
@@ -301,29 +288,6 @@ func (a *App) restoreQuotaPausedUserIfAvailable(ctx context.Context, userID int)
 	}
 	if user.QuotaPausedAt == nil || user.DisabledAt != nil || !quotaHasAvailable(user) {
 		return nil
-	}
-	keys, err := a.userAPIKeys(ctx, userID)
-	if err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if key.APIKey == nil {
-			return a.setQuotaSyncMessage(ctx, userID, "存在无法恢复的 API KEY，请重新绑定后再恢复")
-		}
-	}
-	restored := []string{}
-	for _, key := range keys {
-		if key.APIKey == nil {
-			continue
-		}
-		if err := a.addRemoteAPIKey(ctx, *key.APIKey); err != nil {
-			for _, hash := range restored {
-				_ = a.removeRemoteAPIKeyHash(ctx, hash)
-			}
-			_ = a.setQuotaSyncError(ctx, userID, err)
-			return nil
-		}
-		restored = append(restored, key.APIKeyHash)
 	}
 	_, err = a.db.ExecContext(ctx, `
 		UPDATE users
