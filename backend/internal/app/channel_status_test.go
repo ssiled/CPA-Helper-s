@@ -46,8 +46,8 @@ func TestBuildChannelStatusItemsUsesPoolsAndHidesAccounts(t *testing.T) {
 	if plus.WindowRecords != 1 || plus.WindowSuccessRecords != 1 || plus.WindowFailedRecords != 0 || plus.WindowCostUSD != 4 {
 		t.Fatalf("plus window = records %d success %d failed %d cost %f", plus.WindowRecords, plus.WindowSuccessRecords, plus.WindowFailedRecords, plus.WindowCostUSD)
 	}
-	if plus.PrimaryRemainingPercent == nil || *plus.PrimaryRemainingPercent != 80 {
-		t.Fatalf("plus remaining = %v, want 80", plus.PrimaryRemainingPercent)
+	if plus.PrimaryRemainingPercent == nil || *plus.PrimaryRemainingPercent != 40 {
+		t.Fatalf("plus remaining = %v, want 40", plus.PrimaryRemainingPercent)
 	}
 
 	team := findChannelStatusItem(t, items, "team-pool")
@@ -64,6 +64,28 @@ func TestBuildChannelStatusItemsUsesPoolsAndHidesAccounts(t *testing.T) {
 		if strings.Contains(body, secret) {
 			t.Fatalf("channel status leaked account identity %q in %s", secret, body)
 		}
+	}
+}
+
+func TestBuildChannelStatusItemsWeightsRemainingByPoolSize(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, appTimeLocation)
+	accountType := "plus"
+	usedTenPercent := 10
+	accounts := make([]keeperAccount, 0, 10)
+	for index := 0; index < 10; index++ {
+		account := keeperAccount{Name: strings.Repeat("a", index+1), AccountType: &accountType}
+		if index == 0 {
+			account.PrimaryUsedPercent = &usedTenPercent
+		}
+		accounts = append(accounts, account)
+	}
+
+	items := buildChannelStatusItems([]authPool{
+		{ID: "plus-pool", Name: "Plus pool", AccountTypes: []string{"plus"}, Enabled: true},
+	}, accounts, nil, nil, now)
+	plus := findChannelStatusItem(t, items, "plus-pool")
+	if plus.PrimaryRemainingPercent == nil || *plus.PrimaryRemainingPercent != 99 {
+		t.Fatalf("plus remaining = %v, want 99", plus.PrimaryRemainingPercent)
 	}
 }
 

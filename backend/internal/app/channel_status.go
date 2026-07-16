@@ -325,6 +325,7 @@ func applyChannelAccountStats(item *channelStatusItem, accounts []keeperAccount)
 		item.Available = false
 	}
 	var lastChecked, lastHealthy *time.Time
+	var primaryRemaining, secondaryRemaining channelRemainingAccumulator
 	for _, account := range accounts {
 		status, available := channelAccountStatus(account)
 		if available {
@@ -342,11 +343,13 @@ func applyChannelAccountStats(item *channelStatusItem, accounts []keeperAccount)
 			code := *account.LastStatusCode
 			item.StatusCode = &code
 		}
-		item.PrimaryRemainingPercent = maxRemainingPercent(item.PrimaryRemainingPercent, remainingPercent(account.PrimaryUsedPercent))
-		item.SecondaryRemainingPercent = maxRemainingPercent(item.SecondaryRemainingPercent, remainingPercent(account.SecondaryUsedPercent))
+		primaryRemaining.add(account.PrimaryUsedPercent)
+		secondaryRemaining.add(account.SecondaryUsedPercent)
 		lastChecked = maxTimePtr(lastChecked, account.LastCheckedAt)
 		lastHealthy = maxTimePtr(lastHealthy, account.LastHealthyAt)
 	}
+	item.PrimaryRemainingPercent = primaryRemaining.percent(len(accounts))
+	item.SecondaryRemainingPercent = secondaryRemaining.percent(len(accounts))
 	item.LastCheckedAt = apiDateTimePtr(lastChecked)
 	item.LastHealthyAt = apiDateTimePtr(lastHealthy)
 	if item.Status != "" {
@@ -476,26 +479,45 @@ func isQuotaExhaustedPercent(value *int) bool {
 	return value != nil && *value >= 100
 }
 
+type channelRemainingAccumulator struct {
+	total int
+	known bool
+}
+
+func (a *channelRemainingAccumulator) add(used *int) {
+	if used == nil {
+		a.total += 100
+		return
+	}
+	a.known = true
+	a.total += remainingPercentValue(*used)
+}
+
+func (a channelRemainingAccumulator) percent(accountCount int) *int {
+	if accountCount <= 0 || !a.known {
+		return nil
+	}
+	value := int(float64(a.total)/float64(accountCount) + 0.5)
+	return &value
+}
+
+func remainingPercentValue(used int) int {
+	remaining := 100 - used
+	if remaining < 0 {
+		return 0
+	}
+	if remaining > 100 {
+		return 100
+	}
+	return remaining
+}
+
 func remainingPercent(used *int) *int {
 	if used == nil {
 		return nil
 	}
-	remaining := 100 - *used
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := remainingPercentValue(*used)
 	return &remaining
-}
-
-func maxRemainingPercent(current, next *int) *int {
-	if next == nil {
-		return current
-	}
-	if current == nil || *next > *current {
-		value := *next
-		return &value
-	}
-	return current
 }
 
 func maxTimePtr(current *time.Time, next *time.Time) *time.Time {
