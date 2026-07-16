@@ -9,6 +9,7 @@ import type {
   CodexKeeperSettings,
   CodexKeeperSettingsUpdatePayload,
   CodexKeeperStatus,
+  ChannelStatusResponse,
 } from '@/shared/types/api'
 
 export function getCodexKeeperSettings(): Promise<CodexKeeperSettings> {
@@ -33,6 +34,10 @@ export function getCodexKeeperStatus(): Promise<CodexKeeperStatus> {
 
 export function listCodexKeeperAccounts(): Promise<CodexKeeperAccountsResponse> {
   return apiClient.get<CodexKeeperAccountsResponse>('/codex-keeper/accounts')
+}
+
+export function getChannelStatus(): Promise<ChannelStatusResponse> {
+  return apiClient.get<ChannelStatusResponse>('/channel-status')
 }
 
 export function runCodexKeeperOnce(): Promise<void> {

@@ -114,6 +114,11 @@ export const router = createRouter({
           component: () => import('@/features/models/views/AvailableModelsView.vue'),
         },
         {
+          path: 'account/channel-status',
+          name: 'account-channel-status',
+          component: () => import('@/features/codex-keeper/views/ChannelStatusView.vue'),
+        },
+        {
           path: 'account/settings',
           name: 'account-settings',
           component: () => import('@/features/settings/views/AccountSettingsView.vue'),
