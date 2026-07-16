@@ -172,12 +172,11 @@ onMounted(refresh)
                 <div class="form-help">{{ t('用于采集队列、API Key 同步和管理接口。', 'Used for collection queues, API key sync, and management APIs.') }}</div>
               </div>
               <div class="field-stack">
-                <div class="field-label">{{ t('模型请求地址（例如：填写CPA外网地址）', 'Model request URL (for example, CPA public URL)') }}</div>
+                <div class="field-label">{{ t('模型请求地址（填写 CPA-Helper 域名）', 'Model request URL (CPA-Helper domain)') }}</div>
                 <NInput
                   v-model:value="settingsForm.model_request_url"
-                  :placeholder="t('例如：http://192.168.26.50:8317', 'Example: http://192.168.26.50:8317')"
+                  :placeholder="t('例如：https://silenceapi.site', 'Example: https://silenceapi.site')"
                 />
-                <div class="form-help">{{ t('仅用于 API 密钥页「请求测试」生成 URL 和示例。', 'Only used to generate URLs and examples for request tests on the API keys page.') }}</div>
               </div>
               <NFormItem :label="t('管理密钥', 'Management key')">
                 <NInput

@@ -799,7 +799,7 @@ onMounted(refresh)
     <section class="panel api-key-panel-shell">
       <div class="panel-inner api-key-panel">
         <NAlert type="warning" :bordered="false" :title="t('请求链路说明', 'Request path note')">
-          {{ t('Agent 发起的模型请求仍需 Agent 直接发送到 CPA，CPA-Helper 不代理或中转这些请求；仅调用 CPA 的 usage 队列、API KEY 创建与删除、凭证管理等接口，用于用量查看、密钥创建和凭证维护。API 密钥拥有当前账号的完整权限，请妥善保管。', 'Model requests from agents must still be sent directly to CPA by the agent. CPA-Helper does not proxy or relay these requests. It only calls CPA usage queue, API key create/delete, and credential management APIs for usage views, key creation, and credential maintenance. API keys have full permissions for the current account; store them carefully.') }}
+          {{ t('Agent 的模型请求请发送到 CPA-Helper 的 /v1 地址；CPA-Helper 会按当前 API KEY 绑定的号池过滤模型并转发到 CPA。API 密钥拥有当前账号的完整权限，请妥善保管。', 'Send agent model requests to the CPA-Helper /v1 URL. CPA-Helper filters models by the auth pool bound to the API key and forwards requests to CPA. API keys have full permissions for the current account; store them carefully.') }}
         </NAlert>
 
         <NAlert v-if="quotaStatus?.paused" type="error" :bordered="false" :title="t('额度已用尽', 'Quota exhausted')">
