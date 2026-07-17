@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { NAlert, NButton, NIcon, NInput, NModal, NSelect, NSpin, NSwitch, NTag } from 'naive-ui'
+import { NAlert, NButton, NIcon, NInput, NModal, NSelect, NSpin, NSwitch, NTag, useMessage } from 'naive-ui'
 import {
   AlertTriangle,
   Clock3,
@@ -20,6 +20,7 @@ import {
 } from 'lucide-vue-next'
 
 import {
+  checkCardShopProductStatus,
   getCardShopFavorites,
   getCardShopTags,
   getCardShops,
@@ -27,7 +28,7 @@ import {
   updateCardShopFavorite,
 } from '@/features/card-shops/api/cardShopsApi'
 import { useCurrentUser } from '@/features/auth/state/currentUser'
-import type { CardShop, CardShopProductItem } from '@/shared/types/api'
+import type { CardShop, CardShopProductItem, CardShopProductStatusResponse } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 import { formatDateTime, formatInteger } from '@/shared/utils/format'
 
@@ -79,12 +80,15 @@ const DEFAULT_SORT_KEY: CardShopSortKey = 'salesDesc'
 const DEFAULT_EMPTY_TEXT = '-'
 
 const { currentLanguage, errorText, t } = useI18n()
+const message = useMessage()
 const { currentUser } = useCurrentUser()
 const shops = ref<CardShop[]>([])
 const fetchedAt = ref<string | null>(null)
 const isLoading = ref(false)
 const loadError = ref<string | null>(null)
 const favoriteError = ref<string | null>(null)
+const productStatusByKey = ref<Record<string, CardShopProductStatusResponse>>({})
+const checkingProductKeys = ref<Set<string>>(new Set())
 const favoriteOnly = ref(false)
 const favoriteKeys = ref<Set<string>>(new Set())
 const favoriteUpdatingKeys = ref<Set<string>>(new Set())
@@ -218,6 +222,8 @@ async function refresh() {
     ])
     shops.value = shopsResponse.shops ?? []
     fetchedAt.value = shopsResponse.fetched_at
+    productStatusByKey.value = {}
+    checkingProductKeys.value = new Set()
     favoriteKeys.value = new Set(favoritesResponse.shop_keys ?? [])
     if (favoriteOnly.value && favoriteKeys.value.size === 0) {
       favoriteOnly.value = false
@@ -580,6 +586,82 @@ function setFavoriteUpdating(shopKey: string, updating: boolean) {
 
 function isFavoriteUpdating(shopKey: string): boolean {
   return favoriteUpdatingKeys.value.has(shopKey)
+}
+
+async function openProductAfterRealtimeCheck(product: CardShopProductItem) {
+  const itemUrl = textValue(product.itemUrl)
+  if (!itemUrl) {
+    return
+  }
+  const statusKey = productStatusKey(product)
+  if (checkingProductKeys.value.has(statusKey)) {
+    return
+  }
+
+  setProductChecking(statusKey, true)
+  try {
+    const status = await checkCardShopProductStatus({ item_url: itemUrl })
+    productStatusByKey.value = { ...productStatusByKey.value, [statusKey]: status }
+    if (!status.available) {
+      message.error(t(`商品实时状态：${status.message || '不可下单'}，请刷新或换一个商品`, `Realtime status: ${status.message || 'unavailable'}. Refresh or choose another product.`))
+      return
+    }
+    const opened = window.open(itemUrl, '_blank', 'noopener,noreferrer')
+    if (!opened) {
+      message.warning(t('浏览器阻止了新窗口，请允许弹窗后重试', 'The browser blocked the new window. Allow popups and try again.'))
+    }
+  } catch (error) {
+    message.error(errorText(error, '商品实时状态查询失败，请稍后重试', 'Failed to check realtime product status. Try again later.'))
+  } finally {
+    setProductChecking(statusKey, false)
+  }
+}
+
+function setProductChecking(statusKey: string, checking: boolean) {
+  const nextKeys = new Set(checkingProductKeys.value)
+  if (checking) {
+    nextKeys.add(statusKey)
+  } else {
+    nextKeys.delete(statusKey)
+  }
+  checkingProductKeys.value = nextKeys
+}
+
+function productStatusKey(product: CardShopProductItem): string {
+  return textValue(product.itemUrl) || textValue(product.name) || 'unknown-product'
+}
+
+function productRealtimeStatus(product: CardShopProductItem): CardShopProductStatusResponse | null {
+  return productStatusByKey.value[productStatusKey(product)] ?? null
+}
+
+function isProductChecking(product: CardShopProductItem): boolean {
+  return checkingProductKeys.value.has(productStatusKey(product))
+}
+
+function productRealtimeLabel(product: CardShopProductItem): string | null {
+  if (isProductChecking(product)) {
+    return t('实时校验中', 'Checking realtime status')
+  }
+  const status = productRealtimeStatus(product)
+  if (!status) {
+    return null
+  }
+  if (status.available) {
+    return t('实时可下单', 'Realtime available')
+  }
+  return status.message || t('实时不可售', 'Realtime unavailable')
+}
+
+function productRealtimeClass(product: CardShopProductItem): string {
+  if (isProductChecking(product)) {
+    return 'is-checking'
+  }
+  const status = productRealtimeStatus(product)
+  if (!status) {
+    return ''
+  }
+  return status.available ? 'is-available' : 'is-unavailable'
 }
 
 function isSearchTermActive(value: string): boolean {
@@ -971,19 +1053,22 @@ function telegramHref(value: string | null | undefined): string | null {
               :key="`${row.shopKey}-${textValue(product.itemUrl) || textValue(product.name) || index}`"
               class="product-item"
             >
-              <a
+              <button
                 v-if="textValue(product.itemUrl)"
-                class="product-name"
-                :href="textValue(product.itemUrl)"
-                target="_blank"
-                rel="noreferrer"
+                class="product-name product-link-button"
+                type="button"
+                :disabled="isProductChecking(product)"
+                @click="openProductAfterRealtimeCheck(product)"
               >
                 {{ displayText(product.name) }}
-              </a>
+              </button>
               <strong v-else class="product-name">{{ displayText(product.name) }}</strong>
               <div class="product-meta">
                 <span>{{ formatShopPrice(product.price) }}</span>
-                <span>{{ t(`库存 ${formatCount(product.stockCount)}`, `Stock ${formatCount(product.stockCount)}`) }}</span>
+                <span>{{ t(`快照库存 ${formatCount(product.stockCount)}`, `Snapshot stock ${formatCount(product.stockCount)}`) }}</span>
+                <span v-if="productRealtimeLabel(product)" class="product-realtime-status" :class="productRealtimeClass(product)">
+                  {{ productRealtimeLabel(product) }}
+                </span>
                 <span>{{ displayText(product.group) }}</span>
                 <span>{{ displayText(product.category) }}</span>
               </div>
@@ -1589,6 +1674,25 @@ function telegramHref(value: string | null | undefined): string | null {
   -webkit-line-clamp: 2;
 }
 
+.product-link-button {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.product-link-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.product-link-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--cpa-primary) 45%, transparent);
+  outline-offset: 2px;
+}
+
 .shop-card.is-favorite .product-name {
   color: var(--favorite-ink);
 }
@@ -1623,6 +1727,24 @@ function telegramHref(value: string | null | undefined): string | null {
   background: var(--cpa-primary-wash);
   border-color: color-mix(in srgb, var(--cpa-primary) 20%, var(--cpa-border));
   font-variant-numeric: tabular-nums;
+}
+
+.product-meta .product-realtime-status.is-checking {
+  color: var(--cpa-warning);
+  background: color-mix(in srgb, var(--cpa-warning) 12%, var(--cpa-surface-muted));
+  border-color: color-mix(in srgb, var(--cpa-warning) 26%, var(--cpa-border));
+}
+
+.product-meta .product-realtime-status.is-available {
+  color: var(--cpa-success);
+  background: color-mix(in srgb, var(--cpa-success) 12%, var(--cpa-surface-muted));
+  border-color: color-mix(in srgb, var(--cpa-success) 26%, var(--cpa-border));
+}
+
+.product-meta .product-realtime-status.is-unavailable {
+  color: var(--cpa-danger);
+  background: color-mix(in srgb, var(--cpa-danger) 10%, var(--cpa-surface-muted));
+  border-color: color-mix(in srgb, var(--cpa-danger) 22%, var(--cpa-border));
 }
 
 .shop-card.is-favorite .product-meta span {

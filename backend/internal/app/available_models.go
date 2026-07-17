@@ -85,6 +85,13 @@ func (a *App) handleAvailableModels(w http.ResponseWriter, r *http.Request) erro
 }
 
 func (a *App) availableModelsForUser(ctx context.Context, userID int) (AvailableModelsResponse, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return AvailableModelsResponse{}, err
+	}
+	if target, ok := activeAuthPoolProxyTarget(cfg); ok && strings.TrimSpace(target.APIKey) != "" {
+		return a.availableModelsForPluginCPAKey(ctx, target)
+	}
 	bindings, err := a.userAPIKeys(ctx, userID)
 	if err != nil {
 		return AvailableModelsResponse{}, err
@@ -113,10 +120,6 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 		apiKeyHashes = append(apiKeyHashes, binding.APIKeyHash)
 	}
 	poolModelFilters, err := a.authPoolModelFiltersForAPIKeys(ctx, apiKeyHashes)
-	if err != nil {
-		return AvailableModelsResponse{}, err
-	}
-	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return AvailableModelsResponse{}, err
 	}
@@ -164,6 +167,53 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 		}
 		return AvailableModelsResponse{}, validationError("查询 CPA 可用模型失败：" + strings.Join(messages, "；"))
 	}
+	appendPricedAvailableModels(&response, prices, modelsByID)
+	return response, nil
+}
+
+func (a *App) availableModelsForPluginCPAKey(ctx context.Context, target AuthPoolProxyTargetConfig) (AvailableModelsResponse, error) {
+	source := availableModelPluginSource()
+	response := AvailableModelsResponse{
+		HasAPIKeys:           true,
+		APIKeyCount:          1,
+		QueryableAPIKeyCount: 1,
+		Models:               []AvailableModelItem{},
+		Errors:               []AvailableModelKeyError{},
+	}
+	models, err := fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, target.APIKey, "", false)
+	if err != nil {
+		message := safeAvailableModelError(err)
+		response.Errors = append(response.Errors, AvailableModelKeyError{
+			APIKeyHash:    source.APIKeyHash,
+			APIKeyPreview: source.APIKeyPreview,
+			Description:   source.Description,
+			Message:       message,
+		})
+		return AvailableModelsResponse{}, validationError("查询 CPA 可用模型失败：" + source.Description + ": " + message)
+	}
+	prices, err := a.priceMap(ctx)
+	if err != nil {
+		return AvailableModelsResponse{}, err
+	}
+	modelsByID := map[string]AvailableModelItem{}
+	for _, raw := range models {
+		model := parseAvailableModel(raw, source)
+		if model == nil {
+			continue
+		}
+		existing, ok := modelsByID[model.ID]
+		if !ok {
+			modelsByID[model.ID] = *model
+			continue
+		}
+		mergeAvailableModel(&existing, *model)
+		modelsByID[model.ID] = existing
+	}
+	appendPricedAvailableModels(&response, prices, modelsByID)
+	return response, nil
+}
+
+func appendPricedAvailableModels(response *AvailableModelsResponse, prices map[[2]string]ModelPrice, modelsByID map[string]AvailableModelItem) {
 	for _, model := range modelsByID {
 		if price := findMatchingPrice(prices, model.Owner, &model.ID); price != nil {
 			model.Price = &AvailableModelPrice{
@@ -182,7 +232,29 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	sort.Slice(response.Models, func(i, j int) bool {
 		return strings.ToLower(response.Models[i].ID) < strings.ToLower(response.Models[j].ID)
 	})
-	return response, nil
+}
+
+func availableModelPluginSource() AvailableModelSource {
+	return AvailableModelSource{
+		APIKeyHash:    "plugin-cpa-key",
+		APIKeyPreview: "已配置",
+		Description:   "CPA 插件 Key",
+	}
+}
+
+func safeAvailableModelError(err error) string {
+	if err == nil {
+		return "CPA model list request failed"
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "CPA model list request failed"
+	}
+	lower := strings.ToLower(message)
+	if strings.Contains(message, "://") || strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer ") || strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") {
+		return "CPA model list request failed"
+	}
+	return message
 }
 
 func fetchAvailableModelItemsForAPIKey(ctx context.Context, cfg AppConfig, apiKey UserAPIKey) ([]any, error) {
@@ -324,7 +396,7 @@ func mergeAvailableModel(target *AvailableModelItem, incoming AvailableModelItem
 func metadataFromModelObject(object map[string]any) map[string]any {
 	metadata := map[string]any{}
 	for key, value := range object {
-		if modelReservedMetadataKey[key] || !isJSONScalar(value) {
+		if modelReservedMetadataKey[key] || isSensitiveModelMetadataKey(key) || isSensitiveModelMetadataValue(value) || !isJSONScalar(value) {
 			continue
 		}
 		metadata[key] = value
@@ -390,4 +462,29 @@ func isJSONScalar(value any) bool {
 	default:
 		return false
 	}
+}
+
+func isSensitiveModelMetadataKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range []string{"key", "secret", "token", "authorization", "credential", "password", "passwd"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveModelMetadataValue(value any) bool {
+	text, ok := value.(string)
+	if !ok {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "bearer ") || strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") || strings.HasPrefix(lower, "sk-")
 }

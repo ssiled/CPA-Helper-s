@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	backendApp "cpa-helper/backend/internal/app"
@@ -727,12 +728,12 @@ func TestAvailableModelsUsesProxyForwardingKey(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
 				t.Fatalf("Authorization = %q, want proxy key", got)
 			}
-			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != created.APIKeyHash {
-				t.Fatalf("helper key hash header = %q, want %q", got, created.APIKeyHash)
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != "" {
+				t.Fatalf("helper key hash header = %q, want empty for plugin model catalog", got)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{
-				{"id": "gpt-free", "object": "model"},
-				{"id": "gpt-other", "object": "model"},
+				{"id": "gpt-free", "object": "model", "safe_label": "visible", "api_key": proxyKey, "token": "Bearer " + proxyKey},
+				{"id": "gpt-other", "object": "model", "credential": proxyKey},
 			}})
 		default:
 			http.NotFound(w, r)
@@ -767,13 +768,53 @@ func TestAvailableModelsUsesProxyForwardingKey(t *testing.T) {
 	}, cookies, nil)
 
 	var response struct {
-		Models []struct {
-			ID string `json:"id"`
+		HasAPIKeys           bool `json:"has_api_keys"`
+		APIKeyCount          int  `json:"api_key_count"`
+		QueryableAPIKeyCount int  `json:"queryable_api_key_count"`
+		Models               []struct {
+			ID       string         `json:"id"`
+			Metadata map[string]any `json:"metadata"`
+			Sources  []struct {
+				APIKeyHash    string `json:"api_key_hash"`
+				APIKeyPreview string `json:"api_key_preview"`
+				Description   string `json:"description"`
+			} `json:"sources"`
 		} `json:"models"`
 	}
 	requestJSON(t, handler, http.MethodGet, "/api/account/models", nil, cookies, &response)
-	if len(response.Models) != 1 || response.Models[0].ID != "gpt-free" {
-		t.Fatalf("models = %#v, want only gpt-free", response.Models)
+	if !response.HasAPIKeys || response.APIKeyCount != 1 || response.QueryableAPIKeyCount != 1 {
+		t.Fatalf("key counts = has %v count %d queryable %d, want plugin key available", response.HasAPIKeys, response.APIKeyCount, response.QueryableAPIKeyCount)
+	}
+	if len(response.Models) != 2 || response.Models[0].ID != "gpt-free" || response.Models[1].ID != "gpt-other" {
+		t.Fatalf("models = %#v, want all CPA models from plugin key", response.Models)
+	}
+	for _, model := range response.Models {
+		if len(model.Sources) != 1 {
+			t.Fatalf("model %s sources = %#v, want one sanitized plugin source", model.ID, model.Sources)
+		}
+		source := model.Sources[0]
+		if source.APIKeyHash == "" || source.APIKeyHash == created.APIKeyHash || source.APIKeyPreview == "" || source.APIKeyPreview == proxyKey || source.Description == "" {
+			t.Fatalf("model %s source = %#v, want sanitized plugin source", model.ID, source)
+		}
+		if _, ok := model.Metadata["api_key"]; ok {
+			t.Fatalf("model %s metadata leaked api_key: %#v", model.ID, model.Metadata)
+		}
+		if _, ok := model.Metadata["token"]; ok {
+			t.Fatalf("model %s metadata leaked token: %#v", model.ID, model.Metadata)
+		}
+		if _, ok := model.Metadata["credential"]; ok {
+			t.Fatalf("model %s metadata leaked credential: %#v", model.ID, model.Metadata)
+		}
+	}
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response failed: %v", err)
+	}
+	bodyText := string(body)
+	for _, secret := range []string{proxyKey, created.APIKey, created.APIKeyHash} {
+		if secret != "" && strings.Contains(bodyText, secret) {
+			t.Fatalf("available models response leaked secret material %q in %s", secret, bodyText)
+		}
 	}
 }
 

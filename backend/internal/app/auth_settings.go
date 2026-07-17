@@ -319,7 +319,9 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) error {
 			cfg.ModelRequestURL = value
 		}
 		if payload.ManagementKey != nil {
-			cfg.Collector.ManagementKey = strings.TrimSpace(*payload.ManagementKey)
+			if value := strings.TrimSpace(*payload.ManagementKey); value != "" {
+				cfg.Collector.ManagementKey = value
+			}
 		}
 		if payload.CollectorEnabled != nil {
 			cfg.Collector.Enabled = *payload.CollectorEnabled
@@ -364,8 +366,9 @@ func settingsResponse(cfg AppConfig) map[string]any {
 	return map[string]any{
 		"cliaproxy_url":          collector.CLIProxyURL,
 		"model_request_url":      cfg.ModelRequestURL,
-		"management_key":         collector.ManagementKey,
+		"management_key":         "",
 		"management_key_set":     strings.TrimSpace(collector.ManagementKey) != "",
+		"management_key_preview": maskAPIKey(collector.ManagementKey),
 		"collector_enabled":      collector.Enabled,
 		"queue_name":             collector.QueueName,
 		"batch_size":             collector.BatchSize,

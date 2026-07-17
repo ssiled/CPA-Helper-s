@@ -32,6 +32,7 @@ export interface SettingsResponse {
   model_request_url: string
   management_key: string
   management_key_set: boolean
+  management_key_preview: string
   collector_enabled: boolean
   queue_name: string
   batch_size: number
@@ -142,6 +143,20 @@ export interface CardShop {
 export interface CardShopsResponse {
   shops: CardShop[]
   fetched_at: string
+}
+
+export interface CardShopProductStatusPayload {
+  item_url?: string
+  goods_key?: string
+}
+
+export interface CardShopProductStatusResponse {
+  goods_key: string
+  available: boolean
+  status: string
+  message: string
+  stock_count?: number | null
+  checked_at: string
 }
 
 export interface CardShopFavoritesResponse {
