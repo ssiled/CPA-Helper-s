@@ -50,6 +50,7 @@ For clarity, model requests initiated by an Agent are still sent directly from t
 - **Card shop index**: Admins can browse real-time public card-shop and product snapshots, search by product title, use popular tags, sort results and favorite shops for faster lookup. This is only a public information index and does not participate in transactions.
 - **Available model aggregation**: Query available models through the current account's bound CPA API keys and enrich them with local pricing data.
 - **CLIProxyAPI / CPAMC integration**: Configure the service URL, management key, usage queue and local collector options to persist remote usage events into SQLite.
+- **Auth-pool plugin monitoring**: Inspect scheduler selections, candidate accounts, selected auth IDs, completion status and failure reasons across configured CPA targets.
 - **Codex auth file inspection**: Support Cron scheduling, quota thresholds, check-only mode, conditional scanning, concurrent workers, priority rules, account enable/disable and deletion.
 - **Local-first data storage**: Use SQLite and the `data/` directory by default, with `CPA_HELPER_DATA_DIR` available for overriding the runtime data path.
 - **Modern admin interface**: Built with Vue 3, Naive UI, ECharts and lucide icons, with light, dark and system theme modes.

@@ -193,6 +193,29 @@ func (a *App) handleAuthPools(w http.ResponseWriter, r *http.Request) error {
 			return methodNotAllowed()
 		}
 	}
+	if len(parts) == 1 && parts[0] == "plugin-events" {
+		if !user.IsAdmin {
+			return forbiddenError("admin required")
+		}
+		switch r.Method {
+		case http.MethodGet:
+			response, err := a.authPoolPluginEvents(r.Context(), authPoolPluginEventLimit(r))
+			if err != nil {
+				return err
+			}
+			writeJSON(w, http.StatusOK, response)
+			return nil
+		case http.MethodDelete:
+			response, err := a.clearAuthPoolPluginEvents(r.Context())
+			if err != nil {
+				return err
+			}
+			writeJSON(w, http.StatusOK, response)
+			return nil
+		default:
+			return methodNotAllowed()
+		}
+	}
 	if len(parts) == 1 && parts[0] == "bindings" {
 		if r.Method != http.MethodPost {
 			return methodNotAllowed()

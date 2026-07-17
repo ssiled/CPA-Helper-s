@@ -21,6 +21,7 @@ func TestAuthPoolPathParts(t *testing.T) {
 		{name: "root with trailing slash", path: "/api/auth-pools/", want: nil},
 		{name: "accounts root", path: "/api/auth-pools/accounts", want: []string{"accounts"}},
 		{name: "api key account", path: "/api/auth-pools/accounts/api-key", want: []string{"accounts", "api-key"}},
+		{name: "plugin events", path: "/api/auth-pools/plugin-events", want: []string{"plugin-events"}},
 		{name: "bindings root", path: "/api/auth-pools/bindings", want: []string{"bindings"}},
 		{name: "binding hash", path: "/api/auth-pools/bindings/hash-1", want: []string{"bindings", "hash-1"}},
 		{name: "pool id", path: "/api/auth-pools/pool-a", want: []string{"pool-a"}},

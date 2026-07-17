@@ -289,6 +289,59 @@ export interface AuthPoolConcurrency {
   limits: Record<string, number>
 }
 
+export interface AuthPoolPluginEventCandidate {
+  id: string
+  provider?: string
+  priority?: number
+  status?: string
+  account_types?: string[]
+}
+
+export interface AuthPoolPluginEvent {
+  id: number
+  timestamp: string
+  phase: 'selection' | 'completion' | string
+  status: 'selected' | 'blocked' | 'ignored' | 'success' | 'failed' | string
+  reason?: string
+  http_status?: number
+  duration_ms?: number
+  provider?: string
+  model?: string
+  stream?: boolean
+  pool_id?: string
+  pool_name?: string
+  user_id?: number
+  username?: string
+  selected_auth_id?: string
+  selected_priority?: number
+  selected_state?: string
+  candidate_count: number
+  matched_count: number
+  matched_auth_ids?: string[]
+  account_types?: string[]
+  candidates?: AuthPoolPluginEventCandidate[]
+  target_id: string
+  target_name: string
+}
+
+export interface AuthPoolPluginEventTargetError {
+  target_id: string
+  target_name: string
+  error: string
+}
+
+export interface AuthPoolPluginEventsResponse {
+  items: AuthPoolPluginEvent[]
+  total: number
+  capacity: number
+  errors: AuthPoolPluginEventTargetError[]
+}
+
+export interface ClearAuthPoolPluginEventsResponse {
+  cleared: number
+  errors: AuthPoolPluginEventTargetError[]
+}
+
 export interface AuthPoolProxyTarget {
   id: string
   name: string

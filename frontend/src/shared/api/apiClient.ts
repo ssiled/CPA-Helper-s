@@ -84,7 +84,7 @@ export const apiClient = {
     }
     return request<T>(path, init)
   },
-  delete(path: string) {
-    return request<void>(path, { method: 'DELETE' })
+  delete<T = void>(path: string) {
+    return request<T>(path, { method: 'DELETE' })
   },
 }

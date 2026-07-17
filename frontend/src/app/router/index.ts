@@ -84,6 +84,12 @@ export const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          path: 'admin/plugin-events',
+          name: 'admin-plugin-events',
+          component: () => import('@/features/plugins/views/PluginEventsView.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 'admin/plugin-store',
           name: 'admin-plugin-store',
           component: () => import('@/features/plugins/views/PluginStoreView.vue'),

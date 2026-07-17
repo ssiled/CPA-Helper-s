@@ -1,8 +1,16 @@
 import { apiClient } from '@/shared/api/apiClient'
-import type { AuthPool, AuthPoolAccountsResponse, AuthPoolBinding, AuthPoolBindingPayload, AuthPoolPayload, AuthPoolProxyConfig, AuthPoolProxyConfigPayload, AuthPoolStatus } from '@/shared/types/api'
+import type { AuthPool, AuthPoolAccountsResponse, AuthPoolBinding, AuthPoolBindingPayload, AuthPoolPayload, AuthPoolPluginEventsResponse, AuthPoolProxyConfig, AuthPoolProxyConfigPayload, AuthPoolStatus, ClearAuthPoolPluginEventsResponse } from '@/shared/types/api'
 
 export function getAuthPoolStatus(): Promise<AuthPoolStatus> {
   return apiClient.get<AuthPoolStatus>('/auth-pools')
+}
+
+export function getAuthPoolPluginEvents(limit = 200): Promise<AuthPoolPluginEventsResponse> {
+  return apiClient.get<AuthPoolPluginEventsResponse>('/auth-pools/plugin-events', { limit })
+}
+
+export function clearAuthPoolPluginEvents(): Promise<ClearAuthPoolPluginEventsResponse> {
+  return apiClient.delete<ClearAuthPoolPluginEventsResponse>('/auth-pools/plugin-events')
 }
 
 export function getAuthPoolProxyConfig(): Promise<AuthPoolProxyConfig> {
