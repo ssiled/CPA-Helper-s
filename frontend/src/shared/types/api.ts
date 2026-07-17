@@ -145,20 +145,6 @@ export interface CardShopsResponse {
   fetched_at: string
 }
 
-export interface CardShopProductStatusPayload {
-  item_url?: string
-  goods_key?: string
-}
-
-export interface CardShopProductStatusResponse {
-  goods_key: string
-  available: boolean
-  status: string
-  message: string
-  stock_count?: number | null
-  checked_at: string
-}
-
 export interface CardShopFavoritesResponse {
   shop_keys: string[]
 }

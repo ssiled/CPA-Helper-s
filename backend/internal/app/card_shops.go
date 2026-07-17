@@ -4,28 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	defaultCardShopsURL             = "https://ldxp.qizhang.org/api/shops"
-	defaultCardShopGoodsInfoBaseURL = "https://pay.ldxp.cn"
-	cardShopsTimeout                = 10 * time.Second
-	cardShopProductStatusTimeout    = 8 * time.Second
-	maxCardShopTags                 = 30
-	maxCardShopTagRuneCount         = 32
-	maxCardShopGoodsKeyLength       = 128
+	defaultCardShopsURL     = "https://ldxp.qizhang.org/api/shops"
+	cardShopsTimeout        = 10 * time.Second
+	maxCardShopTags         = 30
+	maxCardShopTagRuneCount = 32
 )
-
-var cardShopGoodsKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 type cardShopsResponse struct {
 	Shops     []map[string]any `json:"shops"`
@@ -49,20 +40,6 @@ type cardShopTagsUpdateRequest struct {
 	Tags []string `json:"tags"`
 }
 
-type cardShopProductStatusRequest struct {
-	ItemURL  string `json:"item_url"`
-	GoodsKey string `json:"goods_key"`
-}
-
-type cardShopProductStatusResponse struct {
-	GoodsKey   string `json:"goods_key"`
-	Available  bool   `json:"available"`
-	Status     string `json:"status"`
-	Message    string `json:"message"`
-	StockCount *int   `json:"stock_count"`
-	CheckedAt  string `json:"checked_at"`
-}
-
 func (a *App) handleCardShops(w http.ResponseWriter, r *http.Request) error {
 	if err := requireMethod(r, http.MethodGet); err != nil {
 		return err
@@ -79,31 +56,6 @@ func (a *App) handleCardShops(w http.ResponseWriter, r *http.Request) error {
 		Shops:     shops,
 		FetchedAt: apiDateTime(time.Now()),
 	})
-	return nil
-}
-
-func (a *App) handleCardShopProductStatus(w http.ResponseWriter, r *http.Request) error {
-	if err := requireMethod(r, http.MethodPost); err != nil {
-		return err
-	}
-	if _, err := a.readyUser(r.Context(), r); err != nil {
-		return err
-	}
-
-	var payload cardShopProductStatusRequest
-	if err := decodeJSON(r, &payload); err != nil {
-		return err
-	}
-	goodsKey, err := normalizeCardShopGoodsKey(payload)
-	if err != nil {
-		return err
-	}
-
-	status, err := fetchCardShopProductStatus(r.Context(), goodsKey)
-	if err != nil {
-		return err
-	}
-	writeJSON(w, http.StatusOK, status)
 	return nil
 }
 
@@ -268,166 +220,6 @@ func cardShopsSourceURL() string {
 		return value
 	}
 	return defaultCardShopsURL
-}
-
-func cardShopGoodsInfoBaseURL() string {
-	if value := strings.TrimSpace(os.Getenv("CPA_HELPER_CARD_SHOP_GOODS_INFO_BASE_URL")); value != "" {
-		return value
-	}
-	return defaultCardShopGoodsInfoBaseURL
-}
-
-func normalizeCardShopGoodsKey(payload cardShopProductStatusRequest) (string, error) {
-	if key := strings.TrimSpace(payload.GoodsKey); key != "" {
-		return validateCardShopGoodsKey(key)
-	}
-
-	itemURL := strings.TrimSpace(payload.ItemURL)
-	if itemURL == "" {
-		return "", validationError("商品链接不能为空")
-	}
-	parsed, err := url.Parse(itemURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", validationError("商品链接无效")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", validationError("商品链接必须是 HTTP/HTTPS 地址")
-	}
-	if !strings.EqualFold(parsed.Hostname(), "pay.ldxp.cn") {
-		return "", validationError("仅支持 pay.ldxp.cn 商品链接")
-	}
-	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
-	if len(parts) != 2 || parts[0] != "item" {
-		return "", validationError("商品链接必须是 pay.ldxp.cn/item/<key> 格式")
-	}
-	goodsKey, err := url.PathUnescape(parts[1])
-	if err != nil {
-		return "", validationError("商品链接无效")
-	}
-	return validateCardShopGoodsKey(goodsKey)
-}
-
-func validateCardShopGoodsKey(value string) (string, error) {
-	key := strings.TrimSpace(value)
-	if key == "" {
-		return "", validationError("商品标识不能为空")
-	}
-	if len(key) > maxCardShopGoodsKeyLength || !cardShopGoodsKeyPattern.MatchString(key) {
-		return "", validationError("商品标识无效")
-	}
-	return key, nil
-}
-
-func fetchCardShopProductStatus(ctx context.Context, goodsKey string) (cardShopProductStatusResponse, error) {
-	headers := http.Header{}
-	headers.Set("Accept", "application/json")
-	headers.Set("Content-Type", "application/json")
-	headers.Set("User-Agent", "CPA-Helper/1.0 (+https://github.com/ssiled/CPA-Helper-s)")
-	headers.Set("Origin", "https://pay.ldxp.cn")
-	headers.Set("Referer", "https://pay.ldxp.cn/item/"+goodsKey)
-
-	response, payload, err := doJSON(ctx, httpClient(cardShopProductStatusTimeout), http.MethodPost, makeURL(cardShopGoodsInfoBaseURL(), "/shopApi/Shop/goodsInfo", nil), headers, map[string]string{
-		"goods_key": goodsKey,
-	})
-	if err != nil {
-		return cardShopProductStatusResponse{}, appError("upstream_error", http.StatusBadGateway, "商品实时状态查询失败")
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return cardShopProductStatusResponse{}, appError("upstream_error", http.StatusBadGateway, fmt.Sprintf("商品实时状态查询失败：HTTP %d", response.StatusCode))
-	}
-	return parseCardShopProductStatus(goodsKey, payload)
-}
-
-func parseCardShopProductStatus(goodsKey string, payload []byte) (cardShopProductStatusResponse, error) {
-	var raw struct {
-		Code json.Number     `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	if err := decoder.Decode(&raw); err != nil {
-		return cardShopProductStatusResponse{}, appError("upstream_error", http.StatusBadGateway, "商品实时状态响应格式无效")
-	}
-
-	checkedAt := apiDateTime(time.Now())
-	message := strings.TrimSpace(raw.Msg)
-	if raw.Code.String() != "1" {
-		if message == "" {
-			message = "商品不可下单"
-		}
-		status := "unavailable"
-		if strings.Contains(message, "不存在") {
-			status = "not_found"
-		}
-		return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: false, Status: status, Message: message, CheckedAt: checkedAt}, nil
-	}
-
-	var data map[string]any
-	if len(raw.Data) > 0 && string(raw.Data) != "null" {
-		dataDecoder := json.NewDecoder(bytes.NewReader(raw.Data))
-		dataDecoder.UseNumber()
-		if err := dataDecoder.Decode(&data); err != nil {
-			return cardShopProductStatusResponse{}, appError("upstream_error", http.StatusBadGateway, "商品实时状态响应格式无效")
-		}
-	}
-	if data == nil {
-		return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: false, Status: "unavailable", Message: "商品不可下单", CheckedAt: checkedAt}, nil
-	}
-
-	if status := optionalInt(data["status"]); status != nil && *status != 1 {
-		return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: false, Status: "disabled", Message: "商品已下架", CheckedAt: checkedAt}, nil
-	}
-	if verify := optionalInt(data["verify"]); verify != nil && *verify != 1 {
-		return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: false, Status: "unverified", Message: "商品未通过校验", CheckedAt: checkedAt}, nil
-	}
-
-	stockCount := cardShopStockCount(data)
-	if stockCount != nil && *stockCount <= 0 {
-		return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: false, Status: "out_of_stock", Message: "商品缺货", StockCount: stockCount, CheckedAt: checkedAt}, nil
-	}
-	return cardShopProductStatusResponse{GoodsKey: goodsKey, Available: true, Status: "available", Message: "商品可下单", StockCount: stockCount, CheckedAt: checkedAt}, nil
-}
-
-func cardShopStockCount(data map[string]any) *int {
-	if value := optionalInt(data["stock_count"]); value != nil {
-		return value
-	}
-	if extend, ok := data["extend"].(map[string]any); ok {
-		return optionalInt(extend["stock_count"])
-	}
-	return nil
-}
-
-func optionalInt(value any) *int {
-	switch typed := value.(type) {
-	case nil:
-		return nil
-	case json.Number:
-		if integer, err := typed.Int64(); err == nil {
-			result := int(integer)
-			return &result
-		}
-		if float, err := strconv.ParseFloat(typed.String(), 64); err == nil {
-			result := int(float)
-			return &result
-		}
-	case float64:
-		result := int(typed)
-		return &result
-	case int:
-		result := typed
-		return &result
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
-			return nil
-		}
-		if integer, err := strconv.Atoi(trimmed); err == nil {
-			return &integer
-		}
-	}
-	return nil
 }
 
 func normalizeCardShopFavoriteKey(value string) (string, error) {

@@ -2,8 +2,6 @@ import { apiClient } from '@/shared/api/apiClient'
 import type {
   CardShopFavoritesResponse,
   CardShopFavoriteUpdatePayload,
-  CardShopProductStatusPayload,
-  CardShopProductStatusResponse,
   CardShopTagsResponse,
   CardShopTagsUpdatePayload,
   CardShopsResponse,
@@ -11,10 +9,6 @@ import type {
 
 export function getCardShops(): Promise<CardShopsResponse> {
   return apiClient.get<CardShopsResponse>('/card-shops')
-}
-
-export function checkCardShopProductStatus(payload: CardShopProductStatusPayload): Promise<CardShopProductStatusResponse> {
-  return apiClient.post<CardShopProductStatusResponse>('/card-shops/product-status', payload)
 }
 
 export function getCardShopFavorites(): Promise<CardShopFavoritesResponse> {
