@@ -242,7 +242,7 @@ onMounted(refresh)
         <div class="card-header">
           <div>
             <div class="card-title">{{ t('Codex 等级并发限制', 'Codex tier concurrency limits') }}</div>
-            <div class="card-subtitle">{{ t('按账号等级限制同时请求数量，0 表示不限制。插件会在 CPA 选择凭证前按等级拦截，避免同等级账号同时跑太多请求触发 429。', 'Limit simultaneous requests by account tier. 0 means unlimited. The plugin applies limits before CPA selects credentials to reduce 429s.') }}</div>
+            <div class="card-subtitle">{{ t('按账号等级设置单个账号的同时请求上限，0 表示不限制。某个账号达到上限时插件会跳过它继续选择下一个账号；同号池都满时返回 429。', 'Set the per-account concurrent request limit by tier. 0 means unlimited. When one account reaches its limit, the plugin skips it and tries the next account; if all accounts in the pool are full, it returns 429.') }}</div>
           </div>
           <NTag size="small">{{ t('实时占用来自插件状态', 'Live counts from plugin status') }}</NTag>
         </div>
