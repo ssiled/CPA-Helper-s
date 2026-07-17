@@ -97,6 +97,9 @@ func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if err := a.repairRecentUsageOwnerSnapshots(r.Context()); err != nil {
+		return err
+	}
 	switch parts[0] {
 	case "summary":
 		if err := requireMethod(r, http.MethodGet); err != nil {

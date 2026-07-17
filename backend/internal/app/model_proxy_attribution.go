@@ -298,3 +298,73 @@ func absDuration(value time.Duration) time.Duration {
 	}
 	return value
 }
+
+func (a *App) repairRecentUsageOwnerSnapshots(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT id, CAST(timestamp AS TEXT), request_id, provider, model, endpoint, raw_json
+		FROM usage_records
+		WHERE (usage_username IS NULL OR usage_username = '' OR api_key_description IS NULL OR api_key_description = '')
+		  AND timestamp >= ?
+		ORDER BY timestamp DESC
+		LIMIT 500`, dbTime(time.Now().Add(-modelProxyRequestAttributionTTL)))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type pendingUsageRecord struct {
+		ID        int
+		Timestamp string
+		RequestID sql.NullString
+		Provider  sql.NullString
+		Model     sql.NullString
+		Endpoint  sql.NullString
+		RawJSON   string
+	}
+	pending := []pendingUsageRecord{}
+	for rows.Next() {
+		var record pendingUsageRecord
+		if err := rows.Scan(&record.ID, &record.Timestamp, &record.RequestID, &record.Provider, &record.Model, &record.Endpoint, &record.RawJSON); err != nil {
+			return err
+		}
+		pending = append(pending, record)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, record := range pending {
+		normalized, err := normalizeUsage([]byte(record.RawJSON))
+		if err != nil {
+			continue
+		}
+		if parsed, ok := parseDBTime(record.Timestamp); ok {
+			normalized.Timestamp = parsed
+		}
+		if value := nullableString(record.RequestID); value != nil {
+			normalized.RequestID = value
+		}
+		if value := nullableString(record.Provider); value != nil {
+			normalized.Provider = value
+		}
+		if value := nullableString(record.Model); value != nil {
+			normalized.Model = value
+		}
+		if value := nullableString(record.Endpoint); value != nil {
+			normalized.Endpoint = value
+		}
+		ownerAPIKeyHash, err := a.usageOwnerAPIKeyHash(ctx, normalized)
+		if err != nil {
+			return err
+		}
+		usageUsername, description, err := a.usageOwnerSnapshot(ctx, ownerAPIKeyHash)
+		if err != nil {
+			return err
+		}
+		if usageUsername == nil && description == nil {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `UPDATE usage_records SET usage_username = COALESCE(NULLIF(usage_username, ''), ?), api_key_description = COALESCE(NULLIF(api_key_description, ''), ?) WHERE id = ?`, usageUsername, description, record.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
