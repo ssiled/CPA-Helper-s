@@ -67,6 +67,7 @@ const isActing = ref(false)
 const status = ref<CodexKeeperStatus | null>(null)
 const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
+const availableProviders = ref<string[]>(['codex', 'antigravity', 'gemini', 'grok', 'claude'])
 const nextRunTimes = ref<string[]>([])
 const schedulePreviewError = ref('')
 const logBodyRef = ref<HTMLElement | null>(null)
@@ -82,8 +83,24 @@ const conditionalRefreshIntervalOptions = computed(() => [
   { label: t('60 秒', '60 seconds'), value: 60 },
 ])
 
+const providerLabelMap: Record<string, string> = {
+  codex: 'Codex',
+  antigravity: 'Antigravity',
+  gemini: 'Gemini',
+  grok: 'Grok',
+  claude: 'Claude',
+}
+
+const providerOptions = computed(() =>
+  availableProviders.value.map((provider) => ({
+    label: providerLabelMap[provider] ?? provider,
+    value: provider,
+  })),
+)
+
 const form = reactive({
   schedule_cron: '*/30 * * * *',
+  enabled_providers: ['codex'] as string[],
   quota_threshold: 100,
   usage_timeout_seconds: 30,
   cpa_timeout_seconds: 30,
@@ -166,6 +183,12 @@ watch(logText, () => {
 
 function applySettings(nextSettings: Awaited<ReturnType<typeof getCodexKeeperSettings>>) {
   form.schedule_cron = nextSettings.schedule_cron
+  availableProviders.value = Array.isArray(nextSettings.available_providers) && nextSettings.available_providers.length > 0
+    ? [...nextSettings.available_providers]
+    : ['codex', 'antigravity', 'gemini', 'grok', 'claude']
+  form.enabled_providers = Array.isArray(nextSettings.enabled_providers) && nextSettings.enabled_providers.length > 0
+    ? [...nextSettings.enabled_providers]
+    : ['codex']
   form.quota_threshold = nextSettings.quota_threshold
   form.usage_timeout_seconds = nextSettings.usage_timeout_seconds
   form.cpa_timeout_seconds = nextSettings.cpa_timeout_seconds
@@ -234,6 +257,10 @@ function normalizedRules(): CodexKeeperPriorityRule[] {
 
 async function saveSettings() {
   const rules = normalizedRules()
+  if (form.enabled_providers.length === 0) {
+    message.error(t('\u81f3\u5c11\u542f\u7528\u4e00\u4e2a\u5de1\u68c0\u670d\u52a1\u5546', 'Enable at least one inspection provider'))
+    return
+  }
   if (rules.length !== priorityRules.value.length) {
     message.error(t('账号类型不可为空或重复，优先级必须在 0 ~ 20', 'Account types cannot be empty or duplicated, and priorities must be 0-20'))
     return
@@ -619,6 +646,14 @@ onBeforeUnmount(() => {
                 <div class="schedule-grid">
                   <NFormItem :label="t('Cron 表达式', 'Cron Expression')">
                     <NInput v-model:value="form.schedule_cron" :placeholder="t('例如 */30 * * * *', 'For example, */30 * * * *')" />
+                  </NFormItem>
+                  <NFormItem :label="t('\u542f\u7528\u5de1\u68c0\u670d\u52a1\u5546', 'Enabled Inspection Providers')">
+                    <NSelect
+                      v-model:value="form.enabled_providers"
+                      multiple
+                      :options="providerOptions"
+                      :placeholder="t('\u9009\u62e9\u9700\u8981\u5de1\u68c0\u7684\u8d26\u53f7\u670d\u52a1\u5546', 'Select account providers to inspect')"
+                    />
                   </NFormItem>
                   <div class="schedule-preview">
                     <div class="preview-title">{{ t('后续 5 次调用', 'Next 5 Runs') }}</div>

@@ -81,6 +81,7 @@ type keeperPriorityRule struct {
 
 type keeperSettingsUpdateRequest struct {
 	ScheduleCron                      *string              `json:"schedule_cron"`
+	EnabledProviders                  []string             `json:"enabled_providers"`
 	QuotaThreshold                    *int                 `json:"quota_threshold"`
 	UsageTimeoutSeconds               *int                 `json:"usage_timeout_seconds"`
 	CPATimeoutSeconds                 *int                 `json:"cpa_timeout_seconds"`
@@ -898,7 +899,7 @@ func (a *App) handleCodexKeeper(w http.ResponseWriter, r *http.Request) error {
 		if err := requireMethod(r, http.MethodGet); err != nil {
 			return err
 		}
-		accounts, err := a.listKeeperAccounts(r.Context())
+		accounts, err := a.listKeeperAccountsWithRemote(r.Context())
 		if err != nil {
 			return err
 		}
@@ -1018,6 +1019,8 @@ func keeperSettingsResponse(cfg AppConfig) map[string]any {
 		"cliaproxy_url":                        cfg.Collector.CLIProxyURL,
 		"management_key_set":                   strings.TrimSpace(cfg.Collector.ManagementKey) != "",
 		"schedule_cron":                        normalized,
+		"enabled_providers":                    cloneStringSlice(cfg.CodexKeeper.EnabledProviders),
+		"available_providers":                  cloneStringSlice(keeperProviderOrder),
 		"next_run_times":                       apiDateTimes(times),
 		"quota_threshold":                      cfg.CodexKeeper.QuotaThreshold,
 		"usage_timeout_seconds":                cfg.CodexKeeper.UsageTimeoutSeconds,
@@ -1440,6 +1443,16 @@ func (a *App) updateKeeperSettings(w http.ResponseWriter, r *http.Request) error
 		}
 		cfg.CodexKeeper.ScheduleCron = normalized
 	}
+	if payload.EnabledProviders != nil {
+		for _, item := range payload.EnabledProviders {
+			provider := normalizeKeeperProvider(item)
+			if provider == "" || !keeperProviderSupported(provider) {
+				return validationError("enabled_providers contains unsupported provider")
+			}
+		}
+		providers := normalizeKeeperEnabledProviders(payload.EnabledProviders)
+		cfg.CodexKeeper.EnabledProviders = providers
+	}
 	if payload.QuotaThreshold != nil {
 		if *payload.QuotaThreshold < 0 || *payload.QuotaThreshold > 100 {
 			return validationError("quota_threshold 超出范围")
@@ -1587,21 +1600,25 @@ func (a *App) executeKeeperRunWithOptions(ctx context.Context, options keeperRun
 		return stats, "", err
 	}
 	filtered := make([]map[string]any, 0, len(authFiles))
-	remoteCodexNames := map[string]bool{}
+	remoteKnownNames := map[string]bool{}
 	for _, item := range authFiles {
-		if keeperString(item["type"]) != "codex" {
+		provider := keeperAuthProvider(item)
+		if provider == "" {
 			continue
 		}
 		name := keeperString(item["name"])
 		if name != "" {
-			remoteCodexNames[name] = true
+			remoteKnownNames[name] = true
+		}
+		if !keeperProviderEnabled(cfg.CodexKeeper, provider) {
+			continue
 		}
 		if len(targetSet) == 0 || targetSet[name] {
 			filtered = append(filtered, item)
 		}
 	}
 	if len(targetSet) == 0 {
-		pruned, err := a.pruneKeeperMissingAuthStates(ctx, remoteCodexNames)
+		pruned, err := a.pruneKeeperMissingAuthStates(ctx, remoteKnownNames)
 		if err != nil {
 			if runID > 0 {
 				_ = a.finishKeeperRun(ctx, runID, "failed", err.Error(), stats)
@@ -1888,7 +1905,8 @@ func (a *App) reconcileKeeperConditionalRemoteAuthStates(ctx context.Context, cf
 	remoteNames := map[string]bool{}
 	refreshableRemoteNames := map[string]bool{}
 	for _, item := range authFiles {
-		if keeperString(item["type"]) != "codex" {
+		provider := keeperAuthProvider(item)
+		if provider == "" {
 			continue
 		}
 		name := keeperString(item["name"])
@@ -1896,6 +1914,9 @@ func (a *App) reconcileKeeperConditionalRemoteAuthStates(ctx context.Context, cf
 			continue
 		}
 		remoteNames[name] = true
+		if !keeperProviderEnabled(cfg.CodexKeeper, provider) {
+			continue
+		}
 		if !keeperBool(item["disabled"]) {
 			refreshableRemoteNames[name] = true
 		}
@@ -1991,21 +2012,22 @@ func (a *App) keeperAuthNamesFromRemoteUsageIdentifiers(ctx context.Context, cfg
 	if err != nil {
 		return nil
 	}
-	codexFiles := make([]map[string]any, 0, len(authFiles))
+	remoteFiles := make([]map[string]any, 0, len(authFiles))
 	for _, item := range authFiles {
-		if keeperString(item["type"]) != "codex" {
+		provider := keeperAuthProvider(item)
+		if provider == "" || !keeperProviderEnabled(cfg.CodexKeeper, provider) {
 			continue
 		}
 		if keeperBool(item["disabled"]) {
 			continue
 		}
-		codexFiles = append(codexFiles, item)
+		remoteFiles = append(remoteFiles, item)
 		addKeeperAuthObjectAliases(aliases, item)
 	}
 	if !keeperHasUnresolvedUsageIdentifiers(identifiers, aliases) {
 		return keeperAuthNamesForUsageIdentifiers(identifiers, aliases)
 	}
-	for _, item := range codexFiles {
+	for _, item := range remoteFiles {
 		name := keeperString(item["name"])
 		if name == "" {
 			continue
@@ -2280,6 +2302,10 @@ func (a *App) ensureKeeperAuthWebsockets(
 	failures := []keeperAccountResult{}
 	now := time.Now().In(appTimeLocation)
 	for _, item := range items {
+		if keeperAuthProvider(item) != "codex" {
+			remaining = append(remaining, item)
+			continue
+		}
 		name := keeperString(item["name"])
 		if name == "" || keeperBool(item["websockets"]) {
 			remaining = append(remaining, item)
@@ -2372,6 +2398,14 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 		_ = a.upsertKeeperState(ctx, result)
 		return result
 	}
+	provider := keeperAuthProvider(merged)
+	if provider == "" {
+		provider = "codex"
+	}
+	result.AccountType = keeperAccountTypeForProvider(provider, merged, nil)
+	if provider != "codex" {
+		return a.processKeeperProviderAuth(ctx, cfg, provider, merged, result, disabled, logFn)
+	}
 	if keeperString(merged["access_token"]) == "" {
 		message := "缺少 access token"
 		action := "刷新发现凭证不可用：" + message
@@ -2455,7 +2489,7 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 		return result
 	}
 	usage := parseKeeperUsageInfo(usageResult.JSONData)
-	result.AccountType = accountTypeFromKeeperDetail(merged, &usage)
+	result.AccountType = keeperAccountTypeForProvider(provider, merged, &usage)
 	result.PrimaryUsedPercent = &usage.PrimaryUsedPercent
 	result.SecondaryUsedPercent = usage.SecondaryUsedPercent
 	result.PrimaryResetAt = usage.PrimaryResetAt
@@ -2523,6 +2557,86 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 	}
 	result.LastError = nil
 	_ = a.upsertKeeperState(ctx, result)
+	return result
+}
+
+func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, provider string, detail map[string]any, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
+	probe := a.checkKeeperProviderProbe(ctx, cfg, provider, detail)
+	if probe.StatusCode == nil {
+		message := "provider probe failed: " + probe.Error
+		result.Result = "network_error"
+		result.LastError = &message
+		result.LatestAction = &message
+		_ = a.upsertKeeperState(ctx, result)
+		logFn(result.Name + ": " + message)
+		return result
+	}
+	result.LastStatusCode = probe.StatusCode
+	classification, action, reason := classifyKeeperProviderProbe(provider, probe, disabled)
+	switch action {
+	case "disable":
+		message := fmt.Sprintf("%s probe classified %s: %s", provider, classification, reason)
+		actionText := "disable credential: " + message
+		if !cfg.CodexKeeper.DryRun {
+			if !disabled {
+				if err := a.setKeeperRemoteDisabled(ctx, cfg, result.Name, true); err != nil {
+					message = "disable credential failed: " + err.Error()
+					result.Result = "network_error"
+					result.LastError = &message
+					_ = a.upsertKeeperState(ctx, result)
+					return result
+				}
+			}
+			disabled = true
+			result.Disabled = &disabled
+		} else {
+			actionText = "dry-run " + actionText
+		}
+		result.Result = "status_disabled"
+		result.LastError = &message
+		result.LatestAction = &actionText
+		_ = a.upsertKeeperState(ctx, result)
+		logFn(result.Name + ": " + actionText)
+		return result
+	case "enable":
+		message := fmt.Sprintf("%s probe recovered: %s", provider, reason)
+		actionText := "enable credential: " + message
+		if !cfg.CodexKeeper.DryRun {
+			if err := a.setKeeperRemoteDisabled(ctx, cfg, result.Name, false); err != nil {
+				message = "enable credential failed: " + err.Error()
+				result.Result = "network_error"
+				result.LastError = &message
+				result.LatestAction = &message
+				_ = a.upsertKeeperState(ctx, result)
+				return result
+			}
+			disabled = false
+			result.Disabled = &disabled
+		} else {
+			actionText = "dry-run " + actionText
+		}
+		result.Result = "status_enabled"
+		result.LatestAction = &actionText
+		result.LastError = nil
+		_ = a.upsertKeeperState(ctx, result)
+		logFn(result.Name + ": " + actionText)
+		return result
+	}
+	if classification == "healthy" {
+		result.Result = "healthy"
+		result.LastError = nil
+		message := fmt.Sprintf("%s probe healthy", provider)
+		result.LatestAction = &message
+		_ = a.upsertKeeperState(ctx, result)
+		logFn(result.Name + ": " + message)
+		return result
+	}
+	message := fmt.Sprintf("%s probe classified %s: %s", provider, classification, reason)
+	result.Result = "network_error"
+	result.LastError = &message
+	result.LatestAction = &message
+	_ = a.upsertKeeperState(ctx, result)
+	logFn(result.Name + ": " + message)
 	return result
 }
 
@@ -2820,6 +2934,250 @@ func (a *App) checkKeeperUsage(ctx context.Context, cfg AppConfig, detail map[st
 		JSONData:   bodyJSON,
 		Brief:      briefAny(raw["body"]),
 	}
+}
+
+type keeperProviderProbeSpec struct {
+	Method string
+	URL    string
+	Header map[string]string
+	Data   string
+}
+
+func (a *App) checkKeeperProviderProbe(ctx context.Context, cfg AppConfig, provider string, detail map[string]any) keeperHTTPResult {
+	specs := keeperProviderProbeSpecs(provider)
+	if len(specs) == 0 {
+		return keeperHTTPResult{Error: "unsupported provider"}
+	}
+	var last keeperHTTPResult
+	for index, spec := range specs {
+		result := a.checkKeeperProviderProbeOnce(ctx, cfg, detail, spec)
+		if result.StatusCode == nil {
+			return result
+		}
+		last = result
+		classification, _, _ := classifyKeeperProviderProbe(provider, result, false)
+		if classification == "healthy" || !keeperProviderShouldTryFallback(result, classification) || index == len(specs)-1 {
+			return result
+		}
+	}
+	return last
+}
+
+func keeperProviderProbeSpecs(provider string) []keeperProviderProbeSpec {
+	switch provider {
+	case "grok":
+		return []keeperProviderProbeSpec{
+			{
+				Method: http.MethodPost,
+				URL:    "https://cli-chat-proxy.grok.com/v1/responses",
+				Header: map[string]string{
+					"Authorization":         "Bearer $TOKEN$",
+					"Accept":                "application/json",
+					"Content-Type":          "application/json",
+					"X-XAI-Token-Auth":      "xai-grok-cli",
+					"x-grok-client-version": "0.2.93",
+					"User-Agent":            "xai-grok-workspace/0.2.93",
+				},
+				Data: `{"model":"grok-4.5","input":"ping","stream":false}`,
+			},
+			{
+				Method: http.MethodPost,
+				URL:    "https://cli-chat-proxy.grok.com/v1/chat/completions",
+				Header: map[string]string{
+					"Authorization":         "Bearer $TOKEN$",
+					"Accept":                "application/json",
+					"Content-Type":          "application/json",
+					"X-XAI-Token-Auth":      "xai-grok-cli",
+					"x-grok-client-version": "0.2.93",
+					"User-Agent":            "xai-grok-workspace/0.2.93",
+				},
+				Data: `{"model":"grok-4.5","messages":[{"role":"user","content":"ping"}],"stream":false}`,
+			},
+		}
+	case "claude":
+		return []keeperProviderProbeSpec{{
+			Method: http.MethodPost,
+			URL:    "https://api.anthropic.com/v1/messages",
+			Header: map[string]string{
+				"x-api-key":         "$TOKEN$",
+				"anthropic-version": "2023-06-01",
+				"content-type":      "application/json",
+			},
+			Data: `{"model":"claude-3-5-haiku-latest","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}`,
+		}}
+	case "gemini":
+		return []keeperProviderProbeSpec{{
+			Method: http.MethodGet,
+			URL:    "https://generativelanguage.googleapis.com/v1beta/models",
+			Header: map[string]string{"x-goog-api-key": "$TOKEN$"},
+		}}
+	case "antigravity":
+		return []keeperProviderProbeSpec{{
+			Method: http.MethodGet,
+			URL:    "https://generativelanguage.googleapis.com/v1beta/models",
+			Header: map[string]string{"Authorization": "Bearer $TOKEN$"},
+		}}
+	default:
+		return nil
+	}
+}
+
+func (a *App) checkKeeperProviderProbeOnce(ctx context.Context, cfg AppConfig, detail map[string]any, spec keeperProviderProbeSpec) keeperHTTPResult {
+	body := map[string]any{
+		"auth_index": keeperAuthIndex(detail),
+		"method":     spec.Method,
+		"url":        spec.URL,
+		"header":     spec.Header,
+		"data":       spec.Data,
+	}
+	response, payload, err := a.keeperRequest(ctx, cfg, http.MethodPost, "/v0/management/api-call", nil, body, time.Duration(cfg.CodexKeeper.UsageTimeoutSeconds)*time.Second)
+	if err != nil {
+		return keeperHTTPResult{Error: err.Error()}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return keeperHTTPResult{Error: fmt.Sprintf("api-call management request failed: HTTP %d", response.StatusCode), Brief: briefPayload(payload)}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return keeperHTTPResult{Error: "api-call response is not valid JSON"}
+	}
+	statusCode := keeperIntPtr(raw["status_code"], raw["statusCode"])
+	if statusCode == nil {
+		return keeperHTTPResult{Error: "api-call response missing status_code"}
+	}
+	bodyJSON := keeperBodyJSON(raw["body"])
+	return keeperHTTPResult{
+		StatusCode: statusCode,
+		JSONData:   bodyJSON,
+		Brief:      briefAny(raw["body"]),
+	}
+}
+
+func classifyKeeperProviderProbe(provider string, result keeperHTTPResult, disabled bool) (classification string, action string, reason string) {
+	status := 0
+	if result.StatusCode != nil {
+		status = *result.StatusCode
+	}
+	text := strings.ToLower(result.Brief + " " + result.Error)
+	if result.JSONData != nil {
+		payload, _ := json.Marshal(result.JSONData)
+		text += " " + strings.ToLower(string(payload))
+	}
+	if status >= 200 && status < 300 {
+		if disabled {
+			return "healthy", "enable", "probe succeeded"
+		}
+		return "healthy", "keep", "probe succeeded"
+	}
+	if status == http.StatusUnauthorized || strings.Contains(text, "token is expired") || strings.Contains(text, "token has been invalidated") || strings.Contains(text, "invalid_grant") || strings.Contains(text, "unauthorized") {
+		if disabled {
+			return "reauth", "keep", "credential expired or unauthorized"
+		}
+		return "reauth", "disable", "credential expired or unauthorized"
+	}
+	if provider == "grok" && keeperGrokFreeUsageExhausted(text) {
+		if disabled {
+			return "quota_exhausted", "keep", "included free usage exhausted"
+		}
+		return "quota_exhausted", "disable", "included free usage exhausted"
+	}
+	if status == http.StatusTooManyRequests {
+		return "probe_error", "keep", "temporary rate limit"
+	}
+	if status == http.StatusPaymentRequired || status == http.StatusForbidden || strings.Contains(text, "permission-denied") || strings.Contains(text, "permission denied") || strings.Contains(text, "deactivated") || strings.Contains(text, "suspended") || strings.Contains(text, "banned") {
+		if disabled {
+			return "permission_denied", "keep", "provider denied the credential"
+		}
+		return "permission_denied", "disable", "provider denied the credential"
+	}
+	if status == http.StatusNotFound || strings.Contains(text, "not-found") || strings.Contains(text, "does not exist") || strings.Contains(text, "no access to it") {
+		return "model_unavailable", "keep", "probe model unavailable"
+	}
+	if status > 0 {
+		return "probe_error", "keep", fmt.Sprintf("provider returned HTTP %d", status)
+	}
+	return "probe_error", "keep", "probe failed"
+}
+
+func keeperProviderShouldTryFallback(result keeperHTTPResult, classification string) bool {
+	if result.StatusCode == nil {
+		return true
+	}
+	status := *result.StatusCode
+	switch classification {
+	case "reauth", "quota_exhausted", "permission_denied", "healthy":
+		return false
+	}
+	switch status {
+	case http.StatusForbidden, http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusPaymentRequired:
+		return true
+	default:
+		return status == 0 || status >= 500 || classification == "probe_error" || classification == "unknown" || classification == "model_unavailable"
+	}
+}
+
+func keeperGrokFreeUsageExhausted(text string) bool {
+	text = strings.ToLower(text)
+	return strings.Contains(text, "free-usage-exhausted") || strings.Contains(text, "used all the included free usage") || strings.Contains(text, "included free usage has been exhausted")
+}
+
+func (a *App) listKeeperAccountsWithRemote(ctx context.Context) ([]keeperAccount, error) {
+	localAccounts, err := a.listKeeperAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	remoteAuthFiles, err := a.listKeeperRemoteAuthFiles(ctx, cfg)
+	if err != nil {
+		if len(localAccounts) > 0 {
+			return localAccounts, nil
+		}
+		return nil, err
+	}
+	byName := make(map[string]keeperAccount, len(localAccounts)+len(remoteAuthFiles))
+	for _, account := range localAccounts {
+		if strings.TrimSpace(account.Name) != "" {
+			byName[account.Name] = account
+		}
+	}
+	for _, item := range remoteAuthFiles {
+		provider := keeperAuthProvider(item)
+		if provider == "" {
+			continue
+		}
+		remote := keeperAccountFromRemoteAuthFile(item, provider)
+		name := strings.TrimSpace(remote.Name)
+		if name == "" {
+			continue
+		}
+		if local, ok := byName[name]; ok {
+			if _, ok := item["disabled"]; !ok {
+				remote.Disabled = local.Disabled
+			}
+			byName[name] = mergeKeeperAccountWithRemote(local, remote)
+			continue
+		}
+		if provider == "codex" {
+			continue
+		}
+		byName[name] = remote
+	}
+	accounts := make([]keeperAccount, 0, len(byName))
+	for _, account := range byName {
+		accounts = append(accounts, account)
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		leftType := strings.ToLower(stringPtrValue(accounts[i].AccountType))
+		rightType := strings.ToLower(stringPtrValue(accounts[j].AccountType))
+		if leftType == rightType {
+			return strings.ToLower(accounts[i].Name) < strings.ToLower(accounts[j].Name)
+		}
+		return leftType < rightType
+	})
+	return accounts, nil
 }
 
 func (a *App) listKeeperAccounts(ctx context.Context) ([]keeperAccount, error) {
@@ -3271,6 +3629,115 @@ func quotaResetAt(window map[string]any, base time.Time) *time.Time {
 		return &parsed
 	}
 	return nil
+}
+
+func keeperAuthProvider(detail map[string]any) string {
+	if detail == nil {
+		return ""
+	}
+	explicitValues := []string{}
+	for _, key := range []string{"provider", "type", "kind", "source", "service", "channel", "account_type", "accountType"} {
+		if value := keeperString(detail[key]); value != "" {
+			explicitValues = append(explicitValues, value)
+		}
+	}
+	if provider := keeperProviderFromText(strings.Join(explicitValues, " "), true); provider != "" {
+		return provider
+	}
+	if len(explicitValues) > 0 {
+		return ""
+	}
+	fileValues := []string{}
+	for _, key := range []string{"name", "file_name", "filename", "id"} {
+		if value := keeperString(detail[key]); value != "" {
+			fileValues = append(fileValues, value)
+		}
+	}
+	if path := keeperString(detail["path"]); path != "" {
+		fileValues = append(fileValues, path)
+	}
+	return keeperProviderFromText(strings.Join(fileValues, " "), false)
+}
+
+func keeperProviderFromText(value string, allowCodex bool) string {
+	text := strings.ToLower(value)
+	if provider := normalizeKeeperProvider(text); provider != "" {
+		if provider != "codex" || allowCodex {
+			return provider
+		}
+	}
+	switch {
+	case strings.Contains(text, "antigravity") || strings.Contains(text, "anti-gravity") || strings.Contains(text, "anti_gravity"):
+		return "antigravity"
+	case strings.Contains(text, "gemini") || strings.Contains(text, "google"):
+		return "gemini"
+	case strings.Contains(text, "grok") || strings.Contains(text, "xai") || strings.Contains(text, "x.ai"):
+		return "grok"
+	case strings.Contains(text, "claude") || strings.Contains(text, "anthropic"):
+		return "claude"
+	case allowCodex && (strings.Contains(text, "codex") || strings.Contains(text, "chatgpt") || strings.Contains(text, "openai_oauth")):
+		return "codex"
+	}
+	return ""
+}
+
+func keeperProviderEnabled(cfg KeeperConfig, provider string) bool {
+	provider = normalizeKeeperProvider(provider)
+	if provider == "" {
+		return false
+	}
+	for _, item := range normalizeKeeperEnabledProviders(cfg.EnabledProviders) {
+		if item == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func keeperAccountTypeForProvider(provider string, detail map[string]any, usage *keeperUsageInfo) *string {
+	if provider == "codex" {
+		return accountTypeFromKeeperDetail(detail, usage)
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	return &provider
+}
+
+func keeperAccountFromRemoteAuthFile(item map[string]any, provider string) keeperAccount {
+	return keeperAccount{
+		Name:           firstKeeperString(item, "name", "file_name", "filename", "id", "path"),
+		Email:          keeperStringPtr(item["email"], item["account_email"], item["user_email"], item["username"], item["subject"]),
+		AuthIndex:      keeperRemoteAuthIndex(item),
+		AccountType:    keeperAccountTypeForProvider(provider, item, nil),
+		Disabled:       keeperBool(item["disabled"]),
+		Priority:       keeperIntPtr(item["priority"]),
+		LastStatusCode: keeperIntPtr(item["last_status_code"], item["status_code"]),
+		LastError:      keeperStringPtr(item["last_error"], item["error"]),
+	}
+}
+
+func mergeKeeperAccountWithRemote(local keeperAccount, remote keeperAccount) keeperAccount {
+	local.Disabled = remote.Disabled
+	if local.Email == nil {
+		local.Email = remote.Email
+	}
+	if local.AuthIndex == nil {
+		local.AuthIndex = remote.AuthIndex
+	}
+	if local.AccountType == nil || stringPtrValue(local.AccountType) == "unknown" {
+		local.AccountType = remote.AccountType
+	}
+	if local.Priority == nil {
+		local.Priority = remote.Priority
+	}
+	if local.LastStatusCode == nil {
+		local.LastStatusCode = remote.LastStatusCode
+	}
+	if local.LastError == nil {
+		local.LastError = remote.LastError
+	}
+	return local
 }
 
 func accountTypeFromKeeperDetail(detail map[string]any, usage *keeperUsageInfo) *string {

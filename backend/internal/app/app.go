@@ -47,6 +47,10 @@ var defaultKeeperPriorityRules = map[string]int{
 	"free":    0,
 }
 
+var keeperProviderOrder = []string{"codex", "antigravity", "gemini", "grok", "claude"}
+
+var defaultKeeperEnabledProviders = []string{"codex"}
+
 type App struct {
 	db               *sql.DB
 	repoRoot         string
@@ -485,17 +489,18 @@ type CollectorConfig struct {
 }
 
 type KeeperConfig struct {
-	ScheduleCron                      string `json:"schedule_cron"`
-	QuotaThreshold                    int    `json:"quota_threshold"`
-	UsageTimeoutSeconds               int    `json:"usage_timeout_seconds"`
-	CPATimeoutSeconds                 int    `json:"cpa_timeout_seconds"`
-	MaxRetries                        int    `json:"max_retries"`
-	WorkerThreads                     int    `json:"worker_threads"`
-	ConditionalRefreshIntervalSeconds int    `json:"conditional_refresh_interval_seconds"`
-	AccountRefreshCacheMinutes        int    `json:"account_refresh_cache_minutes"`
-	DryRun                            bool   `json:"dry_run"`
-	EnableCredentialWebsockets        bool   `json:"enable_credential_websockets"`
-	AutoStartDaemon                   bool   `json:"auto_start_daemon"`
+	ScheduleCron                      string   `json:"schedule_cron"`
+	EnabledProviders                  []string `json:"enabled_providers"`
+	QuotaThreshold                    int      `json:"quota_threshold"`
+	UsageTimeoutSeconds               int      `json:"usage_timeout_seconds"`
+	CPATimeoutSeconds                 int      `json:"cpa_timeout_seconds"`
+	MaxRetries                        int      `json:"max_retries"`
+	WorkerThreads                     int      `json:"worker_threads"`
+	ConditionalRefreshIntervalSeconds int      `json:"conditional_refresh_interval_seconds"`
+	AccountRefreshCacheMinutes        int      `json:"account_refresh_cache_minutes"`
+	DryRun                            bool     `json:"dry_run"`
+	EnableCredentialWebsockets        bool     `json:"enable_credential_websockets"`
+	AutoStartDaemon                   bool     `json:"auto_start_daemon"`
 }
 
 type LiteLLMProxyConfig struct {
@@ -531,6 +536,7 @@ func defaultConfig() (AppConfig, error) {
 		},
 		CodexKeeper: KeeperConfig{
 			ScheduleCron:                      "*/30 * * * *",
+			EnabledProviders:                  cloneStringSlice(defaultKeeperEnabledProviders),
 			QuotaThreshold:                    100,
 			UsageTimeoutSeconds:               30,
 			CPATimeoutSeconds:                 30,
@@ -623,6 +629,7 @@ func normalizeKeeperConfig(cfg KeeperConfig) KeeperConfig {
 	if strings.TrimSpace(cfg.ScheduleCron) == "" {
 		cfg.ScheduleCron = "*/30 * * * *"
 	}
+	cfg.EnabledProviders = normalizeKeeperEnabledProviders(cfg.EnabledProviders)
 	cfg.QuotaThreshold = clampInt(cfg.QuotaThreshold, 0, 100, 100)
 	cfg.UsageTimeoutSeconds = maxInt(cfg.UsageTimeoutSeconds, 1, 30)
 	cfg.CPATimeoutSeconds = maxInt(cfg.CPATimeoutSeconds, 1, 30)
@@ -633,6 +640,67 @@ func normalizeKeeperConfig(cfg KeeperConfig) KeeperConfig {
 	}
 	cfg.AccountRefreshCacheMinutes = maxInt(cfg.AccountRefreshCacheMinutes, 1, 10)
 	return cfg
+}
+
+func cloneStringSlice(input []string) []string {
+	if input == nil {
+		return nil
+	}
+	output := make([]string, len(input))
+	copy(output, input)
+	return output
+}
+
+func normalizeKeeperEnabledProviders(input []string) []string {
+	if len(input) == 0 {
+		return cloneStringSlice(defaultKeeperEnabledProviders)
+	}
+	selected := map[string]bool{}
+	for _, item := range input {
+		provider := normalizeKeeperProvider(item)
+		if provider == "" || !keeperProviderSupported(provider) {
+			continue
+		}
+		selected[provider] = true
+	}
+	if len(selected) == 0 {
+		return cloneStringSlice(defaultKeeperEnabledProviders)
+	}
+	providers := make([]string, 0, len(selected))
+	for _, provider := range keeperProviderOrder {
+		if selected[provider] {
+			providers = append(providers, provider)
+		}
+	}
+	return providers
+}
+
+func normalizeKeeperProvider(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.NewReplacer("-", "_", " ", "_", ".", "_").Replace(normalized)
+	switch normalized {
+	case "codex", "chatgpt", "openai_oauth":
+		return "codex"
+	case "antigravity", "anti_gravity":
+		return "antigravity"
+	case "gemini", "google_api_key", "gemini_api_key":
+		return "gemini"
+	case "grok", "xai", "x_ai", "supergrok", "xai_api_key":
+		return "grok"
+	case "claude", "anthropic", "anthropic_api_key":
+		return "claude"
+	default:
+		return ""
+	}
+}
+
+func keeperProviderSupported(provider string) bool {
+	for _, allowed := range keeperProviderOrder {
+		if provider == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func validKeeperConditionalRefreshInterval(seconds int) bool {

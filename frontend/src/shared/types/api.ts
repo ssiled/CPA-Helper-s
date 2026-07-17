@@ -171,6 +171,8 @@ export interface CodexKeeperSettings {
   cliaproxy_url: string
   management_key_set: boolean
   schedule_cron: string
+  enabled_providers: string[]
+  available_providers: string[]
   next_run_times: string[]
   quota_threshold: number
   usage_timeout_seconds: number
@@ -187,6 +189,7 @@ export interface CodexKeeperSettings {
 
 export interface CodexKeeperSettingsUpdatePayload {
   schedule_cron?: string
+  enabled_providers?: string[]
   quota_threshold?: number
   usage_timeout_seconds?: number
   cpa_timeout_seconds?: number

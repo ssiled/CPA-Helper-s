@@ -28,6 +28,131 @@ func TestKeeperUsageTimeoutDefaultIsThirtyButExistingValueIsPreserved(t *testing
 	}
 }
 
+func TestKeeperSettingsNormalizeEnabledProviders(t *testing.T) {
+	cfg, err := defaultConfig()
+	if err != nil {
+		t.Fatalf("defaultConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.CodexKeeper.EnabledProviders, []string{"codex"}) {
+		t.Fatalf("default providers = %#v, want codex", cfg.CodexKeeper.EnabledProviders)
+	}
+	normalized := normalizeKeeperConfig(KeeperConfig{EnabledProviders: []string{"grok", "xai", "Gemini", "claude", "unknown"}})
+	if !reflect.DeepEqual(normalized.EnabledProviders, []string{"gemini", "grok", "claude"}) {
+		t.Fatalf("normalized providers = %#v", normalized.EnabledProviders)
+	}
+}
+
+func TestKeeperAccountsListIncludesRemoteNonCodexAccounts(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{
+				{"name": "codex-remote.json", "type": "codex"},
+				{"name": "grok-remote.json", "type": "xai", "auth_index": "grok-auth"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	accounts, err := app.listKeeperAccountsWithRemote(context.Background())
+	if err != nil {
+		t.Fatalf("listKeeperAccountsWithRemote: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].Name != "grok-remote.json" || stringPtrValue(accounts[0].AccountType) != "grok" {
+		t.Fatalf("accounts = %#v, want only remote grok account", accounts)
+	}
+}
+
+func TestKeeperGrokProbeDisablesExpiredCredential(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var apiCallPayloads []map[string]any
+	var disabledPatches []string
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{"name": "grok.json", "type": "xai"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "grok.json", "type": "xai", "auth_index": "grok-auth", "disabled": false,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			apiCallPayloads = append(apiCallPayloads, payload)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status_code": 401,
+				"body":        map[string]any{"error": map[string]any{"message": "token is expired"}},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload.Disabled {
+				disabledPatches = append(disabledPatches, payload.Name)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, func(cfg *AppConfig) {
+		cfg.CodexKeeper.EnabledProviders = []string{"grok"}
+		cfg.CodexKeeper.DryRun = false
+	})
+
+	stats, _, err := app.executeKeeperRunForAccounts(context.Background(), "accounts", []string{"grok.json"}, func(string) {})
+	if err != nil {
+		t.Fatalf("executeKeeperRunForAccounts: %v", err)
+	}
+	if stats.StatusDisabled != 1 {
+		t.Fatalf("status_disabled = %d, want 1", stats.StatusDisabled)
+	}
+	if len(disabledPatches) != 1 || disabledPatches[0] != "grok.json" {
+		t.Fatalf("disabled patches = %#v, want grok.json", disabledPatches)
+	}
+	if len(apiCallPayloads) != 1 {
+		t.Fatalf("api-call count = %d, want 1", len(apiCallPayloads))
+	}
+	payload := apiCallPayloads[0]
+	if payload["auth_index"] != "grok-auth" || payload["url"] != "https://cli-chat-proxy.grok.com/v1/responses" {
+		t.Fatalf("api-call payload = %#v, want grok responses probe", payload)
+	}
+	header, ok := payload["header"].(map[string]any)
+	if !ok {
+		t.Fatalf("header = %#v, want object", payload["header"])
+	}
+	if header["Authorization"] != "Bearer $TOKEN$" || header["X-XAI-Token-Auth"] != "xai-grok-cli" {
+		t.Fatalf("headers = %#v, want grok token headers", header)
+	}
+}
+
 func TestKeeperRequestRetriesTransientManagementFailures(t *testing.T) {
 	attempts := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
