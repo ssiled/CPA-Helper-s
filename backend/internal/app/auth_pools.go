@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -14,14 +15,16 @@ import (
 const authPoolPluginID = "cpa-auth-pool"
 
 type authPool struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description,omitempty"`
-	AuthIDs      []string `json:"auth_ids"`
-	AccountTypes []string `json:"account_types,omitempty"`
-	Models       []string `json:"models,omitempty"`
-	Enabled      bool     `json:"enabled"`
-	Accounts     []any    `json:"accounts,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description,omitempty"`
+	AuthIDs         []string `json:"auth_ids"`
+	ResolvedAuthIDs []string `json:"resolved_auth_ids,omitempty"`
+	AccountTypes    []string `json:"account_types,omitempty"`
+	Models          []string `json:"models,omitempty"`
+	AllowedUserIDs  []int    `json:"allowed_user_ids"`
+	Enabled         bool     `json:"enabled"`
+	Accounts        []any    `json:"accounts,omitempty"`
 }
 
 type authPoolBinding struct {
@@ -84,12 +87,13 @@ type authPoolAPIKeyAccountResponse struct {
 }
 
 type authPoolPayload struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	AuthIDs      []string `json:"auth_ids"`
-	AccountTypes []string `json:"account_types"`
-	Models       []string `json:"models,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	AuthIDs        []string `json:"auth_ids"`
+	AccountTypes   []string `json:"account_types"`
+	Models         []string `json:"models,omitempty"`
+	AllowedUserIDs []int    `json:"allowed_user_ids"`
 }
 
 type authPoolBindingPayload struct {
@@ -293,7 +297,9 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 		go func() {
 			syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_ = a.syncAuthPoolModels(syncCtx)
+			if err := a.syncAuthPoolModels(syncCtx); err != nil {
+				log.Printf("sync auth pool models failed: %v", err)
+			}
 		}()
 	}
 	localBindings, err = a.localAuthPoolBindings(ctx, user)
@@ -303,13 +309,30 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 	if len(localBindings) > 0 {
 		status.Bindings = localBindings
 	}
+	status.Pools = authPoolsVisibleToUser(status.Pools, localPools, user)
 	return status, nil
 }
 
 func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (authPool, error) {
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, Enabled: true}
+	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, AllowedUserIDs: normalizeAuthPoolUserIDs(payload.AllowedUserIDs), Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
+	}
+	var accounts []keeperAccount
+	if len(pool.AccountTypes) > 0 || len(pool.Models) == 0 {
+		var err error
+		accounts, err = a.listAuthPoolAccounts(ctx)
+		if err != nil {
+			return authPool{}, err
+		}
+		pool.ResolvedAuthIDs = authIDsForPoolModelSync(pool, accounts)
+	}
+	if len(pool.Models) == 0 && (len(pool.AuthIDs) > 0 || len(pool.AccountTypes) > 0) {
+		models, err := a.resolveAuthPoolModelsFromAccounts(ctx, pool, accounts)
+		if err != nil {
+			return authPool{}, err
+		}
+		pool.Models = models
 	}
 	var response struct {
 		Pool authPool `json:"pool"`
@@ -317,10 +340,16 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	response.Pool.AllowedUserIDs = pool.AllowedUserIDs
 	if err := a.saveLocalAuthPool(ctx, response.Pool); err != nil {
 		return authPool{}, err
 	}
-	_ = a.syncAuthPoolModels(ctx)
+	if err := a.replaceAuthPoolEntitlements(ctx, response.Pool.ID, pool.AllowedUserIDs); err != nil {
+		return authPool{}, err
+	}
+	if err := a.syncAuthPoolModels(ctx); err != nil {
+		log.Printf("sync auth pool models after pool update failed: %v", err)
+	}
 	a.refreshChannelStatusAfterChange()
 	return response.Pool, nil
 }
@@ -332,7 +361,9 @@ func (a *App) deleteAuthPool(ctx context.Context, id string) error {
 	_, err := a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE pool_id = ?`, id)
 	if err == nil {
 		_, _ = a.db.ExecContext(ctx, `DELETE FROM auth_pools WHERE id = ?`, id)
-		_ = a.syncAuthPoolModels(ctx)
+		if syncErr := a.syncAuthPoolModels(ctx); syncErr != nil {
+			log.Printf("sync auth pool models after pool deletion failed: %v", syncErr)
+		}
 		a.refreshChannelStatusAfterChange()
 	}
 	return err
@@ -357,6 +388,10 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	if err != nil {
 		return err
 	}
+	resolvedAuthIDsJSON, err := marshalStringList(pool.ResolvedAuthIDs)
+	if err != nil {
+		return err
+	}
 	accountTypesJSON, err := marshalStringList(pool.AccountTypes)
 	if err != nil {
 		return err
@@ -367,23 +402,24 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	}
 	now := dbTime(time.Now())
 	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO auth_pools (id, name, description, auth_ids_json, account_types_json, models_json, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
 			auth_ids_json = excluded.auth_ids_json,
+			resolved_auth_ids_json = excluded.resolved_auth_ids_json,
 			account_types_json = excluded.account_types_json,
 			models_json = excluded.models_json,
 			enabled = excluded.enabled,
 			updated_at = excluded.updated_at
-	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, accountTypesJSON, modelsJSON, pool.Enabled, now, now)
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON, pool.Enabled, now, now)
 	return err
 }
 
 func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, COALESCE(description, ''), auth_ids_json, account_types_json, models_json, enabled
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, enabled
 		FROM auth_pools
 		ORDER BY id
 	`)
@@ -394,16 +430,122 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	pools := []authPool{}
 	for rows.Next() {
 		var pool authPool
-		var authIDsJSON, accountTypesJSON, modelsJSON string
-		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Enabled); err != nil {
+		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON string
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Enabled); err != nil {
 			return nil, err
 		}
 		pool.AuthIDs = unmarshalStringList(authIDsJSON)
+		pool.ResolvedAuthIDs = unmarshalStringList(resolvedAuthIDsJSON)
 		pool.AccountTypes = unmarshalStringList(accountTypesJSON)
 		pool.Models = unmarshalStringList(modelsJSON)
 		pools = append(pools, pool)
 	}
-	return pools, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	entitlements, err := a.localAuthPoolEntitlements(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range pools {
+		pools[index].AllowedUserIDs = entitlements[pools[index].ID]
+		if pools[index].AllowedUserIDs == nil {
+			pools[index].AllowedUserIDs = []int{}
+		}
+	}
+	return pools, nil
+}
+
+func (a *App) replaceAuthPoolEntitlements(ctx context.Context, poolID string, userIDs []int) error {
+	poolID = strings.TrimSpace(poolID)
+	if poolID == "" {
+		return validationError("pool id is required")
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_pool_entitlements WHERE pool_id = ?`, poolID); err != nil {
+		return err
+	}
+	now := dbTime(time.Now())
+	for _, userID := range normalizeAuthPoolUserIDs(userIDs) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO auth_pool_entitlements (pool_id, user_id, created_at)
+			VALUES (?, ?, ?)
+		`, poolID, userID, now); err != nil {
+			return validationError("auth pool contains an invalid user")
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *App) localAuthPoolEntitlements(ctx context.Context) (map[string][]int, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT pool_id, user_id
+		FROM auth_pool_entitlements
+		ORDER BY pool_id, user_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string][]int{}
+	for rows.Next() {
+		var poolID string
+		var userID int
+		if err := rows.Scan(&poolID, &userID); err != nil {
+			return nil, err
+		}
+		result[poolID] = append(result[poolID], userID)
+	}
+	return result, rows.Err()
+}
+
+func normalizeAuthPoolUserIDs(userIDs []int) []int {
+	seen := map[int]bool{}
+	normalized := make([]int, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID <= 0 || seen[userID] {
+			continue
+		}
+		seen[userID] = true
+		normalized = append(normalized, userID)
+	}
+	sort.Ints(normalized)
+	return normalized
+}
+
+func authPoolsVisibleToUser(pools []authPool, localPools []authPool, user *AuthUser) []authPool {
+	entitlements := make(map[string][]int, len(localPools))
+	for _, pool := range localPools {
+		entitlements[strings.TrimSpace(pool.ID)] = normalizeAuthPoolUserIDs(pool.AllowedUserIDs)
+	}
+	visible := make([]authPool, 0, len(pools))
+	for _, pool := range pools {
+		pool.AllowedUserIDs = entitlements[strings.TrimSpace(pool.ID)]
+		if pool.AllowedUserIDs == nil {
+			pool.AllowedUserIDs = []int{}
+		}
+		if user != nil && !user.IsAdmin && !authPoolUserIDAllowed(pool.AllowedUserIDs, user.ID) {
+			continue
+		}
+		visible = append(visible, pool)
+	}
+	return visible
+}
+
+func authPoolUserIDAllowed(allowedUserIDs []int, userID int) bool {
+	for _, allowedUserID := range allowedUserIDs {
+		if allowedUserID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) restoreLocalAuthPoolsToPlugin(ctx context.Context, pools []authPool) error {
@@ -737,7 +879,9 @@ func (a *App) addAuthPoolAPIKeyAccount(ctx context.Context, payload authPoolAPIK
 	if err := a.cpaManagementJSON(ctx, http.MethodPut, endpoint, map[string]any{"items": items}, nil); err != nil {
 		return authPoolAPIKeyAccountResponse{}, err
 	}
-	_ = a.syncAuthPoolModels(ctx)
+	if err := a.syncAuthPoolModels(ctx); err != nil {
+		log.Printf("sync auth pool models after account update failed: %v", err)
+	}
 	a.refreshChannelStatusAfterChange()
 	return authPoolAPIKeyAccountResponse{Provider: provider, AccountType: accountType, Count: len(items)}, nil
 }
@@ -785,6 +929,9 @@ func (a *App) bindAPIKeyToAuthPool(ctx context.Context, user *AuthUser, payload 
 		return authPoolBinding{}, validationError("api key hash and pool id are required")
 	}
 	if err := a.ensureAPIKeyPoolAccess(ctx, user, apiKeyHash); err != nil {
+		return authPoolBinding{}, err
+	}
+	if err := a.ensureAuthPoolBindingAccess(ctx, user, poolID); err != nil {
 		return authPoolBinding{}, err
 	}
 	binding := authPoolBinding{APIKeyHash: apiKeyHash, PoolID: poolID, UserID: user.ID, Username: user.Username}
@@ -836,6 +983,63 @@ func (a *App) ensureAPIKeyPoolAccess(ctx context.Context, user *AuthUser, apiKey
 		return notFoundError("api key not found")
 	}
 	return nil
+}
+
+func (a *App) ensureAuthPoolBindingAccess(ctx context.Context, user *AuthUser, poolID string) error {
+	exists, enabled, err := a.localAuthPoolAvailability(ctx, poolID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		var status authPoolStatus
+		if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+			return err
+		}
+		if err := a.saveLocalAuthPools(ctx, status.Pools); err != nil {
+			return err
+		}
+		exists, enabled, err = a.localAuthPoolAvailability(ctx, poolID)
+		if err != nil {
+			return err
+		}
+	}
+	if !exists {
+		return notFoundError("auth pool not found")
+	}
+	if !enabled {
+		return validationError("auth pool is disabled")
+	}
+	if user != nil && user.IsAdmin {
+		return nil
+	}
+	if user == nil {
+		return forbiddenError("auth pool access denied")
+	}
+	var entitled int
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM auth_pool_entitlements
+		WHERE pool_id = ? AND user_id = ?
+	`, poolID, user.ID).Scan(&entitled); err != nil {
+		return err
+	}
+	if entitled == 0 {
+		return forbiddenError("auth pool access denied")
+	}
+	return nil
+}
+
+func (a *App) localAuthPoolAvailability(ctx context.Context, poolID string) (bool, bool, error) {
+	var count int
+	var enabled bool
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(enabled), 0)
+		FROM auth_pools
+		WHERE id = ?
+	`, poolID).Scan(&count, &enabled); err != nil {
+		return false, false, err
+	}
+	return count > 0, enabled, nil
 }
 
 func (a *App) localAuthPoolBindings(ctx context.Context, user *AuthUser) ([]authPoolBinding, error) {
@@ -1100,30 +1304,92 @@ func (a *App) syncAuthPoolModels(ctx context.Context) error {
 	if len(authIDs) == 0 {
 		return nil
 	}
-	cfg, err := a.loadConfig(ctx)
+	poolResolvedAuthIDs := authPoolResolvedAuthIDsForSync(status.Pools, accounts)
+	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{
+		"pool_resolved_auth_ids": poolResolvedAuthIDs,
+	}, nil); err != nil {
+		return err
+	}
+	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs)
 	if err != nil {
 		return err
 	}
-	authModels := map[string][]string{}
-	fetched := 0
+	poolModels := authPoolModelsForSync(status.Pools, accounts, authModels)
+	return a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{
+		"auth_models":            authModels,
+		"pool_models":            poolModels,
+		"pool_resolved_auth_ids": poolResolvedAuthIDs,
+	}, nil)
+}
+
+func (a *App) resolveAuthPoolModels(ctx context.Context, pool authPool) ([]string, error) {
+	accounts, err := a.listAuthPoolAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return a.resolveAuthPoolModelsFromAccounts(ctx, pool, accounts)
+}
+
+func (a *App) resolveAuthPoolModelsFromAccounts(ctx context.Context, pool authPool, accounts []keeperAccount) ([]string, error) {
+	authIDs := authIDsForPoolModelSync(pool, accounts)
+	if len(authIDs) == 0 {
+		return nil, validationError("auth pool has no eligible accounts")
+	}
+	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs)
+	if err != nil {
+		return nil, err
+	}
+	models := authPoolModelsForSync([]authPool{pool}, accounts, authModels)[pool.ID]
+	if len(models) == 0 {
+		return nil, validationError("auth pool accounts returned no models")
+	}
+	return models, nil
+}
+
+func authPoolResolvedAuthIDsForSync(pools []authPool, accounts []keeperAccount) map[string][]string {
+	resolved := make(map[string][]string, len(pools))
+	for _, pool := range pools {
+		poolID := strings.TrimSpace(pool.ID)
+		if poolID == "" {
+			continue
+		}
+		resolved[poolID] = authIDsForPoolModelSync(pool, accounts)
+	}
+	return resolved
+}
+
+func (a *App) fetchAuthPoolModelSnapshot(ctx context.Context, authIDs []string) (map[string][]string, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	authModels := make(map[string][]string, len(authIDs))
+	failures := make([]string, 0)
+	totalModels := 0
 	for _, authID := range authIDs {
-		models, err := a.fetchAuthFileModels(ctx, cfg, authID)
-		if err != nil {
+		models, fetchErr := a.fetchAuthFileModels(ctx, cfg, authID)
+		if fetchErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", authID, fetchErr))
 			continue
 		}
 		authModels[authID] = models
-		fetched++
+		totalModels += len(models)
 	}
-	if fetched == 0 {
-		return nil
+	if len(failures) > 0 {
+		return nil, fmt.Errorf("auth pool model catalog refresh failed: %s", strings.Join(failures, "; "))
 	}
-	poolModels := authPoolModelsForSync(status.Pools, accounts, authModels)
-	return a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{"auth_models": authModels, "pool_models": poolModels}, nil)
+	if totalModels == 0 {
+		return nil, validationError("auth pool model catalog is empty; keeping the last successful snapshot")
+	}
+	return authModels, nil
 }
 
 func authPoolsNeedModelSync(pools []authPool) bool {
 	for _, pool := range pools {
 		if (len(pool.AuthIDs) > 0 || len(pool.AccountTypes) > 0) && len(pool.Models) == 0 {
+			return true
+		}
+		if len(pool.AccountTypes) > 0 && len(pool.ResolvedAuthIDs) == 0 {
 			return true
 		}
 	}

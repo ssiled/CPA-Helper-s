@@ -2,7 +2,8 @@
 import { computed, h, onMounted, ref } from 'vue'
 import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, listAuthPoolAccounts, saveAuthPool } from '@/features/auth-pools/api/authPoolsApi'
-import type { AuthPool, CodexKeeperAccount } from '@/shared/types/api'
+import { listUsers } from '@/features/users/api/usersApi'
+import type { AuthPool, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 
 const message = useMessage()
@@ -13,6 +14,7 @@ const isSaving = ref(false)
 const isAddingAccount = ref(false)
 const pools = ref<AuthPool[]>([])
 const accounts = ref<CodexKeeperAccount[]>([])
+const users = ref<UserSummary[]>([])
 const editorVisible = ref(false)
 const apiKeyModalVisible = ref(false)
 const poolID = ref('')
@@ -21,6 +23,7 @@ const poolDescription = ref('')
 const selectedAuthIDs = ref<string[]>([])
 const selectedBatchType = ref<string | null>(null)
 const selectedAccountTypes = ref<string[]>([])
+const selectedAllowedUserIDs = ref<number[]>([])
 const apiKeyProvider = ref<'gemini' | 'grok'>('gemini')
 const apiKeyValue = ref('')
 const apiKeyPrefix = ref('')
@@ -47,12 +50,21 @@ const accountTypeOptions = computed(() => Array.from(new Set([
   .sort((left, right) => left.localeCompare(right))
   .map((type) => ({ label: type, value: type })))
 
+const userOptions = computed(() => users.value
+  .filter((user) => !user.is_admin)
+  .map((user) => ({
+    label: [user.nickname, user.username, user.disabled_at ? t('已禁用', 'Disabled') : ''].filter(Boolean).join(' · '),
+    value: user.id,
+    disabled: Boolean(user.disabled_at),
+  })))
+
 const healthyAuthIDs = computed(() => accounts.value.filter((account) => !account.disabled && (!account.last_status_code || account.last_status_code < 400)).map((account) => account.name))
 
 const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
   { title: t('ID', 'ID'), key: 'id' },
   { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(row.auth_ids.length + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
+  { title: t('授权用户', 'Authorized users'), key: 'allowed_user_ids', render: (row) => String(row.allowed_user_ids?.length ?? 0) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
     key: 'accounts',
@@ -129,9 +141,10 @@ function clearSelectedAccounts() {
 async function refresh() {
   isLoading.value = true
   try {
-    const [status, accountResponse] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts()])
+    const [status, accountResponse, userResponse] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts(), listUsers()])
     pools.value = status.pools
     accounts.value = accountResponse.items
+    users.value = userResponse
   } catch (error) {
     message.error(errorText(error, '\u52a0\u8f7d\u53f7\u6c60\u5931\u8d25', 'Failed to load auth pools'))
   } finally {
@@ -146,6 +159,7 @@ function openCreate() {
   selectedAuthIDs.value = []
   selectedBatchType.value = null
   selectedAccountTypes.value = []
+  selectedAllowedUserIDs.value = []
   editorVisible.value = true
 }
 
@@ -177,6 +191,7 @@ function editPool(pool: AuthPool) {
   selectedAuthIDs.value = [...pool.auth_ids]
   selectedBatchType.value = null
   selectedAccountTypes.value = [...(pool.account_types ?? [])]
+  selectedAllowedUserIDs.value = [...(pool.allowed_user_ids ?? [])]
   editorVisible.value = true
 }
 
@@ -189,7 +204,7 @@ async function savePool() {
   }
   isSaving.value = true
   try {
-    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value })
+    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, allowed_user_ids: selectedAllowedUserIDs.value })
     message.success(t('\u53f7\u6c60\u5df2\u4fdd\u5b58', 'Pool saved'))
     editorVisible.value = false
     await refresh()
@@ -297,6 +312,9 @@ onMounted(refresh)
               </NTag>
             </div>
           </div>
+        </NFormItem>
+        <NFormItem :label="t('允许使用号池的用户', 'Users allowed to use this pool')">
+          <NSelect v-model:value="selectedAllowedUserIDs" multiple filterable :options="userOptions" :disabled="isSaving" :placeholder="t('未选择时仅管理员可以绑定该号池', 'When empty, only administrators can bind this pool')" />
         </NFormItem>
         <div class="modal-actions">
           <NButton secondary :disabled="isSaving" @click="editorVisible = false">{{ t('\u53d6\u6d88', 'Cancel') }}</NButton>

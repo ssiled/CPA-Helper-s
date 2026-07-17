@@ -261,8 +261,10 @@ export interface AuthPool {
   name: string
   description?: string
   auth_ids: string[]
+  resolved_auth_ids?: string[]
   account_types?: string[]
   models?: string[]
+  allowed_user_ids: number[]
   enabled: boolean
 }
 
@@ -336,6 +338,7 @@ export interface AuthPoolPayload {
   auth_ids: string[]
   account_types: string[]
   models?: string[]
+  allowed_user_ids: number[]
 }
 
 export interface AuthPoolBindingPayload {

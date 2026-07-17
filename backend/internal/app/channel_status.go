@@ -434,7 +434,7 @@ func channelAccountStatus(account keeperAccount) (string, bool) {
 }
 
 func channelPoolAccounts(pool authPool, accounts []keeperAccount) []keeperAccount {
-	manualIDs := normalizedLookup(pool.AuthIDs)
+	manualIDs := normalizedLookup(append(append([]string(nil), pool.AuthIDs...), pool.ResolvedAuthIDs...))
 	typeIDs := normalizedLookup(pool.AccountTypes)
 	members := []keeperAccount{}
 	seen := map[string]bool{}

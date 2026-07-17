@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,6 +115,75 @@ func TestAuthPoolStatusRestoresLocalPoolsWhenPluginStateIsEmpty(t *testing.T) {
 	}
 }
 
+func TestBindAPIKeyToAuthPoolRequiresUserEntitlement(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	bindingCalls := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" {
+			bindingCalls++
+			var binding authPoolBinding
+			if err := json.NewDecoder(r.Body).Decode(&binding); err != nil {
+				t.Fatalf("decode binding: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": binding})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	ctx := context.Background()
+	pool := authPool{ID: "paid", Name: "Paid", AuthIDs: []string{"auth-paid"}, Models: []string{"gpt-paid"}, Enabled: true}
+	if err := app.saveLocalAuthPool(ctx, pool); err != nil {
+		t.Fatalf("saveLocalAuthPool: %v", err)
+	}
+	now := dbTime(time.Now())
+	apiKeyHash := hashAPIKey("sk-user")
+	if _, err := app.db.Exec(`
+		INSERT INTO users (id, username, is_admin, created_at, updated_at)
+		VALUES (10, 'user-a', 0, ?, ?)
+	`, now, now); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := app.db.Exec(`
+		INSERT INTO user_api_keys (api_key_hash, user_id, api_key, description, created_at, updated_at)
+		VALUES (?, 10, 'sk-user', 'user key', ?, ?)
+	`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+	user := &AuthUser{ID: 10, Username: "user-a"}
+	payload := authPoolBindingPayload{APIKeyHash: apiKeyHash, PoolID: pool.ID}
+
+	if _, err := app.bindAPIKeyToAuthPool(ctx, user, payload); err == nil || !strings.Contains(err.Error(), "auth pool access denied") {
+		t.Fatalf("bind without entitlement error = %v, want access denied", err)
+	}
+	if bindingCalls != 0 {
+		t.Fatalf("plugin binding calls = %d, want 0 before authorization", bindingCalls)
+	}
+
+	if err := app.replaceAuthPoolEntitlements(ctx, pool.ID, []int{user.ID}); err != nil {
+		t.Fatalf("replaceAuthPoolEntitlements: %v", err)
+	}
+	binding, err := app.bindAPIKeyToAuthPool(ctx, user, payload)
+	if err != nil {
+		t.Fatalf("bind with entitlement: %v", err)
+	}
+	if binding.PoolID != pool.ID || binding.APIKeyHash != apiKeyHash {
+		t.Fatalf("binding = %#v, want authorized pool binding", binding)
+	}
+	if bindingCalls != 1 {
+		t.Fatalf("plugin binding calls = %d, want 1 after authorization", bindingCalls)
+	}
+}
+
 func TestListAuthPoolAccountsIncludesRemoteGeminiAndGrok(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +222,58 @@ func TestListAuthPoolAccountsIncludesRemoteGeminiAndGrok(t *testing.T) {
 	}
 	if got["xai-grok-key.json"] != "grok" {
 		t.Fatalf("grok type = %q, want grok; all = %#v", got["xai-grok-key.json"], got)
+	}
+}
+
+func TestUpsertAuthPoolSendsResolvedDynamicAuthIDs(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var savedPool authPool
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{
+				{"name": "karenmclean0894+go1@gmail.com.json", "account_type": "k12"},
+				{"name": "codex-voguish_voyage_7e@icloud.com-plus.json", "account_type": "plus"},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "gpt-5.5"}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/pools":
+			if err := json.NewDecoder(r.Body).Decode(&savedPool); err != nil {
+				t.Fatalf("decode pool: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"pool": savedPool})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []authPool{savedPool}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"synced": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{
+		ID:           "002",
+		Name:         "plus/team",
+		AccountTypes: []string{"k12", "team", "plus"},
+	})
+	if err != nil {
+		t.Fatalf("upsertAuthPool: %v", err)
+	}
+	want := []string{"codex-voguish_voyage_7e@icloud.com-plus.json", "karenmclean0894+go1@gmail.com.json"}
+	if !reflect.DeepEqual(savedPool.ResolvedAuthIDs, want) {
+		t.Fatalf("saved resolved auth ids = %#v, want %#v", savedPool.ResolvedAuthIDs, want)
+	}
+	if !reflect.DeepEqual(pool.ResolvedAuthIDs, want) {
+		t.Fatalf("response resolved auth ids = %#v, want %#v", pool.ResolvedAuthIDs, want)
 	}
 }
 
@@ -206,6 +328,115 @@ func TestUpdateAuthPoolProxyConfigWritesCodexConcurrencyLimits(t *testing.T) {
 	}
 	if config.CodexConcurrencyLimits["plus"] != 2 || config.CodexConcurrencyLimits["default"] != 1 {
 		t.Fatalf("response limits = %#v", config.CodexConcurrencyLimits)
+	}
+}
+
+func TestUpsertAuthPoolRejectsCatalogFailureBeforePluginMutation(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	poolPosts := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{"name": "auth-a", "type": "codex"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models":
+			http.Error(w, "catalog unavailable", http.StatusBadGateway)
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/pools":
+			poolPosts++
+			_ = json.NewEncoder(w).Encode(map[string]any{"pool": map[string]any{"id": "paid", "name": "Paid", "enabled": true}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	_, err = app.upsertAuthPool(t.Context(), authPoolPayload{ID: "paid", Name: "Paid", AuthIDs: []string{"auth-a"}})
+	if err == nil || !strings.Contains(err.Error(), "catalog refresh failed") {
+		t.Fatalf("upsertAuthPool error = %v, want catalog refresh failure", err)
+	}
+	if poolPosts != 0 {
+		t.Fatalf("plugin pool posts = %d, want 0 when model preflight fails", poolPosts)
+	}
+}
+
+func TestSyncAuthPoolModelsKeepsLastSnapshotOnPartialFailure(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	membershipPosts := 0
+	modelSnapshotPosts := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{
+				"id": "paid", "name": "Paid", "auth_ids": []string{"auth-a", "auth-b"}, "models": []string{"last-good"}, "enabled": true,
+			}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{
+				{"name": "auth-a", "type": "codex"},
+				{"name": "auth-b", "type": "codex"},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models" && r.URL.Query().Get("name") == "auth-a":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "gpt-a"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models" && r.URL.Query().Get("name") == "auth-b":
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-models":
+			var payload map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode auth models payload: %v", err)
+			}
+			if _, ok := payload["auth_models"]; ok {
+				modelSnapshotPosts++
+			} else {
+				membershipPosts++
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	err = app.syncAuthPoolModels(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "auth-b") {
+		t.Fatalf("syncAuthPoolModels error = %v, want auth-b failure", err)
+	}
+	if membershipPosts != 1 {
+		t.Fatalf("membership posts = %d, want 1 before model refresh", membershipPosts)
+	}
+	if modelSnapshotPosts != 0 {
+		t.Fatalf("model snapshot posts = %d, want 0 on partial refresh", modelSnapshotPosts)
+	}
+}
+
+func TestAuthPoolsNeedModelSyncForUnresolvedDynamicPool(t *testing.T) {
+	if !authPoolsNeedModelSync([]authPool{{
+		ID:           "002",
+		AccountTypes: []string{"k12", "team", "plus"},
+		Models:       []string{"gpt-5.5"},
+	}}) {
+		t.Fatal("dynamic pool without resolved auth ids should require synchronization")
+	}
+	if authPoolsNeedModelSync([]authPool{{
+		ID:              "002",
+		AccountTypes:    []string{"k12", "team", "plus"},
+		ResolvedAuthIDs: []string{"karen.json"},
+		Models:          []string{"gpt-5.5"},
+	}}) {
+		t.Fatal("resolved dynamic pool with models should not require synchronization")
 	}
 }
 
