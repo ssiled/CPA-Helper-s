@@ -119,15 +119,21 @@ func TestAuthPoolStatusRestoresLocalPoolsWhenPluginStateIsEmpty(t *testing.T) {
 func TestBindAPIKeyToAuthPoolRequiresUserEntitlement(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	bindingCalls := 0
+	bindingDeleteCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings":
 			bindingCalls++
 			var binding authPoolBinding
 			if err := json.NewDecoder(r.Body).Decode(&binding); err != nil {
 				t.Fatalf("decode binding: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"binding": binding})
+			return
+		case r.Method == http.MethodDelete && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings":
+			bindingDeleteCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true})
 			return
 		}
 		http.NotFound(w, r)
@@ -182,6 +188,63 @@ func TestBindAPIKeyToAuthPoolRequiresUserEntitlement(t *testing.T) {
 	}
 	if bindingCalls != 1 {
 		t.Fatalf("plugin binding calls = %d, want 1 after authorization", bindingCalls)
+	}
+	if err := app.replaceAuthPoolEntitlements(ctx, pool.ID, nil); err != nil {
+		t.Fatalf("revoke auth pool entitlement: %v", err)
+	}
+	if bindingDeleteCalls != 1 {
+		t.Fatalf("plugin binding delete calls = %d, want 1 after entitlement revocation", bindingDeleteCalls)
+	}
+	bindings, err := app.localAuthPoolBindings(ctx, nil)
+	if err != nil {
+		t.Fatalf("localAuthPoolBindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Fatalf("bindings after entitlement revocation = %#v, want none", bindings)
+	}
+	if _, err := app.bindAPIKeyToAuthPool(ctx, user, payload); err == nil || !strings.Contains(err.Error(), "auth pool access denied") {
+		t.Fatalf("bind after entitlement revocation error = %v, want access denied", err)
+	}
+}
+
+func TestAuthPoolModelChecksUseLocalLastGoodSnapshot(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, "http://127.0.0.1:1", func(cfg *AppConfig) {
+		cfg.AuthPoolProxyTargets = []AuthPoolProxyTargetConfig{{
+			ID: "offline", Name: "Offline CPA", CPAURL: "http://127.0.0.1:1", ManagementKey: "mgmt", APIKey: "proxy-key", Enabled: true,
+		}}
+	})
+
+	ctx := context.Background()
+	if err := app.saveLocalAuthPool(ctx, authPool{ID: "paid", Name: "Paid", Models: []string{"gpt-paid"}, Enabled: true}); err != nil {
+		t.Fatalf("saveLocalAuthPool: %v", err)
+	}
+	now := dbTime(time.Now())
+	apiKeyHash := hashAPIKey("sk-local-model")
+	if _, err := app.db.Exec(`INSERT INTO users (id, username, is_admin, created_at, updated_at) VALUES (20, 'model-user', 0, ?, ?)`, now, now); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO user_api_keys (api_key_hash, user_id, api_key, description, created_at, updated_at) VALUES (?, 20, 'sk-local-model', 'model key', ?, ?)`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO user_api_key_pools (api_key_hash, pool_id, created_at, updated_at) VALUES (?, 'paid', ?, ?)`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("insert binding: %v", err)
+	}
+
+	if err := app.ensureAPIKeyModelAllowedByPool(ctx, apiKeyHash, "gpt-paid"); err != nil {
+		t.Fatalf("ensureAPIKeyModelAllowedByPool used remote state: %v", err)
+	}
+	filters, err := app.authPoolModelFiltersForAPIKeys(ctx, []string{apiKeyHash})
+	if err != nil {
+		t.Fatalf("authPoolModelFiltersForAPIKeys used remote state: %v", err)
+	}
+	if !filters[apiKeyHash]["gpt-paid"] {
+		t.Fatalf("local model filters = %#v, want gpt-paid", filters)
 	}
 }
 

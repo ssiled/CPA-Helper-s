@@ -487,24 +487,99 @@ func (a *App) replaceAuthPoolEntitlements(ctx context.Context, poolID string, us
 	if poolID == "" {
 		return validationError("pool id is required")
 	}
+	userIDs = normalizeAuthPoolUserIDs(userIDs)
+	revokedBindings, err := a.authPoolBindingsRevokedByEntitlements(ctx, poolID, userIDs)
+	if err != nil {
+		return err
+	}
+	if err := a.removeAuthPoolBindingsFromPlugin(ctx, revokedBindings); err != nil {
+		return err
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
+		a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_pool_entitlements WHERE pool_id = ?`, poolID); err != nil {
+		a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
 		return err
 	}
 	now := dbTime(time.Now())
-	for _, userID := range normalizeAuthPoolUserIDs(userIDs) {
+	for _, userID := range userIDs {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO auth_pool_entitlements (pool_id, user_id, created_at)
 			VALUES (?, ?, ?)
 		`, poolID, userID, now); err != nil {
+			a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
 			return validationError("auth pool contains an invalid user")
 		}
 	}
-	return tx.Commit()
+	for _, binding := range revokedBindings {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE api_key_hash = ? AND pool_id = ?`, binding.APIKeyHash, poolID); err != nil {
+			a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
+		return err
+	}
+	return nil
+}
+
+func (a *App) authPoolBindingsRevokedByEntitlements(ctx context.Context, poolID string, allowedUserIDs []int) ([]authPoolBinding, error) {
+	query := `
+		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, '')
+		FROM user_api_key_pools p
+		JOIN user_api_keys k ON k.api_key_hash = p.api_key_hash
+		JOIN users u ON u.id = k.user_id
+		WHERE p.pool_id = ? AND u.is_admin = 0
+	`
+	args := []any{poolID}
+	if len(allowedUserIDs) > 0 {
+		placeholders := make([]string, 0, len(allowedUserIDs))
+		for _, userID := range allowedUserIDs {
+			placeholders = append(placeholders, "?")
+			args = append(args, userID)
+		}
+		query += ` AND k.user_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	query += ` ORDER BY p.api_key_hash`
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bindings := []authPoolBinding{}
+	for rows.Next() {
+		var binding authPoolBinding
+		if err := rows.Scan(&binding.APIKeyHash, &binding.PoolID, &binding.UserID, &binding.Username); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings, rows.Err()
+}
+
+func (a *App) removeAuthPoolBindingsFromPlugin(ctx context.Context, bindings []authPoolBinding) error {
+	removed := make([]authPoolBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		if err := a.authPoolPluginRequest(ctx, http.MethodDelete, "/bindings?api_key_hash="+urlQueryEscape(binding.APIKeyHash), nil, nil); err != nil {
+			a.restoreAuthPoolBindingsInPlugin(ctx, removed)
+			return err
+		}
+		removed = append(removed, binding)
+	}
+	return nil
+}
+
+func (a *App) restoreAuthPoolBindingsInPlugin(ctx context.Context, bindings []authPoolBinding) {
+	for _, binding := range bindings {
+		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/bindings", binding, nil); err != nil {
+			log.Printf("restore auth pool binding after local failure failed: api_key_hash=%s error=%v", binding.APIKeyHash, err)
+		}
+	}
 }
 
 func (a *App) localAuthPoolEntitlements(ctx context.Context) (map[string][]int, error) {
@@ -1201,14 +1276,14 @@ func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes [
 			return nil, authPoolRequiredError()
 		}
 	}
-	var status authPoolStatus
-	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
+	pools, err := a.localAuthPools(ctx)
+	if err != nil {
 		return nil, err
 	}
 	poolFilters := map[string]map[string]bool{}
-	for _, pool := range status.Pools {
+	for _, pool := range pools {
 		poolID := strings.TrimSpace(pool.ID)
-		if poolID != "" {
+		if poolID != "" && pool.Enabled {
 			poolFilters[poolID] = authPoolModelFilter(pool)
 		}
 	}
@@ -1236,13 +1311,16 @@ func (a *App) ensureAPIKeyModelAllowedByPool(ctx context.Context, apiKeyHash str
 	if !bound {
 		return authPoolRequiredError()
 	}
-	var status authPoolStatus
-	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
+	pools, err := a.localAuthPools(ctx)
+	if err != nil {
 		return err
 	}
-	for _, pool := range status.Pools {
+	for _, pool := range pools {
 		if strings.TrimSpace(pool.ID) != poolID {
 			continue
+		}
+		if !pool.Enabled {
+			return validationError("当前 API KEY 绑定的号池已禁用")
 		}
 		if authPoolAllowsModel(pool, model) {
 			return nil
