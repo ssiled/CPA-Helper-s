@@ -1,6 +1,6 @@
 # CPA-Helper 0.3.26
 
-本次发布修复号池权限撤销和请求热路径状态一致性问题，并配合 CLIProxyAPI 与 CPA Auth Pool Plugin 修复“号池内有正常账号但返回 503”的跨项目候选优先级问题。
+本次发布修复号池权限撤销和请求热路径状态一致性问题，并配合 CPA Auth Pool Plugin 强化代理请求的 fail-closed 行为。
 
 ## 权限与一致性
 
@@ -17,7 +17,10 @@
 ## 配套版本
 
 - CPA Auth Pool Plugin `v0.1.24` 或更高版本。
-- 包含 auth-pool priority-filter 修复的 `ssiled/CLIProxyAPI` main 镜像。
+
+## 已知限制
+
+- 本版本不修改 CLIProxyAPI。CLIProxyAPI 在调用调度插件前按全局最高优先级裁剪候选的问题仍需在 Host 侧解决，Helper 和 Plugin 无法看到已被 Host 丢弃的低优先级账号。
 
 ## 验证
 
