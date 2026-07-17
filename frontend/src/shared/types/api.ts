@@ -272,6 +272,42 @@ export interface AuthPoolBinding {
 export interface AuthPoolStatus {
   pools: AuthPool[]
   bindings: AuthPoolBinding[]
+  plugin_installed?: boolean
+  plugin_error?: string
+}
+
+export interface AuthPoolProxyTarget {
+  id: string
+  name: string
+  cpa_url: string
+  management_key_set: boolean
+  api_key_set: boolean
+  api_key_preview: string
+  enabled: boolean
+}
+
+export interface AuthPoolProxyConfig {
+  cpa_url: string
+  api_key_set: boolean
+  api_key_preview: string
+  mode: 'legacy' | 'proxy' | string
+  plugin_installed: boolean
+  plugin_error?: string
+  targets: AuthPoolProxyTarget[]
+}
+
+export interface AuthPoolProxyTargetPayload {
+  id: string
+  name: string
+  cpa_url: string
+  management_key: string
+  api_key: string
+  enabled: boolean
+}
+
+export interface AuthPoolProxyConfigPayload {
+  api_key?: string
+  targets?: AuthPoolProxyTargetPayload[]
 }
 
 export interface AuthPoolAccountsResponse {

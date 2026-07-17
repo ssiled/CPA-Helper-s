@@ -1,5 +1,5 @@
 import { apiClient } from '@/shared/api/apiClient'
-import type { AuthPool, AuthPoolAccountsResponse, AuthPoolBinding, AuthPoolBindingPayload, AuthPoolPayload, AuthPoolStatus } from '@/shared/types/api'
+import type { AuthPool, AuthPoolAccountsResponse, AuthPoolBinding, AuthPoolBindingPayload, AuthPoolPayload, AuthPoolProxyConfig, AuthPoolProxyConfigPayload, AuthPoolStatus } from '@/shared/types/api'
 
 export function getAuthPoolStatus(): Promise<AuthPoolStatus> {
   return apiClient.get<AuthPoolStatus>('/auth-pools')
@@ -51,14 +51,4 @@ export interface AuthPoolAPIKeyAccountResponse {
   provider: string
   account_type: string
   count: number
-}
-
-export interface AuthPoolProxyConfig {
-  cpa_url: string
-  api_key_set: boolean
-  api_key_preview: string
-}
-
-export interface AuthPoolProxyConfigPayload {
-  api_key: string
 }

@@ -32,6 +32,7 @@ import {
   Menu,
   Monitor,
   Moon,
+  Plug,
   Settings,
   Shield,
   Store,
@@ -136,6 +137,7 @@ const accountInspectionMenuItems = computed<MenuOption[]>(() => [
   },
   { label: t('账号状态', 'Account Status'), key: '/admin/account-status', icon: renderIcon(ListChecks) },
   { label: t('\u53f7\u6c60\u7ba1\u7406', 'Auth Pools'), key: '/admin/auth-pools', icon: renderIcon(Folder) },
+  { label: t('\u63d2\u4ef6\u7ba1\u7406', 'Plugin Management'), key: '/admin/plugins', icon: renderIcon(Plug) },
 ])
 
 const accountMenuItems = computed<MenuOption[]>(() => [

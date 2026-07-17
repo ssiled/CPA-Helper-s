@@ -207,8 +207,8 @@ func TestQuotaMonthlyResetRestoresPausedKeys(t *testing.T) {
 	if status.Paused || status.MonthlyUsedUSD != 0 {
 		t.Fatalf("status after reset paused=%v monthly_used=%v", status.Paused, status.MonthlyUsedUSD)
 	}
-	if len(remoteKeys) != 0 {
-		t.Fatalf("remote keys = %#v, want no CPA sync", remoteKeys)
+	if len(remoteKeys) != 1 || remoteKeys[0] != apiKey {
+		t.Fatalf("remote keys = %#v, want restored API key", remoteKeys)
 	}
 }
 

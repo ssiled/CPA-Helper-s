@@ -1,7 +1,7 @@
 ﻿<script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, getAuthPoolProxyConfig, listAuthPoolAccounts, saveAuthPool, updateAuthPoolProxyConfig } from '@/features/auth-pools/api/authPoolsApi'
+import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, listAuthPoolAccounts, saveAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import type { AuthPool, CodexKeeperAccount } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 
@@ -28,9 +28,6 @@ const apiKeyBaseURL = ref('')
 const apiKeyProxyURL = ref('')
 const apiKeyPriority = ref<number | null>(null)
 const apiKeyWebsockets = ref(true)
-const proxyConfig = ref({ cpa_url: '', api_key_set: false, api_key_preview: '' })
-const proxyAPIKey = ref('')
-const isSavingProxy = ref(false)
 
 const defaultAccountTypes = ['codex', 'free', 'plus', 'team', 'gemini', 'grok', 'claude', 'antigravity', 'kimi']
 const apiKeyProviderOptions = [
@@ -132,10 +129,9 @@ function clearSelectedAccounts() {
 async function refresh() {
   isLoading.value = true
   try {
-    const [status, accountResponse, proxy] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts(), getAuthPoolProxyConfig()])
+    const [status, accountResponse] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts()])
     pools.value = status.pools
     accounts.value = accountResponse.items
-    proxyConfig.value = proxy
   } catch (error) {
     message.error(errorText(error, '\u52a0\u8f7d\u53f7\u6c60\u5931\u8d25', 'Failed to load auth pools'))
   } finally {
@@ -235,23 +231,6 @@ async function saveAPIKeyAccount() {
   }
 }
 
-async function saveProxyConfig() {
-  const apiKey = proxyAPIKey.value.trim()
-  if (!apiKey) {
-    message.error(t('请填写 CPA 转发 API KEY', 'Enter the CPA forwarding API key'))
-    return
-  }
-  isSavingProxy.value = true
-  try {
-    proxyConfig.value = await updateAuthPoolProxyConfig({ api_key: apiKey })
-    proxyAPIKey.value = ''
-    message.success(t('CPA 转发 API KEY 已保存', 'CPA forwarding API key saved'))
-  } catch (error) {
-    message.error(errorText(error, '保存 CPA 转发 API KEY 失败', 'Failed to save CPA forwarding API key'))
-  } finally {
-    isSavingProxy.value = false
-  }
-}
 function confirmDelete(pool: AuthPool) {
   dialog.warning({
     title: t('\u5220\u9664\u53f7\u6c60', 'Delete pool'),
@@ -284,23 +263,6 @@ onMounted(refresh)
       </NSpace>
     </div>
 
-    <section class="proxy-panel">
-      <div>
-        <h2>{{ t('CPA 转发 Key', 'CPA forwarding key') }}</h2>
-        <p>{{ t('用户 API KEY 只在 CPA-Helper 本地认证；CPA-Helper 转发到 CPA 时使用这里配置的专用 CPA API KEY，并把本地 Key Hash 交给 cpa-auth-pool 插件限制号池。', 'User API keys are verified only by CPA-Helper. CPA-Helper forwards to CPA with this dedicated CPA API key and passes the local key hash to cpa-auth-pool for pool isolation.') }}</p>
-        <div class="proxy-status">
-          <NTag :type="proxyConfig.api_key_set ? 'success' : 'warning'" size="small">
-            {{ proxyConfig.api_key_set ? t('已配置', 'Configured') : t('未配置', 'Not configured') }}
-          </NTag>
-          <span v-if="proxyConfig.api_key_preview">{{ proxyConfig.api_key_preview }}</span>
-          <span>{{ proxyConfig.cpa_url }}</span>
-        </div>
-      </div>
-      <div class="proxy-form">
-        <NInput v-model:value="proxyAPIKey" type="password" show-password-on="click" :disabled="isSavingProxy" :placeholder="t('粘贴一个只给 CPA-Helper 使用的 CPA API KEY', 'Paste a CPA API key used only by CPA-Helper')" />
-        <NButton type="primary" :loading="isSavingProxy" @click="saveProxyConfig">{{ t('保存转发 Key', 'Save forwarding key') }}</NButton>
-      </div>
-    </section>
     <NDataTable :loading="isLoading" :columns="columns" :data="pools" :pagination="{ pageSize: 10 }" />
 
     <NModal v-model:show="editorVisible" preset="card" :title="poolID ? t('\u7f16\u8f91\u53f7\u6c60', 'Edit pool') : t('\u65b0\u5efa\u53f7\u6c60', 'New pool')" :style="{ width: 'min(720px, calc(100vw - 32px))' }">
@@ -378,16 +340,10 @@ onMounted(refresh)
 
 <style scoped>
 .auth-pool-page { display: grid; gap: 16px; }
-.proxy-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 420px); gap: 16px; align-items: center; padding: 16px; border: 1px solid rgba(148, 163, 184, .24); border-radius: 16px; background: rgba(255, 255, 255, .78); }
-.proxy-panel h2 { margin: 0 0 6px; font-size: 16px; }
-.proxy-panel p { margin: 0; color: var(--cpa-text-muted); line-height: 1.6; }
-.proxy-status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; color: var(--cpa-text-muted); font-size: 12px; }
-.proxy-form { display: grid; gap: 10px; }
 .account-picker { display: grid; gap: 10px; width: 100%; }
 .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .batch-type-select { min-width: 200px; max-width: 280px; }
 .selected-type-rules { display: flex; flex-wrap: wrap; gap: 6px; }
 .form-help { margin: 0 0 16px; color: var(--cpa-text-muted); font-size: 12px; line-height: 1.6; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-@media (max-width: 860px) { .proxy-panel { grid-template-columns: 1fr; } }
 </style>

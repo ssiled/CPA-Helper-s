@@ -151,11 +151,11 @@ func TestCreateAPIKeyUsesKeyPolicyPluginWhenInstalled(t *testing.T) {
 		"description": "Plugin key",
 	}, cookies, &created)
 
-	if pluginCalls != 0 {
-		t.Fatalf("plugin calls = %d, want 0", pluginCalls)
+	if pluginCalls != 1 {
+		t.Fatalf("plugin calls = %d, want 1", pluginCalls)
 	}
-	if created.APIKey == "" || created.APIKey == "cpa_plugin_test_key" {
-		t.Fatalf("api key = %q, want local helper key", created.APIKey)
+	if created.APIKey == "" {
+		t.Fatalf("api key is empty")
 	}
 }
 
@@ -532,35 +532,10 @@ func TestAccountModelRequestTestRejectsOtherUserAPIKey(t *testing.T) {
 func TestCreateGeneratedAPIKeyDoesNotRequireCPAConfig(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
-	app, err := backendApp.New()
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	defer app.Close()
-
-	handler := app.Routes()
-	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
-		"username": "admin",
-		"password": "password123",
-		"nickname": "Admin",
-	}, nil, nil)
-
-	created := apiKeyCreateResponse{}
-	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
-		"description": "VSCode",
-	}, cookies, &created)
-	if created.APIKey == "" || created.APIKeyHash == "" {
-		t.Fatalf("created API key response is missing key fields: %#v", created)
-	}
-}
-
-func TestCreateGeneratedAPIKeyDoesNotSyncToCPA(t *testing.T) {
-	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
-
-	remoteCalls := 0
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v0/management/api-keys" {
-			remoteCalls++
+		if r.URL.Path == "/v0/management/api-keys" && r.Method == http.MethodPatch {
+			_ = json.NewEncoder(w).Encode(map[string]any{"api-keys": []string{"ok"}})
+			return
 		}
 		http.NotFound(w, r)
 	}))
@@ -582,6 +557,58 @@ func TestCreateGeneratedAPIKeyDoesNotSyncToCPA(t *testing.T) {
 		"cliaproxy_url":     cpa.URL,
 		"management_key":    "mgmt-secret",
 		"collector_enabled": false,
+	}, cookies, nil)
+
+	created := apiKeyCreateResponse{}
+	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{
+		"description": "VSCode",
+	}, cookies, &created)
+	if created.APIKey == "" || created.APIKeyHash == "" {
+		t.Fatalf("created API key response is missing key fields: %#v", created)
+	}
+}
+
+func TestCreateGeneratedAPIKeyDoesNotSyncToCPAInAuthPoolProxyMode(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	remoteCalls := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{}})
+		case r.URL.Path == "/v0/management/api-keys":
+			remoteCalls++
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "admin-pass",
+		"nickname": "Admin",
+	}, nil, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"targets": []map[string]any{{
+			"id":             "main",
+			"name":           "Main CPA",
+			"cpa_url":        cpa.URL,
+			"management_key": "mgmt-secret",
+			"api_key":        "sk-cpa-proxy",
+			"enabled":        true,
+		}},
 	}, cookies, nil)
 
 	created := apiKeyCreateResponse{}

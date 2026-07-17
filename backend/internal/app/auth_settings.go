@@ -450,13 +450,15 @@ func (a *App) testCurrentUserModelRequest(ctx context.Context, user *AuthUser, p
 	if err != nil {
 		return modelRequestTestResponse{}, err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
+	proxyTarget, upstreamAPIKey, useProxyHeader, err := modelProxyTarget(cfg, strings.TrimSpace(*apiKey.APIKey))
 	if err != nil {
 		return modelRequestTestResponse{}, err
 	}
-	target := strings.TrimRight(modelRequestOpenAIBaseURL(cfg.Collector.CLIProxyURL), "/") + modelRequestEndpointPath(endpoint)
+	target := strings.TrimRight(modelRequestOpenAIBaseURL(proxyTarget.CPAURL), "/") + modelRequestEndpointPath(endpoint)
 	headers := modelRequestEndpointHeaders(endpoint, upstreamAPIKey)
-	headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
+	if useProxyHeader {
+		headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
+	}
 	requestBody := modelRequestEndpointBody(endpoint, model, message)
 
 	start := time.Now()
@@ -770,6 +772,9 @@ func (a *App) addRemoteAPIKey(ctx context.Context, apiKey string) error {
 	if err != nil {
 		return err
 	}
+	if authPoolProxyModeEnabled(cfg) {
+		return nil
+	}
 	if strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
 		return validationError(apiKeySyncMissingConfigMessage)
 	}
@@ -799,6 +804,9 @@ func (a *App) removeRemoteAPIKeyHash(ctx context.Context, apiKeyHash string) err
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return err
+	}
+	if authPoolProxyModeEnabled(cfg) {
+		return nil
 	}
 	if strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
 		return validationError(apiKeySyncMissingConfigMessage)

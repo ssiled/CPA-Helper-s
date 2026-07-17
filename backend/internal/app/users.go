@@ -448,7 +448,18 @@ func (a *App) disableUser(ctx context.Context, id int) error {
 		return err
 	}
 	if user.ID == 1 {
-		return conflictError("第一个用户不能禁用")
+		return conflictError("?????????")
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil && !authPoolProxyModeEnabled(cfg) {
+		keys, err := a.userAPIKeys(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if err := a.removeRemoteAPIKeyHash(ctx, key.APIKeyHash); err != nil {
+				return err
+			}
+		}
 	}
 	_, err = a.db.ExecContext(ctx, `UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?`, dbTime(time.Now()), dbTime(time.Now()), id)
 	return err
@@ -468,6 +479,30 @@ func (a *App) enableUser(ctx context.Context, id int) error {
 	}
 	if user.QuotaPausedAt != nil && !quotaHasAvailable(user) {
 		return conflictError("User quota exhausted; top up before restoring API KEY")
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil && !authPoolProxyModeEnabled(cfg) {
+		keys, err := a.userAPIKeys(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if key.APIKey == nil {
+				return conflictError("Some API keys cannot be restored. Rebind them before enabling the user")
+			}
+		}
+		restored := []string{}
+		for _, key := range keys {
+			if key.APIKey == nil {
+				continue
+			}
+			if err := a.addRemoteAPIKey(ctx, *key.APIKey); err != nil {
+				for _, hash := range restored {
+					_ = a.removeRemoteAPIKeyHash(ctx, hash)
+				}
+				return err
+			}
+			restored = append(restored, key.APIKeyHash)
+		}
 	}
 	_, err = a.db.ExecContext(ctx, `UPDATE users SET disabled_at = NULL, quota_paused_at = NULL, quota_pause_reason = NULL, quota_sync_error = NULL, updated_at = ? WHERE id = ?`, dbTime(time.Now()), id)
 	return err
@@ -555,7 +590,7 @@ func (a *App) currentUserAPIKeys(ctx context.Context, user *AuthUser) ([]UserApi
 func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, username, description string, policy keyPolicyAttributes) (UserApiKeySummary, error) {
 	description = strings.TrimSpace(description)
 	if description == "" {
-		return UserApiKeySummary{}, validationError("API KEY 描述不能为空")
+		return UserApiKeySummary{}, validationError("API KEY ??????")
 	}
 	user, err := a.getActiveUser(ctx, userID)
 	if err != nil {
@@ -570,6 +605,9 @@ func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, user
 	}
 	apiKeyHash := hashAPIKey(apiKey)
 	if err := a.upsertUserAPIKey(ctx, user.ID, apiKeyHash, apiKey, description); err != nil {
+		if strings.HasPrefix(apiKey, "sk-") {
+			_ = a.removeRemoteAPIKeyHash(ctx, apiKeyHash)
+		}
 		return UserApiKeySummary{}, err
 	}
 	summary, err := a.keySummaryByHash(ctx, apiKeyHash, &apiKey)
@@ -581,13 +619,32 @@ func (a *App) createGeneratedAPIKeyForUser(ctx context.Context, userID int, user
 }
 
 func (a *App) createGeneratedOrPluginAPIKey(ctx context.Context, userID int, username, description string, policy keyPolicyAttributes) (string, error) {
-	return a.generateUniqueAPIKey(ctx)
+	cfg, err := a.loadConfig(ctx)
+	if err == nil && authPoolProxyModeEnabled(cfg) {
+		return a.generateUniqueAPIKey(ctx)
+	}
+	if err == nil && strings.TrimSpace(cfg.Collector.ManagementKey) != "" {
+		if apiKey, pluginErr := a.createKeyPolicyPluginKey(ctx, cfg, userID, username, description, policy); pluginErr == nil {
+			return apiKey, nil
+		}
+	}
+	apiKey, err := a.generateUniqueAPIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := a.addRemoteAPIKey(ctx, apiKey); err != nil {
+		return "", err
+	}
+	return apiKey, nil
 }
 
 func (a *App) updateCurrentUserAPIKey(ctx context.Context, user *AuthUser, apiKeyHash, description string, policy keyPolicyAttributes) (UserApiKeySummary, error) {
 	description = strings.TrimSpace(description)
 	if description == "" {
 		return UserApiKeySummary{}, validationError("API KEY description is required")
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil && !authPoolProxyModeEnabled(cfg) {
+		_ = a.updateKeyPolicyPluginKey(ctx, cfg, user.ID, user.Username, description, policy)
 	}
 	result, err := a.db.ExecContext(ctx, `UPDATE user_api_keys SET description = ?, updated_at = ? WHERE user_id = ? AND api_key_hash = ?`, description, dbTime(time.Now()), user.ID, apiKeyHash)
 	if err != nil {
@@ -616,8 +673,13 @@ func (a *App) deleteCurrentUserAPIKey(ctx context.Context, user *AuthUser, apiKe
 	if affected == 0 {
 		return notFoundError("API KEY not found")
 	}
-	_, err = a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE api_key_hash = ?`, apiKeyHash)
-	return err
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE api_key_hash = ?`, apiKeyHash); err != nil {
+		return err
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil && authPoolProxyModeEnabled(cfg) {
+		return nil
+	}
+	return a.removeRemoteAPIKeyHash(ctx, apiKeyHash)
 }
 
 func (a *App) upsertUserAPIKey(ctx context.Context, userID int, apiKeyHash, apiKey, description string) error {

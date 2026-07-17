@@ -99,14 +99,16 @@ func (a *App) handleModelProxyModels(w http.ResponseWriter, r *http.Request, api
 	if err != nil {
 		return err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
+	proxyTarget, upstreamAPIKey, useProxyHeader, err := modelProxyTarget(cfg, strings.TrimSpace(*apiKey.APIKey))
 	if err != nil {
 		return err
 	}
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+upstreamAPIKey)
-	headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
-	response, payload, err := doJSON(r.Context(), httpClient(modelListTimeout), http.MethodGet, makeURL(cfg.Collector.CLIProxyURL, "/v1/models", r.URL.Query()), headers, nil)
+	if useProxyHeader {
+		headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
+	}
+	response, payload, err := doJSON(r.Context(), httpClient(modelListTimeout), http.MethodGet, makeURL(proxyTarget.CPAURL, "/v1/models", r.URL.Query()), headers, nil)
 	if err != nil {
 		return validationError("CPA model list request failed: " + err.Error())
 	}
@@ -165,16 +167,16 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	if err != nil {
 		return err
 	}
-	upstreamAPIKey, err := authPoolProxyUpstreamAPIKey(cfg)
+	proxyTarget, upstreamAPIKey, useProxyHeader, err := modelProxyTarget(cfg, strings.TrimSpace(*apiKey.APIKey))
 	if err != nil {
 		return err
 	}
-	target := makeURL(cfg.Collector.CLIProxyURL, r.URL.Path, r.URL.Query())
+	target := makeURL(proxyTarget.CPAURL, r.URL.Path, r.URL.Query())
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	request.Header = modelProxyRequestHeaders(r, upstreamAPIKey, apiKey.APIKeyHash)
+	request.Header = modelProxyRequestHeaders(r, upstreamAPIKey, apiKey.APIKeyHash, useProxyHeader)
 	response, err := httpClient(0).Do(request)
 	if err != nil {
 		return validationError("CPA request failed: " + err.Error())
@@ -210,15 +212,26 @@ func modelFromProxyBody(body []byte) string {
 	return strings.TrimSpace(model)
 }
 
-func authPoolProxyUpstreamAPIKey(cfg AppConfig) (string, error) {
-	apiKey := strings.TrimSpace(cfg.AuthPoolProxyAPIKey)
-	if apiKey == "" {
-		return "", validationError("Set CPA forwarding API KEY in auth-pool plugin settings first")
+func modelProxyTarget(cfg AppConfig, fallbackAPIKey string) (AuthPoolProxyTargetConfig, string, bool, error) {
+	if target, ok := activeAuthPoolProxyTarget(cfg); ok {
+		apiKey := strings.TrimSpace(target.APIKey)
+		if apiKey == "" {
+			return AuthPoolProxyTargetConfig{}, "", false, validationError("Set CPA forwarding API KEY in plugin settings first")
+		}
+		return target, apiKey, true, nil
 	}
-	return apiKey, nil
+	apiKey := strings.TrimSpace(fallbackAPIKey)
+	if apiKey == "" {
+		return AuthPoolProxyTargetConfig{}, "", false, validationError("API KEY unavailable")
+	}
+	cpaURL := strings.TrimRight(strings.TrimSpace(cfg.Collector.CLIProxyURL), "/")
+	if cpaURL == "" {
+		return AuthPoolProxyTargetConfig{}, "", false, validationError("CPA URL is required")
+	}
+	return AuthPoolProxyTargetConfig{CPAURL: cpaURL}, apiKey, false, nil
 }
 
-func modelProxyRequestHeaders(r *http.Request, apiKey string, apiKeyHash string) http.Header {
+func modelProxyRequestHeaders(r *http.Request, apiKey string, apiKeyHash string, includeHelperHash bool) http.Header {
 	headers := http.Header{}
 	for key, values := range r.Header {
 		lower := strings.ToLower(key)
@@ -229,7 +242,9 @@ func modelProxyRequestHeaders(r *http.Request, apiKey string, apiKeyHash string)
 			headers.Add(key, value)
 		}
 	}
-	headers.Set(authPoolProxyAPIKeyHashHeader, strings.TrimSpace(apiKeyHash))
+	if includeHelperHash {
+		headers.Set(authPoolProxyAPIKeyHashHeader, strings.TrimSpace(apiKeyHash))
+	}
 	if strings.HasSuffix(strings.ToLower(strings.TrimRight(r.URL.Path, "/")), "/messages") {
 		headers.Set("x-api-key", apiKey)
 		if strings.TrimSpace(headers.Get("anthropic-version")) == "" {

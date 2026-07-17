@@ -32,8 +32,10 @@ type authPoolBinding struct {
 }
 
 type authPoolStatus struct {
-	Pools    []authPool        `json:"pools"`
-	Bindings []authPoolBinding `json:"bindings"`
+	Pools           []authPool        `json:"pools"`
+	Bindings        []authPoolBinding `json:"bindings"`
+	PluginInstalled bool              `json:"plugin_installed"`
+	PluginError     string            `json:"plugin_error,omitempty"`
 }
 
 type authPoolAccountsResponse struct {
@@ -41,13 +43,18 @@ type authPoolAccountsResponse struct {
 }
 
 type authPoolProxyConfigResponse struct {
-	CPAURL        string `json:"cpa_url"`
-	APIKeySet     bool   `json:"api_key_set"`
-	APIKeyPreview string `json:"api_key_preview"`
+	CPAURL          string                    `json:"cpa_url"`
+	APIKeySet       bool                      `json:"api_key_set"`
+	APIKeyPreview   string                    `json:"api_key_preview"`
+	Mode            string                    `json:"mode"`
+	PluginInstalled bool                      `json:"plugin_installed"`
+	PluginError     string                    `json:"plugin_error,omitempty"`
+	Targets         []authPoolProxyTargetView `json:"targets"`
 }
 
 type authPoolProxyConfigPayload struct {
-	APIKey *string `json:"api_key"`
+	APIKey  *string                      `json:"api_key"`
+	Targets []authPoolProxyTargetPayload `json:"targets"`
 }
 
 type authPoolAPIKeyAccountPayload struct {
@@ -223,8 +230,11 @@ func authPoolPathParts(path string) []string {
 func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatus, error) {
 	var status authPoolStatus
 	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
-		return authPoolStatus{}, err
+		status.PluginInstalled = false
+		status.PluginError = err.Error()
+		return status, nil
 	}
+	status.PluginInstalled = true
 	if authPoolsNeedModelSync(status.Pools) {
 		go func() {
 			syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -275,8 +285,26 @@ func (a *App) authPoolProxyConfig(ctx context.Context) (authPoolProxyConfigRespo
 	if err != nil {
 		return authPoolProxyConfigResponse{}, err
 	}
-	apiKey := strings.TrimSpace(cfg.AuthPoolProxyAPIKey)
-	return authPoolProxyConfigResponse{CPAURL: cfg.Collector.CLIProxyURL, APIKeySet: apiKey != "", APIKeyPreview: maskAPIKey(apiKey)}, nil
+	response := authPoolProxyConfigResponse{
+		CPAURL:          cfg.Collector.CLIProxyURL,
+		APIKeySet:       strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "",
+		APIKeyPreview:   maskAPIKey(cfg.AuthPoolProxyAPIKey),
+		Mode:            "legacy",
+		PluginInstalled: false,
+		Targets:         authPoolProxyTargetViews(cfg.AuthPoolProxyTargets),
+	}
+	if target, ok := activeAuthPoolProxyTarget(cfg); ok {
+		response.Mode = "proxy"
+		response.CPAURL = target.CPAURL
+		response.APIKeySet = strings.TrimSpace(target.APIKey) != ""
+		response.APIKeyPreview = maskAPIKey(target.APIKey)
+	}
+	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, nil); err != nil {
+		response.PluginError = err.Error()
+	} else {
+		response.PluginInstalled = true
+	}
+	return response, nil
 }
 
 func (a *App) updateAuthPoolProxyConfig(ctx context.Context, payload authPoolProxyConfigPayload) (authPoolProxyConfigResponse, error) {
@@ -287,15 +315,89 @@ func (a *App) updateAuthPoolProxyConfig(ctx context.Context, payload authPoolPro
 	if payload.APIKey != nil {
 		cfg.AuthPoolProxyAPIKey = strings.TrimSpace(*payload.APIKey)
 	}
-	if strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "" {
-		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/proxy-keys", map[string]any{"api_key": cfg.AuthPoolProxyAPIKey}, nil); err != nil {
-			return authPoolProxyConfigResponse{}, err
-		}
+	if payload.Targets != nil {
+		cfg.AuthPoolProxyTargets = mergeAuthPoolProxyTargetSecrets(cfg.AuthPoolProxyTargets, authPoolProxyTargetConfigs(payload.Targets))
+		cfg.AuthPoolProxyAPIKey = ""
+	}
+	if err := a.registerAuthPoolProxyTargets(ctx, cfg); err != nil {
+		return authPoolProxyConfigResponse{}, err
 	}
 	if err := a.saveConfig(ctx, cfg); err != nil {
 		return authPoolProxyConfigResponse{}, err
 	}
 	return a.authPoolProxyConfig(ctx)
+}
+
+func authPoolProxyTargetViews(targets []AuthPoolProxyTargetConfig) []authPoolProxyTargetView {
+	items := normalizeAuthPoolProxyTargets(targets)
+	views := make([]authPoolProxyTargetView, 0, len(items))
+	for _, target := range items {
+		views = append(views, authPoolProxyTargetView{
+			ID:               target.ID,
+			Name:             target.Name,
+			CPAURL:           target.CPAURL,
+			ManagementKeySet: strings.TrimSpace(target.ManagementKey) != "",
+			APIKeySet:        strings.TrimSpace(target.APIKey) != "",
+			APIKeyPreview:    maskAPIKey(target.APIKey),
+			Enabled:          target.Enabled,
+		})
+	}
+	return views
+}
+
+func authPoolProxyTargetConfigs(payload []authPoolProxyTargetPayload) []AuthPoolProxyTargetConfig {
+	items := make([]AuthPoolProxyTargetConfig, 0, len(payload))
+	for _, target := range payload {
+		items = append(items, AuthPoolProxyTargetConfig{
+			ID:            strings.TrimSpace(target.ID),
+			Name:          strings.TrimSpace(target.Name),
+			CPAURL:        strings.TrimRight(strings.TrimSpace(target.CPAURL), "/"),
+			ManagementKey: strings.TrimSpace(target.ManagementKey),
+			APIKey:        strings.TrimSpace(target.APIKey),
+			Enabled:       target.Enabled,
+		})
+	}
+	return normalizeAuthPoolProxyTargets(items)
+}
+
+func mergeAuthPoolProxyTargetSecrets(existing []AuthPoolProxyTargetConfig, next []AuthPoolProxyTargetConfig) []AuthPoolProxyTargetConfig {
+	byID := map[string]AuthPoolProxyTargetConfig{}
+	for _, target := range normalizeAuthPoolProxyTargets(existing) {
+		byID[target.ID] = target
+	}
+	merged := make([]AuthPoolProxyTargetConfig, 0, len(next))
+	for _, target := range normalizeAuthPoolProxyTargets(next) {
+		if old, ok := byID[target.ID]; ok {
+			if strings.TrimSpace(target.ManagementKey) == "" {
+				target.ManagementKey = old.ManagementKey
+			}
+			if strings.TrimSpace(target.APIKey) == "" {
+				target.APIKey = old.APIKey
+			}
+		}
+		merged = append(merged, target)
+	}
+	return merged
+}
+
+func (a *App) registerAuthPoolProxyTargets(ctx context.Context, cfg AppConfig) error {
+	for _, target := range normalizeAuthPoolProxyTargets(cfg.AuthPoolProxyTargets) {
+		if !target.Enabled || strings.TrimSpace(target.APIKey) == "" {
+			continue
+		}
+		if strings.TrimSpace(target.CPAURL) == "" || strings.TrimSpace(target.ManagementKey) == "" {
+			return validationError("CPA URL and management key are required for enabled proxy targets")
+		}
+		if err := a.authPoolPluginRequestWithTarget(ctx, target, http.MethodPost, "/proxy-keys", map[string]any{"api_key": target.APIKey}, nil); err != nil {
+			return err
+		}
+	}
+	if len(normalizeAuthPoolProxyTargets(cfg.AuthPoolProxyTargets)) == 0 && strings.TrimSpace(cfg.AuthPoolProxyAPIKey) != "" {
+		if target, ok := activeAuthPoolProxyTarget(cfg); ok {
+			return a.authPoolPluginRequestWithTarget(ctx, target, http.MethodPost, "/proxy-keys", map[string]any{"api_key": target.APIKey}, nil)
+		}
+	}
+	return nil
 }
 
 func maskAPIKey(apiKey string) string {
@@ -536,6 +638,13 @@ func authPoolModelFilter(pool authPool) map[string]bool {
 
 func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes []string) (map[string]map[string]bool, error) {
 	filters := map[string]map[string]bool{}
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !authPoolProxyModeEnabled(cfg) {
+		return filters, nil
+	}
 	if len(apiKeyHashes) == 0 {
 		return filters, nil
 	}
@@ -559,7 +668,7 @@ func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes [
 		return filters, nil
 	}
 	var status authPoolStatus
-	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
 		return nil, err
 	}
 	poolFilters := map[string]map[string]bool{}
@@ -579,12 +688,19 @@ func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes [
 }
 
 func (a *App) ensureAPIKeyModelAllowedByPool(ctx context.Context, apiKeyHash string, model string) error {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !authPoolProxyModeEnabled(cfg) {
+		return nil
+	}
 	poolID, bound, err := a.localAuthPoolIDForAPIKey(ctx, apiKeyHash)
 	if err != nil || !bound {
 		return err
 	}
 	var status authPoolStatus
-	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
 		return err
 	}
 	for _, pool := range status.Pools {
@@ -604,10 +720,22 @@ func (a *App) authPoolPluginRequest(ctx context.Context, method, path string, bo
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.Collector.CLIProxyURL) == "" || strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
+	return a.authPoolPluginRequestWithConfig(ctx, cfg, method, path, body, target)
+}
+
+func (a *App) authPoolPluginRequestWithConfig(ctx context.Context, cfg AppConfig, method, path string, body any, target any) error {
+	cpaTarget, ok := primaryCPAManagementTarget(cfg)
+	if !ok {
 		return validationError("CPA URL and management key are required")
 	}
-	response, payload, err := doJSON(ctx, httpClient(apiKeySyncTimeout), method, makeURL(cfg.Collector.CLIProxyURL, "/v0/management/plugins/"+authPoolPluginID+path, nil), managementHeaders(cfg.Collector.ManagementKey), body)
+	return a.authPoolPluginRequestWithTarget(ctx, cpaTarget, method, path, body, target)
+}
+
+func (a *App) authPoolPluginRequestWithTarget(ctx context.Context, cpaTarget AuthPoolProxyTargetConfig, method, path string, body any, target any) error {
+	if strings.TrimSpace(cpaTarget.CPAURL) == "" || strings.TrimSpace(cpaTarget.ManagementKey) == "" {
+		return validationError("CPA URL and management key are required")
+	}
+	response, payload, err := doJSON(ctx, httpClient(apiKeySyncTimeout), method, makeURL(cpaTarget.CPAURL, "/v0/management/plugins/"+authPoolPluginID+path, nil), managementHeaders(cpaTarget.ManagementKey), body)
 	if err != nil {
 		return remoteAPIKeyError("auth-pool request failed", err)
 	}
@@ -630,10 +758,11 @@ func (a *App) cpaManagementJSON(ctx context.Context, method, path string, body a
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.Collector.CLIProxyURL) == "" || strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
+	cpaTarget, ok := primaryCPAManagementTarget(cfg)
+	if !ok {
 		return validationError("CPA URL and management key are required")
 	}
-	response, payload, err := doJSON(ctx, httpClient(apiKeySyncTimeout), method, makeURL(cfg.Collector.CLIProxyURL, path, nil), managementHeaders(cfg.Collector.ManagementKey), body)
+	response, payload, err := doJSON(ctx, httpClient(apiKeySyncTimeout), method, makeURL(cpaTarget.CPAURL, path, nil), managementHeaders(cpaTarget.ManagementKey), body)
 	if err != nil {
 		return remoteAPIKeyError("CPA management request failed", err)
 	}
@@ -949,4 +1078,23 @@ func sortStringsCaseInsensitive(values []string) {
 
 func urlQueryEscape(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "%", "%25"), " ", "%20")
+}
+
+type authPoolProxyTargetView struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	CPAURL           string `json:"cpa_url"`
+	ManagementKeySet bool   `json:"management_key_set"`
+	APIKeySet        bool   `json:"api_key_set"`
+	APIKeyPreview    string `json:"api_key_preview"`
+	Enabled          bool   `json:"enabled"`
+}
+
+type authPoolProxyTargetPayload struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	CPAURL        string `json:"cpa_url"`
+	ManagementKey string `json:"management_key"`
+	APIKey        string `json:"api_key"`
+	Enabled       bool   `json:"enabled"`
 }
