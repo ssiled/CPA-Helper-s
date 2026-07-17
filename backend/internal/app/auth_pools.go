@@ -333,13 +333,14 @@ func authPoolProxyTargetViews(targets []AuthPoolProxyTargetConfig) []authPoolPro
 	views := make([]authPoolProxyTargetView, 0, len(items))
 	for _, target := range items {
 		views = append(views, authPoolProxyTargetView{
-			ID:               target.ID,
-			Name:             target.Name,
-			CPAURL:           target.CPAURL,
-			ManagementKeySet: strings.TrimSpace(target.ManagementKey) != "",
-			APIKeySet:        strings.TrimSpace(target.APIKey) != "",
-			APIKeyPreview:    maskAPIKey(target.APIKey),
-			Enabled:          target.Enabled,
+			ID:                   target.ID,
+			Name:                 target.Name,
+			CPAURL:               target.CPAURL,
+			ManagementKeySet:     strings.TrimSpace(target.ManagementKey) != "",
+			ManagementKeyPreview: maskAPIKey(target.ManagementKey),
+			APIKeySet:            strings.TrimSpace(target.APIKey) != "",
+			APIKeyPreview:        maskAPIKey(target.APIKey),
+			Enabled:              target.Enabled,
 		})
 	}
 	return views
@@ -1081,13 +1082,14 @@ func urlQueryEscape(value string) string {
 }
 
 type authPoolProxyTargetView struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	CPAURL           string `json:"cpa_url"`
-	ManagementKeySet bool   `json:"management_key_set"`
-	APIKeySet        bool   `json:"api_key_set"`
-	APIKeyPreview    string `json:"api_key_preview"`
-	Enabled          bool   `json:"enabled"`
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	CPAURL               string `json:"cpa_url"`
+	ManagementKeySet     bool   `json:"management_key_set"`
+	ManagementKeyPreview string `json:"management_key_preview"`
+	APIKeySet            bool   `json:"api_key_set"`
+	APIKeyPreview        string `json:"api_key_preview"`
+	Enabled              bool   `json:"enabled"`
 }
 
 type authPoolProxyTargetPayload struct {

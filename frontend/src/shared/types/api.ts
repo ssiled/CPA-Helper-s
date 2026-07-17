@@ -281,6 +281,7 @@ export interface AuthPoolProxyTarget {
   name: string
   cpa_url: string
   management_key_set: boolean
+  management_key_preview: string
   api_key_set: boolean
   api_key_preview: string
   enabled: boolean

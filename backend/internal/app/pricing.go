@@ -297,7 +297,7 @@ func (a *App) modelPriceCatalog(ctx context.Context) (ModelPriceCatalogResponse,
 	modelsByID := map[string]AvailableModelItem{}
 	for _, binding := range queryable {
 		source := catalogAvailableModelSource(binding)
-		models, err := fetchAvailableModelItems(ctx, cfg, *binding.APIKey)
+		models, err := fetchAvailableModelItemsForAPIKey(ctx, cfg, binding.UserAPIKey)
 		if err != nil {
 			response.Errors = append(response.Errors, AvailableModelKeyError{
 				APIKeyHash:    source.APIKeyHash,

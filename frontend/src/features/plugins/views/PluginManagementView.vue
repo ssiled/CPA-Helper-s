@@ -10,15 +10,27 @@ const { errorText, t } = useI18n()
 const isLoading = ref(false)
 const isSaving = ref(false)
 const config = ref<AuthPoolProxyConfig | null>(null)
-const targets = reactive<AuthPoolProxyTargetPayload[]>([])
 
-function emptyTarget(index: number): AuthPoolProxyTargetPayload {
+interface AuthPoolProxyTargetForm extends AuthPoolProxyTargetPayload {
+  management_key_set: boolean
+  management_key_preview: string
+  api_key_set: boolean
+  api_key_preview: string
+}
+
+const targets = reactive<AuthPoolProxyTargetForm[]>([])
+
+function emptyTarget(index: number): AuthPoolProxyTargetForm {
   return {
     id: `cpa-${index + 1}`,
     name: `CPA ${index + 1}`,
     cpa_url: '',
     management_key: '',
+    management_key_set: false,
+    management_key_preview: '',
     api_key: '',
+    api_key_set: false,
+    api_key_preview: '',
     enabled: true,
   }
 }
@@ -30,7 +42,11 @@ function applyConfig(next: AuthPoolProxyConfig) {
     name: item.name || `CPA ${index + 1}`,
     cpa_url: item.cpa_url || '',
     management_key: '',
+    management_key_set: item.management_key_set,
+    management_key_preview: item.management_key_preview || '',
     api_key: '',
+    api_key_set: item.api_key_set,
+    api_key_preview: item.api_key_preview || '',
     enabled: item.enabled,
   })))
   if (targets.length === 0) {
@@ -60,6 +76,21 @@ function removeTarget(index: number) {
   }
 }
 
+function managementKeyPlaceholder(target: AuthPoolProxyTargetForm) {
+  return target.management_key_set
+    ? t('\u5df2\u4fdd\u5b58\uff0c\u7559\u7a7a\u4e0d\u4fee\u6539', 'Saved; leave blank to keep unchanged')
+    : t('CPA Management Key', 'CPA management secret')
+}
+
+function apiKeyPlaceholder(target: AuthPoolProxyTargetForm) {
+  if (!target.api_key_set) {
+    return t('\u53ea\u7ed9 CPA-Helper \u4f7f\u7528\u7684 CPA API KEY', 'CPA API key used only by CPA-Helper')
+  }
+  const preview = target.api_key_preview ? ` ${target.api_key_preview}` : ''
+  return t(`\u5df2\u4fdd\u5b58${preview}\uff0c\u7559\u7a7a\u4e0d\u4fee\u6539`, `Saved${preview}; leave blank to keep unchanged`)
+}
+
+
 async function save() {
   const payload = targets.map((target) => ({
     id: target.id.trim(),
@@ -69,9 +100,13 @@ async function save() {
     api_key: target.api_key.trim(),
     enabled: target.enabled,
   }))
-  const enabled = payload.filter((target) => target.enabled)
-  if (enabled.some((target) => !target.cpa_url || !target.management_key || !target.api_key)) {
-    message.error(t('启用的 CPA 连接必须填写 URL、管理密钥和转发 API KEY', 'Enabled CPA connections require URL, management key, and forwarding API key'))
+  const missingRequired = targets.some((target) => target.enabled && (
+    !target.cpa_url.trim() ||
+    (!target.management_key.trim() && !target.management_key_set) ||
+    (!target.api_key.trim() && !target.api_key_set)
+  ))
+  if (missingRequired) {
+    message.error(t('\u542f\u7528\u7684 CPA \u8fde\u63a5\u5fc5\u987b\u586b\u5199 URL\u3001Management Key \u548c\u8f6c\u53d1 API KEY\uff1b\u5df2\u4fdd\u5b58\u7684\u5bc6\u94a5\u53ef\u4ee5\u7559\u7a7a\u4e0d\u4fee\u6539', 'Enabled CPA connections require URL, management key, and forwarding API key. Saved secrets can be left blank to keep them unchanged.'))
     return
   }
   isSaving.value = true
@@ -142,12 +177,14 @@ onMounted(refresh)
                 <NInput v-model:value="target.cpa_url" placeholder="https://your-cpa.example.com" />
               </NFormItem>
               <NFormItem :label="t('Management Key', 'Management Key')">
-                <NInput v-model:value="target.management_key" type="password" show-password-on="click" placeholder="CPA management secret" />
+                <NInput v-model:value="target.management_key" type="password" show-password-on="click" :placeholder="managementKeyPlaceholder(target)" />
+                <div v-if="target.management_key_set" class="secret-hint">{{ t('Management Key \u5df2\u4fdd\u5b58\uff0c\u91cd\u65b0\u586b\u5199\u624d\u4f1a\u8986\u76d6', 'Management key is saved. Enter a new value only to replace it.') }}</div>
               </NFormItem>
               <NFormItem :label="t('CPA 转发 API KEY', 'CPA forwarding API key')">
                 <NInputGroup>
-                  <NInput v-model:value="target.api_key" type="password" show-password-on="click" :placeholder="t('只给 CPA-Helper 使用的 CPA API KEY', 'CPA API key used only by CPA-Helper')" />
+                  <NInput v-model:value="target.api_key" type="password" show-password-on="click" :placeholder="apiKeyPlaceholder(target)" />
                 </NInputGroup>
+                <div v-if="target.api_key_set" class="secret-hint">{{ t(`\u8f6c\u53d1 Key \u5df2\u4fdd\u5b58\uff1a${target.api_key_preview || '\u5df2\u4fdd\u5b58'}`, `Forwarding key saved: ${target.api_key_preview || 'saved'}`) }}</div>
               </NFormItem>
             </div>
           </NForm>
@@ -169,5 +206,6 @@ onMounted(refresh)
 .target-card { padding: 14px; border: 1px solid rgba(148, 163, 184, .24); border-radius: 14px; background: rgba(248, 250, 252, .7); }
 .target-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.secret-hint { margin-top: 6px; font-size: 12px; color: var(--cpa-text-muted); }
 @media (max-width: 860px) { .form-grid { grid-template-columns: 1fr; } .card-header { flex-direction: column; } }
 </style>

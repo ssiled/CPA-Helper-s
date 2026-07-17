@@ -127,7 +127,7 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	modelsByID := map[string]AvailableModelItem{}
 	for _, binding := range queryable {
 		source := availableModelSource(binding)
-		models, err := fetchAvailableModelItems(ctx, cfg, *binding.APIKey)
+		models, err := fetchAvailableModelItemsForAPIKey(ctx, cfg, binding)
 		if err != nil {
 			response.Errors = append(response.Errors, AvailableModelKeyError{
 				APIKeyHash:    source.APIKeyHash,
@@ -185,19 +185,41 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	return response, nil
 }
 
+func fetchAvailableModelItemsForAPIKey(ctx context.Context, cfg AppConfig, apiKey UserAPIKey) ([]any, error) {
+	if apiKey.APIKey == nil {
+		return nil, fmt.Errorf("API KEY unavailable")
+	}
+	target, upstreamAPIKey, includeHelperHash, err := modelProxyTarget(cfg, strings.TrimSpace(*apiKey.APIKey))
+	if err != nil {
+		return nil, err
+	}
+	return fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, upstreamAPIKey, apiKey.APIKeyHash, includeHelperHash)
+}
+
 func fetchAvailableModelItems(ctx context.Context, cfg AppConfig, apiKey string) ([]any, error) {
+	target, upstreamAPIKey, _, err := modelProxyTarget(cfg, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, upstreamAPIKey, "", false)
+}
+
+func fetchAvailableModelItemsFromTarget(ctx context.Context, cpaURL string, apiKey string, apiKeyHash string, includeHelperHash bool) ([]any, error) {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+apiKey)
-	response, payload, err := doJSON(ctx, httpClient(modelListTimeout), http.MethodGet, makeURL(cfg.Collector.CLIProxyURL, "/v1/models", nil), headers, nil)
+	if includeHelperHash {
+		headers.Set(authPoolProxyAPIKeyHashHeader, strings.TrimSpace(apiKeyHash))
+	}
+	response, payload, err := doJSON(ctx, httpClient(modelListTimeout), http.MethodGet, makeURL(cpaURL, "/v1/models", nil), headers, nil)
 	if err != nil {
-		return nil, fmt.Errorf("CPA 模型列表请求失败：%s", err.Error())
+		return nil, fmt.Errorf("CPA model list request failed: %s", err.Error())
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("CPA 模型列表请求失败：HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("CPA model list request failed: HTTP %d", response.StatusCode)
 	}
 	var raw any
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return nil, fmt.Errorf("CPA 模型列表响应不是有效 JSON")
+		return nil, fmt.Errorf("CPA model list response is not valid JSON")
 	}
 	return extractAvailableModelItems(raw)
 }
