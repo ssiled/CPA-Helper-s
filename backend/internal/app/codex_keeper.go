@@ -2561,6 +2561,11 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 }
 
 func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, provider string, detail map[string]any, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
+	if provider == "antigravity" {
+		if probe := a.checkKeeperProviderViaCPAModels(ctx, cfg, result.Name); probe.StatusCode != nil {
+			return a.applyKeeperProviderProbeResult(ctx, cfg, provider, probe, result, disabled, logFn)
+		}
+	}
 	probe := a.checkKeeperProviderProbe(ctx, cfg, provider, detail)
 	if probe.StatusCode == nil {
 		message := "provider probe failed: " + probe.Error
@@ -2571,6 +2576,10 @@ func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, prov
 		logFn(result.Name + ": " + message)
 		return result
 	}
+	return a.applyKeeperProviderProbeResult(ctx, cfg, provider, probe, result, disabled, logFn)
+}
+
+func (a *App) applyKeeperProviderProbeResult(ctx context.Context, cfg AppConfig, provider string, probe keeperHTTPResult, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
 	result.LastStatusCode = probe.StatusCode
 	classification, action, reason := classifyKeeperProviderProbe(provider, probe, disabled)
 	switch action {
@@ -2961,6 +2970,34 @@ func (a *App) checkKeeperProviderProbe(ctx context.Context, cfg AppConfig, provi
 		}
 	}
 	return last
+}
+
+func (a *App) checkKeeperProviderViaCPAModels(ctx context.Context, cfg AppConfig, name string) keeperHTTPResult {
+	query := url.Values{"name": []string{name}}
+	response, payload, err := a.keeperRequest(ctx, cfg, http.MethodGet, "/v0/management/auth-files/models", query, nil, time.Duration(cfg.CodexKeeper.UsageTimeoutSeconds)*time.Second)
+	if err != nil {
+		if response == nil || response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusMethodNotAllowed {
+			return keeperHTTPResult{Error: err.Error()}
+		}
+		statusCode := response.StatusCode
+		return keeperHTTPResult{
+			StatusCode: &statusCode,
+			Brief:      briefPayload(payload),
+			Error:      fmt.Sprintf("CPA auth models request failed: HTTP %d", response.StatusCode),
+		}
+	}
+	statusCode := response.StatusCode
+	result := keeperHTTPResult{StatusCode: &statusCode, Brief: briefPayload(payload)}
+	var raw any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return keeperHTTPResult{Error: "CPA auth models response is not valid JSON"}
+	}
+	items, err := extractAvailableModelItems(raw)
+	if err != nil {
+		return keeperHTTPResult{Error: "CPA auth models response missing model list"}
+	}
+	result.Brief = fmt.Sprintf("CPA auth models returned %d models", len(items))
+	return result
 }
 
 func keeperProviderProbeSpecs(provider string) []keeperProviderProbeSpec {

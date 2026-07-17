@@ -42,6 +42,86 @@ func TestKeeperSettingsNormalizeEnabledProviders(t *testing.T) {
 	}
 }
 
+func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	modelsCalls := 0
+	apiCalls := 0
+	disabledPatches := []string{}
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{"name": "antigravity.json", "type": "antigravity"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "antigravity.json", "type": "antigravity", "auth_index": "antigravity-auth", "disabled": false,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models":
+			modelsCalls++
+			if got := r.URL.Query().Get("name"); got != "antigravity.json" {
+				t.Fatalf("models name = %q, want antigravity.json", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "gemini-3.5-flash"}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			apiCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status_code": 403,
+				"body":        map[string]any{"error": map[string]any{"message": "permission denied"}},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload.Disabled {
+				disabledPatches = append(disabledPatches, payload.Name)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, func(cfg *AppConfig) {
+		cfg.CodexKeeper.EnabledProviders = []string{"antigravity"}
+		cfg.CodexKeeper.DryRun = false
+	})
+
+	stats, _, err := app.executeKeeperRunForAccounts(context.Background(), "accounts", []string{"antigravity.json"}, func(string) {})
+	if err != nil {
+		t.Fatalf("executeKeeperRunForAccounts: %v", err)
+	}
+	if stats.Healthy != 1 || stats.StatusDisabled != 0 || stats.NetworkError != 0 {
+		t.Fatalf("stats = %#v, want one healthy antigravity account", stats)
+	}
+	if modelsCalls != 1 {
+		t.Fatalf("models calls = %d, want 1", modelsCalls)
+	}
+	if apiCalls != 0 {
+		t.Fatalf("api-call count = %d, want 0 because CPA models probe succeeded", apiCalls)
+	}
+	if len(disabledPatches) != 0 {
+		t.Fatalf("disabled patches = %#v, want none", disabledPatches)
+	}
+	state, err := app.getKeeperState(context.Background(), "antigravity.json")
+	if err != nil {
+		t.Fatalf("get keeper state: %v", err)
+	}
+	if state.LastStatusCode == nil || *state.LastStatusCode != http.StatusOK {
+		t.Fatalf("last_status_code = %v, want 200", state.LastStatusCode)
+	}
+}
+
 func TestKeeperAccountsListIncludesRemoteNonCodexAccounts(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
