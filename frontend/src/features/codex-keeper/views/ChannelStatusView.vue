@@ -75,9 +75,23 @@ function successRate(item: ChannelStatusItem): number {
 }
 
 function sparkPoints(item: ChannelStatusItem): Array<'ok' | 'fail'> {
-  const total = Math.max(item.window_records, 24)
-  const failed = Math.min(item.window_failed_records, total)
-  return Array.from({ length: Math.min(total, 36) }, (_, index) => (index < total - failed ? 'ok' : 'fail'))
+  const records = Math.max(item.window_records, 0)
+  const segmentCount = Math.min(Math.max(records, 24), 36)
+  if (!records) return Array.from({ length: segmentCount }, () => 'ok')
+
+  const failedRecords = Math.min(Math.max(item.window_failed_records, 0), records)
+  const failedSegments = failedRecords
+    ? Math.min(segmentCount, Math.max(1, Math.round((failedRecords / records) * segmentCount)))
+    : 0
+  const successSegments = segmentCount - failedSegments
+  return Array.from({ length: segmentCount }, (_, index) => (index < successSegments ? 'ok' : 'fail'))
+}
+
+function windowDistributionLabel(item: ChannelStatusItem): string {
+  return t(
+    `近 7 天成功 ${formatInteger(item.window_success_records)}，失败 ${formatInteger(item.window_failed_records)}`,
+    `${formatInteger(item.window_success_records)} succeeded and ${formatInteger(item.window_failed_records)} failed in the last 7 days`,
+  )
 }
 
 function typeLabel(item: ChannelStatusItem): string {
@@ -178,10 +192,17 @@ onMounted(refresh)
 
           <section class="channel-panel__bars">
             <div class="channel-panel__bars-head">
-              <span>{{ t('窗口记录分布', 'Window record distribution') }}</span>
+              <span>
+                {{ t('窗口记录分布', 'Window record distribution') }}
+                · {{ t('失败', 'Failed') }} {{ formatInteger(channel.window_failed_records) }}
+              </span>
               <span>{{ formatDateTime(channel.refreshed_at) }}</span>
             </div>
-            <div class="channel-panel__sparkline" :aria-label="t('近 7 天窗口记录', '7-day window records')">
+            <div
+              class="channel-panel__sparkline"
+              :aria-label="windowDistributionLabel(channel)"
+              :title="windowDistributionLabel(channel)"
+            >
               <i
                 v-for="(point, index) in sparkPoints(channel)"
                 :key="`${channel.id}-${index}`"
@@ -417,8 +438,8 @@ onMounted(refresh)
 }
 
 .channel-panel__sparkline i.is-fail {
-  height: 12px;
-  background: linear-gradient(180deg, #f1b04c, #e48e2a);
+  height: 24px;
+  background: linear-gradient(180deg, #fb7185, #dc2626);
 }
 
 .channel-panel__footer {
