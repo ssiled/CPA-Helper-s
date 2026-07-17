@@ -728,8 +728,8 @@ func TestAvailableModelsUsesProxyForwardingKey(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
 				t.Fatalf("Authorization = %q, want proxy key", got)
 			}
-			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != "" {
-				t.Fatalf("helper key hash header = %q, want empty for plugin model catalog", got)
+			if got := r.Header.Get("X-CPA-Helper-API-Key-Hash"); got != created.APIKeyHash {
+				t.Fatalf("helper key hash header = %q, want %q", got, created.APIKeyHash)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{
 				{"id": "gpt-free", "object": "model", "safe_label": "visible", "api_key": proxyKey, "token": "Bearer " + proxyKey},
@@ -785,16 +785,16 @@ func TestAvailableModelsUsesProxyForwardingKey(t *testing.T) {
 	if !response.HasAPIKeys || response.APIKeyCount != 1 || response.QueryableAPIKeyCount != 1 {
 		t.Fatalf("key counts = has %v count %d queryable %d, want plugin key available", response.HasAPIKeys, response.APIKeyCount, response.QueryableAPIKeyCount)
 	}
-	if len(response.Models) != 2 || response.Models[0].ID != "gpt-free" || response.Models[1].ID != "gpt-other" {
-		t.Fatalf("models = %#v, want all CPA models from plugin key", response.Models)
+	if len(response.Models) != 1 || response.Models[0].ID != "gpt-free" {
+		t.Fatalf("models = %#v, want only bound pool models", response.Models)
 	}
 	for _, model := range response.Models {
 		if len(model.Sources) != 1 {
 			t.Fatalf("model %s sources = %#v, want one sanitized plugin source", model.ID, model.Sources)
 		}
 		source := model.Sources[0]
-		if source.APIKeyHash == "" || source.APIKeyHash == created.APIKeyHash || source.APIKeyPreview == "" || source.APIKeyPreview == proxyKey || source.Description == "" {
-			t.Fatalf("model %s source = %#v, want sanitized plugin source", model.ID, source)
+		if source.APIKeyHash != created.APIKeyHash || source.APIKeyPreview == "" || source.APIKeyPreview == created.APIKey || source.Description != "Proxy key" {
+			t.Fatalf("model %s source = %#v, want current API key source", model.ID, source)
 		}
 		if _, ok := model.Metadata["api_key"]; ok {
 			t.Fatalf("model %s metadata leaked api_key: %#v", model.ID, model.Metadata)
@@ -811,7 +811,7 @@ func TestAvailableModelsUsesProxyForwardingKey(t *testing.T) {
 		t.Fatalf("Marshal response failed: %v", err)
 	}
 	bodyText := string(body)
-	for _, secret := range []string{proxyKey, created.APIKey, created.APIKeyHash} {
+	for _, secret := range []string{proxyKey, created.APIKey} {
 		if secret != "" && strings.Contains(bodyText, secret) {
 			t.Fatalf("available models response leaked secret material %q in %s", secret, bodyText)
 		}

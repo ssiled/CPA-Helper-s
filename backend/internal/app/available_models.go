@@ -89,9 +89,6 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	if err != nil {
 		return AvailableModelsResponse{}, err
 	}
-	if target, ok := activeAuthPoolProxyTarget(cfg); ok && strings.TrimSpace(target.APIKey) != "" {
-		return a.availableModelsForPluginCPAKey(ctx, target)
-	}
 	bindings, err := a.userAPIKeys(ctx, userID)
 	if err != nil {
 		return AvailableModelsResponse{}, err
@@ -101,6 +98,9 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 		APIKeyCount: len(bindings),
 		Models:      []AvailableModelItem{},
 		Errors:      []AvailableModelKeyError{},
+	}
+	if target, ok := activeAuthPoolProxyTarget(cfg); ok && strings.TrimSpace(target.APIKey) != "" {
+		return a.availableModelsForPluginCPAKey(ctx, target, bindings, response)
 	}
 	if len(bindings) == 0 {
 		return response, nil
@@ -171,43 +171,73 @@ func (a *App) availableModelsForUser(ctx context.Context, userID int) (Available
 	return response, nil
 }
 
-func (a *App) availableModelsForPluginCPAKey(ctx context.Context, target AuthPoolProxyTargetConfig) (AvailableModelsResponse, error) {
-	source := availableModelPluginSource()
-	response := AvailableModelsResponse{
-		HasAPIKeys:           true,
-		APIKeyCount:          1,
-		QueryableAPIKeyCount: 1,
-		Models:               []AvailableModelItem{},
-		Errors:               []AvailableModelKeyError{},
+func (a *App) availableModelsForPluginCPAKey(ctx context.Context, target AuthPoolProxyTargetConfig, bindings []UserAPIKey, response AvailableModelsResponse) (AvailableModelsResponse, error) {
+	if len(bindings) == 0 {
+		return response, nil
 	}
-	models, err := fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, target.APIKey, "", false)
+	queryable := make([]UserAPIKey, 0, len(bindings))
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.APIKeyHash) == "" {
+			continue
+		}
+		queryable = append(queryable, binding)
+	}
+	response.QueryableAPIKeyCount = len(queryable)
+	if len(queryable) == 0 {
+		return response, nil
+	}
+	apiKeyHashes := make([]string, 0, len(queryable))
+	for _, binding := range queryable {
+		apiKeyHashes = append(apiKeyHashes, binding.APIKeyHash)
+	}
+	poolModelFilters, err := a.authPoolModelFiltersForAPIKeys(ctx, apiKeyHashes)
 	if err != nil {
-		message := safeAvailableModelError(err)
-		response.Errors = append(response.Errors, AvailableModelKeyError{
-			APIKeyHash:    source.APIKeyHash,
-			APIKeyPreview: source.APIKeyPreview,
-			Description:   source.Description,
-			Message:       message,
-		})
-		return AvailableModelsResponse{}, validationError("查询 CPA 可用模型失败：" + source.Description + ": " + message)
+		return AvailableModelsResponse{}, err
 	}
 	prices, err := a.priceMap(ctx)
 	if err != nil {
 		return AvailableModelsResponse{}, err
 	}
 	modelsByID := map[string]AvailableModelItem{}
-	for _, raw := range models {
-		model := parseAvailableModel(raw, source)
-		if model == nil {
+	for _, binding := range queryable {
+		source := availableModelSource(binding)
+		filter := poolModelFilters[binding.APIKeyHash]
+		models, err := fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, target.APIKey, binding.APIKeyHash, true)
+		if err != nil {
+			response.Errors = append(response.Errors, AvailableModelKeyError{
+				APIKeyHash:    source.APIKeyHash,
+				APIKeyPreview: source.APIKeyPreview,
+				Description:   source.Description,
+				Message:       safeAvailableModelError(err),
+			})
 			continue
 		}
-		existing, ok := modelsByID[model.ID]
-		if !ok {
-			modelsByID[model.ID] = *model
-			continue
+		for _, raw := range models {
+			model := parseAvailableModel(raw, source)
+			if model == nil {
+				continue
+			}
+			if !authPoolModelFilterAllows(filter, model.ID) {
+				continue
+			}
+			existing, ok := modelsByID[model.ID]
+			if !ok {
+				modelsByID[model.ID] = *model
+				continue
+			}
+			mergeAvailableModel(&existing, *model)
+			modelsByID[model.ID] = existing
 		}
-		mergeAvailableModel(&existing, *model)
-		modelsByID[model.ID] = existing
+	}
+	if len(response.Errors) > 0 && len(modelsByID) == 0 {
+		messages := make([]string, 0, len(response.Errors))
+		for _, item := range response.Errors {
+			messages = append(messages, item.Description+": "+item.Message)
+			if len(messages) >= 3 {
+				break
+			}
+		}
+		return AvailableModelsResponse{}, validationError("CPA model list request failed: " + strings.Join(messages, "; "))
 	}
 	appendPricedAvailableModels(&response, prices, modelsByID)
 	return response, nil
