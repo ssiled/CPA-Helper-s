@@ -30,6 +30,8 @@ const { errorText, serverText, t } = useI18n()
 const isLoading = ref(false)
 const isSaving = ref(false)
 const collectorStatus = ref<CollectorStatus | null>(null)
+const managementKeySaved = ref(false)
+const managementKeyPreview = ref('')
 
 const settingsForm = reactive({
   cliaproxy_url: 'http://127.0.0.1:8317',
@@ -73,7 +75,9 @@ async function refresh() {
     ])
     settingsForm.cliaproxy_url = settings.cliaproxy_url
     settingsForm.model_request_url = settings.model_request_url
-    settingsForm.management_key = settings.management_key
+    settingsForm.management_key = ''
+    managementKeySaved.value = settings.management_key_set
+    managementKeyPreview.value = settings.management_key_preview || ''
     settingsForm.collector_enabled = settings.collector_enabled
     settingsForm.batch_size = settings.batch_size
     settingsForm.poll_interval_seconds = settings.poll_interval_seconds
@@ -92,14 +96,18 @@ async function saveSettings() {
     const payload: SettingsUpdatePayload = {
       cliaproxy_url: settingsForm.cliaproxy_url,
       model_request_url: settingsForm.model_request_url,
-      management_key: settingsForm.management_key,
       collector_enabled: settingsForm.collector_enabled,
       batch_size: settingsForm.batch_size,
       poll_interval_seconds: settingsForm.poll_interval_seconds,
       retry_interval_seconds: settingsForm.retry_interval_seconds,
     }
+    if (settingsForm.management_key.trim()) {
+      payload.management_key = settingsForm.management_key.trim()
+    }
     const saved = await updateSettings(payload)
-    settingsForm.management_key = saved.management_key
+    settingsForm.management_key = ''
+    managementKeySaved.value = saved.management_key_set
+    managementKeyPreview.value = saved.management_key_preview || ''
     message.success(t('设置已保存', 'Settings saved'))
     await refresh()
   } catch (error) {
@@ -183,8 +191,9 @@ onMounted(refresh)
                   v-model:value="settingsForm.management_key"
                   type="password"
                   show-password-on="mousedown"
-                  :placeholder="t('请输入 CLIProxyAPI 管理密钥', 'Enter the CLIProxyAPI management key')"
+                  :placeholder="managementKeySaved ? t('已保存；留空不修改', 'Saved; leave blank to keep unchanged') : t('请输入 CLIProxyAPI 管理密钥', 'Enter the CLIProxyAPI management key')"
                 />
+                <div v-if="managementKeySaved" class="form-help">{{ t(`管理密钥已保存：${managementKeyPreview || '已保存'}`, `Management key saved: ${managementKeyPreview || 'saved'}`) }}</div>
               </NFormItem>
               <NFormItem :label="t('开启本地采集', 'Enable local collection')">
                 <NSwitch v-model:value="settingsForm.collector_enabled" />
