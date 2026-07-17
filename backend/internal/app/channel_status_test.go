@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -86,6 +89,98 @@ func TestBuildChannelStatusItemsWeightsRemainingByPoolSize(t *testing.T) {
 	plus := findChannelStatusItem(t, items, "plus-pool")
 	if plus.PrimaryRemainingPercent == nil || *plus.PrimaryRemainingPercent != 99 {
 		t.Fatalf("plus remaining = %v, want 99", plus.PrimaryRemainingPercent)
+	}
+}
+
+func TestBuildChannelStatusItemsCountsOverlappingRecordOncePerPool(t *testing.T) {
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, appTimeLocation)
+	authA := "auth-a.json"
+	authB := "auth-b.json"
+	items := buildChannelStatusItems([]authPool{
+		{ID: "pool-a", Name: "Pool A", AuthIDs: []string{authA}, Enabled: true},
+		{ID: "pool-b", Name: "Pool B", AuthIDs: []string{authB}, Enabled: true},
+	}, []keeperAccount{
+		{Name: authA},
+		{Name: authB},
+	}, []UsageRecord{{
+		AuthIndex: chStringPtr(authA),
+		RawJSON:   `{"auth_index":"auth-a.json","authName":"auth-b.json"}`,
+	}}, nil, now)
+
+	for _, poolID := range []string{"pool-a", "pool-b"} {
+		item := findChannelStatusItem(t, items, poolID)
+		if item.WindowRecords != 1 || item.WindowSuccessRecords != 1 || item.WindowFailedRecords != 0 {
+			t.Fatalf("%s window = records %d success %d failed %d, want 1/1/0", poolID, item.WindowRecords, item.WindowSuccessRecords, item.WindowFailedRecords)
+		}
+	}
+}
+
+func TestBuildChannelStatusItemsContextStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := buildChannelStatusItemsContext(ctx, nil, nil, []UsageRecord{{RawJSON: `{}`}}, nil, time.Now())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("buildChannelStatusItemsContext error = %v, want context.Canceled", err)
+	}
+}
+
+func TestChannelStatusRefreshAsyncCoalescesRequests(t *testing.T) {
+	runner := &ChannelStatusRunner{
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
+		refreshRequests: make(chan string, 1),
+	}
+	var requests sync.WaitGroup
+	for range 100 {
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			runner.RefreshAsync()
+		}()
+	}
+	requests.Wait()
+	if got := len(runner.refreshRequests); got != 1 {
+		t.Fatalf("queued refresh requests = %d, want 1", got)
+	}
+	if reason := <-runner.refreshRequests; reason != "event" {
+		t.Fatalf("refresh reason = %q, want event", reason)
+	}
+	close(runner.stop)
+	runner.RefreshAsync()
+	if got := len(runner.refreshRequests); got != 0 {
+		t.Fatalf("queued refresh requests after stop = %d, want 0", got)
+	}
+}
+
+func TestChannelStatusWindowRecordsReadsOnlyRequiredFields(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions failed: %v", err)
+	}
+	defer app.Close()
+
+	raw := `{"provider":"openai","model":"gpt-test","request_id":"channel-window","source_account":"source@example.com","auth":"auth-label","auth_index":"auth.json","input_tokens":10,"output_tokens":4,"cached_tokens":3,"cache_read_tokens":2,"cache_creation_tokens":1,"reasoning_tokens":5,"total_tokens":14}`
+	if _, created, saveErr := app.saveUsageMessage(context.Background(), []byte(raw)); saveErr != nil || !created {
+		t.Fatalf("saveUsageMessage created=%v error=%v", created, saveErr)
+	}
+	records, err := app.channelStatusWindowRecords(context.Background(), time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("channelStatusWindowRecords failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	record := records[0]
+	if stringPtrValue(record.Provider) != "openai" || stringPtrValue(record.Model) != "gpt-test" || stringPtrValue(record.Auth) != "auth-label" || stringPtrValue(record.AuthIndex) != "auth.json" {
+		t.Fatalf("record identity fields = %+v", record)
+	}
+	if record.InputTokens != 10 || record.OutputTokens != 4 || record.CachedTokens != 3 || record.CacheReadTokens != 2 || record.CacheCreationTokens != 1 || record.ReasoningTokens != 5 || record.TotalTokens != 14 {
+		t.Fatalf("record token fields = %+v", record)
+	}
+	keys := normalizedLookup(usageRecordChannelKeys(record))
+	if !keys[normalizeChannelKey("source@example.com")] {
+		t.Fatalf("record channel keys = %+v, want source@example.com from raw_json", keys)
 	}
 }
 

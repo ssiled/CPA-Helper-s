@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +20,11 @@ const (
 )
 
 type ChannelStatusRunner struct {
-	app  *App
-	mu   sync.Mutex
-	stop chan struct{}
-	done chan struct{}
+	app             *App
+	mu              sync.Mutex
+	stop            chan struct{}
+	done            chan struct{}
+	refreshRequests chan string
 }
 
 type channelStatusResponse struct {
@@ -74,6 +76,7 @@ func (r *ChannelStatusRunner) Start() {
 	}
 	r.stop = make(chan struct{})
 	r.done = make(chan struct{})
+	r.refreshRequests = make(chan string, 1)
 	go r.loop()
 }
 
@@ -95,7 +98,25 @@ func (r *ChannelStatusRunner) Stop() {
 }
 
 func (r *ChannelStatusRunner) RefreshAsync() {
-	go r.refresh("event")
+	r.mu.Lock()
+	requests := r.refreshRequests
+	done := r.done
+	stop := r.stop
+	r.mu.Unlock()
+	if requests == nil || done == nil || stop == nil {
+		return
+	}
+	select {
+	case <-done:
+		return
+	case <-stop:
+		return
+	default:
+	}
+	select {
+	case requests <- "event":
+	default:
+	}
 }
 
 func (a *App) refreshChannelStatusAfterChange() {
@@ -120,6 +141,8 @@ func (r *ChannelStatusRunner) loop() {
 		select {
 		case <-r.stop:
 			return
+		case reason := <-r.refreshRequests:
+			r.refresh(reason)
 		case <-ticker.C:
 			r.refresh("ticker")
 		}
@@ -166,7 +189,10 @@ func (a *App) refreshChannelStatusSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	items := buildChannelStatusItems(status.Pools, accounts, records, prices, time.Now().In(appTimeLocation))
+	items, err := buildChannelStatusItemsContext(ctx, status.Pools, accounts, records, prices, time.Now().In(appTimeLocation))
+	if err != nil {
+		return err
+	}
 	return a.replaceChannelStatusSnapshots(ctx, items)
 }
 
@@ -275,23 +301,28 @@ func (a *App) replaceChannelStatusSnapshots(ctx context.Context, items []channel
 }
 
 func (a *App) channelStatusWindowRecords(ctx context.Context, start time.Time) ([]UsageRecord, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id, CAST(timestamp AS TEXT), usage_username, api_key_description, provider, model, reasoning_effort, endpoint, source,
-		source_account, request_id, auth, auth_index, latency_ms, ttft_ms, failed, input_tokens, output_tokens, cached_tokens,
-		cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_tokens, dedupe_key, raw_json
+	rows, err := a.db.QueryContext(ctx, `SELECT provider, model, source_account, auth, auth_index, failed,
+		input_tokens, output_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens,
+		reasoning_tokens, total_tokens, raw_json
 		FROM usage_records WHERE timestamp >= ?`, dbTime(start))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanUsageRecords(rows)
+	return scanChannelStatusUsageRecords(rows)
 }
 
 func buildChannelStatusItems(pools []authPool, accounts []keeperAccount, records []UsageRecord, prices map[[2]string]ModelPrice, now time.Time) []channelStatusItem {
+	items, _ := buildChannelStatusItemsContext(context.Background(), pools, accounts, records, prices, now)
+	return items
+}
+
+func buildChannelStatusItemsContext(ctx context.Context, pools []authPool, accounts []keeperAccount, records []UsageRecord, prices map[[2]string]ModelPrice, now time.Time) ([]channelStatusItem, error) {
 	items := make([]channelStatusItem, 0, len(pools))
+	poolIndexesByMemberKey := make(map[string][]int)
 	windowStart := now.Add(-channelStatusWindowDuration)
 	for _, pool := range pools {
 		members := channelPoolAccounts(pool, accounts)
-		memberKeys := channelMemberKeys(members)
 		item := channelStatusItem{
 			ID:            strings.TrimSpace(pool.ID),
 			Name:          strings.TrimSpace(pool.Name),
@@ -306,9 +337,42 @@ func buildChannelStatusItems(pools []authPool, accounts []keeperAccount, records
 			item.Name = item.ID
 		}
 		applyChannelAccountStats(&item, members)
-		applyChannelUsageStats(&item, memberKeys, records, prices)
-		applyChannelRecentRequestStatus(&item)
+		itemIndex := len(items)
 		items = append(items, item)
+		for memberKey := range channelMemberKeys(members) {
+			poolIndexesByMemberKey[memberKey] = append(poolIndexesByMemberKey[memberKey], itemIndex)
+		}
+	}
+	seenPoolMarkers := make([]int, len(items))
+	matchedPoolIndexes := make([]int, 0, 2)
+	for recordIndex, record := range records {
+		if recordIndex%1024 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+		}
+		matchedPoolIndexes = appendChannelUsageRecordPoolIndexes(
+			matchedPoolIndexes[:0], record, poolIndexesByMemberKey, seenPoolMarkers, recordIndex+1,
+		)
+		if len(matchedPoolIndexes) == 0 {
+			continue
+		}
+		cost, _ := recordCost(record, prices)
+		for _, itemIndex := range matchedPoolIndexes {
+			item := &items[itemIndex]
+			item.WindowRecords++
+			if record.Failed {
+				item.WindowFailedRecords++
+			} else {
+				item.WindowSuccessRecords++
+			}
+			item.WindowCostUSD = mathRound(item.WindowCostUSD+cost, 8)
+		}
+	}
+	for index := range items {
+		applyChannelRecentRequestStatus(&items[index])
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Name == items[j].Name {
@@ -316,7 +380,48 @@ func buildChannelStatusItems(pools []authPool, accounts []keeperAccount, records
 		}
 		return items[i].Name < items[j].Name
 	})
-	return items
+	return items, nil
+}
+
+func scanChannelStatusUsageRecords(rows *sql.Rows) ([]UsageRecord, error) {
+	records := make([]UsageRecord, 0)
+	for rows.Next() {
+		var record UsageRecord
+		var provider, model, sourceAccount, auth, authIndex, rawJSON sql.NullString
+		if err := rows.Scan(
+			&provider, &model, &sourceAccount, &auth, &authIndex, &record.Failed,
+			&record.InputTokens, &record.OutputTokens, &record.CachedTokens,
+			&record.CacheReadTokens, &record.CacheCreationTokens, &record.ReasoningTokens,
+			&record.TotalTokens, &rawJSON,
+		); err != nil {
+			return nil, err
+		}
+		record.Provider = nullableString(provider)
+		record.Model = nullableString(model)
+		record.SourceAccount = nullableString(sourceAccount)
+		record.Auth = nullableString(auth)
+		record.AuthIndex = nullableString(authIndex)
+		record.RawJSON = rawJSON.String
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func appendChannelUsageRecordPoolIndexes(matched []int, record UsageRecord, poolIndexesByMemberKey map[string][]int, seenPoolMarkers []int, marker int) []int {
+	for _, value := range usageRecordChannelKeys(record) {
+		key := normalizeChannelKey(value)
+		if key == "" {
+			continue
+		}
+		for _, itemIndex := range poolIndexesByMemberKey[key] {
+			if itemIndex < 0 || itemIndex >= len(seenPoolMarkers) || seenPoolMarkers[itemIndex] == marker {
+				continue
+			}
+			seenPoolMarkers[itemIndex] = marker
+			matched = append(matched, itemIndex)
+		}
+	}
+	return matched
 }
 
 func applyChannelAccountStats(item *channelStatusItem, accounts []keeperAccount) {
@@ -357,25 +462,6 @@ func applyChannelAccountStats(item *channelStatusItem, accounts []keeperAccount)
 		return
 	}
 	item.Status, item.Available = channelPoolStatus(item)
-}
-
-func applyChannelUsageStats(item *channelStatusItem, memberKeys map[string]bool, records []UsageRecord, prices map[[2]string]ModelPrice) {
-	if len(memberKeys) == 0 {
-		return
-	}
-	for _, record := range records {
-		if !usageRecordMatchesChannel(record, memberKeys) {
-			continue
-		}
-		item.WindowRecords++
-		if record.Failed {
-			item.WindowFailedRecords++
-		} else {
-			item.WindowSuccessRecords++
-		}
-		cost, _ := recordCost(record, prices)
-		item.WindowCostUSD = mathRound(item.WindowCostUSD+cost, 8)
-	}
 }
 
 func applyChannelRecentRequestStatus(item *channelStatusItem) {
@@ -478,25 +564,54 @@ func channelMemberKeys(accounts []keeperAccount) map[string]bool {
 	return keys
 }
 
-func usageRecordMatchesChannel(record UsageRecord, memberKeys map[string]bool) bool {
-	for _, value := range usageRecordChannelKeys(record) {
-		if memberKeys[normalizeChannelKey(value)] {
-			return true
-		}
-	}
-	return false
+type channelUsageIdentity struct {
+	AuthIndexSnake     any `json:"auth_index"`
+	AuthIndexCamel     any `json:"authIndex"`
+	AuthNameSnake      any `json:"auth_name"`
+	AuthNameCamel      any `json:"authName"`
+	AccountIDSnake     any `json:"account_id"`
+	AccountIDCamel     any `json:"accountId"`
+	SourceAccountSnake any `json:"source_account"`
+	SourceAccountCamel any `json:"sourceAccount"`
+	Email              any `json:"email"`
 }
 
 func usageRecordChannelKeys(record UsageRecord) []string {
-	keys := []string{
+	keys := make([]string, 0, 12)
+	keys = append(keys,
 		stringPtrValue(record.SourceAccount),
 		stringPtrValue(record.AuthIndex),
 		stringPtrValue(record.Auth),
+	)
+	var payload channelUsageIdentity
+	if json.Unmarshal([]byte(record.RawJSON), &payload) != nil {
+		return keys
 	}
-	for _, field := range []string{"auth_index", "authIndex", "auth_name", "authName", "account_id", "accountId", "source_account", "sourceAccount", "email"} {
-		keys = append(keys, stringPtrValue(rawJSONStringField(record.RawJSON, field)))
+	for _, field := range []any{
+		payload.AuthIndexSnake, payload.AuthIndexCamel,
+		payload.AuthNameSnake, payload.AuthNameCamel,
+		payload.AccountIDSnake, payload.AccountIDCamel,
+		payload.SourceAccountSnake, payload.SourceAccountCamel,
+		payload.Email,
+	} {
+		if value := channelUsageString(field); value != "" {
+			keys = append(keys, value)
+		}
 	}
 	return keys
+}
+
+func channelUsageString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(typed)
+	default:
+		return ""
+	}
 }
 
 func isQuotaExhaustedPercent(value *int) bool {
