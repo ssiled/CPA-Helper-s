@@ -87,6 +87,7 @@ const selectedPoolID = ref<string | null>(null)
 const generatedApiKey = ref<string | null>(null)
 const generatedApiKeyHash = ref<string | null>(null)
 const visibleApiKeyHashes = ref<Set<string>>(new Set())
+const inlinePoolSavingHashes = ref<Set<string>>(new Set())
 const authPools = ref<AuthPool[]>([])
 const authPoolBindings = ref<AuthPoolBinding[]>([])
 
@@ -568,6 +569,65 @@ function closeGeneratedApiKey() {
   generatedApiKeyHash.value = null
 }
 
+function setInlinePoolSaving(apiKeyHash: string, saving: boolean) {
+  const next = new Set(inlinePoolSavingHashes.value)
+  if (saving) {
+    next.add(apiKeyHash)
+  } else {
+    next.delete(apiKeyHash)
+  }
+  inlinePoolSavingHashes.value = next
+}
+
+function currentPoolIDForKey(apiKeyHash: string): string | null {
+  return apiKeyPoolBindings.value.get(apiKeyHash) ?? null
+}
+
+async function updateApiKeyAuthPool(row: UserApiKeySummary, poolID: string | null) {
+  const apiKeyHash = row.api_key_hash
+  const currentPoolID = currentPoolIDForKey(apiKeyHash)
+  if ((poolID || null) === currentPoolID) {
+    return
+  }
+  setInlinePoolSaving(apiKeyHash, true)
+  try {
+    if (poolID) {
+      await bindApiKeyToAuthPool({ api_key_hash: apiKeyHash, pool_id: poolID })
+    } else {
+      await unbindApiKeyFromAuthPool(apiKeyHash)
+    }
+    const nextBindings = authPoolBindings.value.filter((binding) => binding.api_key_hash !== apiKeyHash)
+    if (poolID) {
+      nextBindings.push({ api_key_hash: apiKeyHash, pool_id: poolID })
+    }
+    authPoolBindings.value = nextBindings
+    if (requestTestApiKey.value?.api_key_hash === apiKeyHash) {
+      ensureRequestTestModel()
+    }
+    message.success(t('\u8bf7\u6c42\u53f7\u6c60\u5df2\u66f4\u65b0', 'Auth pool updated'))
+  } catch (error) {
+    message.error(errorText(error, '\u66f4\u65b0\u8bf7\u6c42\u53f7\u6c60\u5931\u8d25', 'Failed to update auth pool'))
+  } finally {
+    setInlinePoolSaving(apiKeyHash, false)
+  }
+}
+
+function renderAuthPoolSelector(row: UserApiKeySummary) {
+  const saving = inlinePoolSavingHashes.value.has(row.api_key_hash)
+  return h(NSelect, {
+    class: 'api-key-pool-select',
+    value: currentPoolIDForKey(row.api_key_hash),
+    options: authPoolOptions.value,
+    clearable: true,
+    filterable: true,
+    size: 'small',
+    placeholder: t('\u9ed8\u8ba4\u8c03\u5ea6', 'Default scheduling'),
+    disabled: saving,
+    loading: saving,
+    onUpdateValue: (value: string | null) => updateApiKeyAuthPool(row, value),
+  })
+}
+
 function editApiKey(row: UserApiKeySummary) {
   editingApiKeyHash.value = row.api_key_hash
   apiKeyDescription.value = row.description || 'VSCode'
@@ -721,14 +781,10 @@ const columns = computed<DataTableColumns<UserApiKeySummary>>(() => [
     render: (row) => row.description || '-',
   },
   {
-    title: t('请求号池', 'Auth pool'),
+    title: t('\u8bf7\u6c42\u53f7\u6c60', 'Auth pool'),
     key: 'auth_pool',
-    width: 180,
-    render: (row) => {
-      const poolID = authPoolIDByApiKeyHash.value.get(row.api_key_hash)
-      if (!poolID) return t('默认调度', 'Default scheduling')
-      return authPoolNameByID.value.get(poolID) ?? poolID
-    },
+    width: 260,
+    render: renderAuthPoolSelector,
   },
   {
     title: t('创建时间', 'Created at'),
@@ -828,7 +884,7 @@ onMounted(refresh)
           :data="apiKeys"
           :pagination="{ pageSize: 12 }"
           table-layout="fixed"
-          :scroll-x="1080"
+          :scroll-x="1160"
         />
       </div>
     </section>
@@ -1035,7 +1091,20 @@ onMounted(refresh)
 }
 
 .api-key-table :deep(.n-data-table-wrapper) {
-  overflow: hidden;
+  overflow: visible;
+}
+
+.api-key-table :deep(.n-data-table-base-table) {
+  overflow: visible;
+}
+
+.api-key-table :deep(.n-data-table-td) {
+  overflow: visible;
+}
+
+:global(.api-key-pool-select) {
+  width: 100%;
+  min-width: 190px;
 }
 
 .generated-key-box {
