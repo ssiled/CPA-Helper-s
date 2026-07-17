@@ -84,6 +84,12 @@ export const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          path: 'admin/plugin-store',
+          name: 'admin-plugin-store',
+          component: () => import('@/features/plugins/views/PluginStoreView.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 'admin/pricing',
           name: 'admin-pricing',
           component: () => import('@/features/pricing/views/ModelPricesView.vue'),

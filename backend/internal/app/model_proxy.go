@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const modelProxyBodyLimit = 32 << 20
@@ -164,7 +165,8 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	if err != nil {
 		return validationError("Request body too large")
 	}
-	if model := modelFromProxyBody(body); model != "" {
+	model := modelFromProxyBody(body)
+	if model != "" {
 		if err := a.ensureAPIKeyModelAllowedByPool(r.Context(), apiKey.APIKeyHash, model); err != nil {
 			return err
 		}
@@ -186,25 +188,35 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	requestID := newModelProxyRequestID()
 	request.Header.Set("X-Request-Id", requestID)
 	request.Header.Set("X-CPA-Helper-Request-Id", requestID)
+	startedAt := time.Now()
 	response, err := httpClient(0).Do(request)
 	if err != nil {
 		return validationError("CPA request failed: " + err.Error())
 	}
 	defer response.Body.Close()
+	completedAt := time.Now()
+	statusCode := response.StatusCode
+	attributionMeta := modelProxyRequestAttributionMetadata{
+		Model:       model,
+		Endpoint:    modelProxyRequestEndpoint(r),
+		StartedAt:   startedAt,
+		CompletedAt: &completedAt,
+		StatusCode:  &statusCode,
+	}
 	if shouldBufferModelProxyResponse(response) {
 		payload, err := io.ReadAll(response.Body)
 		if err != nil {
 			return err
 		}
 		responseRequestID := modelProxyRequestIDFromResponse(response, payload)
-		if err := a.recordModelProxyRequestAttributions(r.Context(), apiKey.APIKeyHash, requestID, responseRequestID); err != nil {
+		if err := a.recordModelProxyRequestAttributionsWithMetadata(r.Context(), apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {
 			return err
 		}
 		writeRawProxyResponse(w, response, payload)
 		return nil
 	}
 	responseRequestID := modelProxyRequestIDFromResponse(response, nil)
-	if err := a.recordModelProxyRequestAttributions(r.Context(), apiKey.APIKeyHash, requestID, responseRequestID); err != nil {
+	if err := a.recordModelProxyRequestAttributionsWithMetadata(r.Context(), apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {
 		return err
 	}
 	copyProxyHeaders(w.Header(), response.Header)
@@ -235,6 +247,21 @@ func modelFromProxyBody(body []byte) string {
 	}
 	model, _ := payload["model"].(string)
 	return strings.TrimSpace(model)
+}
+
+func modelProxyRequestEndpoint(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	method := strings.ToUpper(strings.TrimSpace(r.Method))
+	path := strings.TrimSpace(r.URL.Path)
+	if method == "" {
+		return path
+	}
+	if path == "" {
+		return method
+	}
+	return method + " " + path
 }
 
 func modelProxyTarget(cfg AppConfig, fallbackAPIKey string) (AuthPoolProxyTargetConfig, string, bool, error) {

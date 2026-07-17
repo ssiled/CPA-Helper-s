@@ -13,12 +13,21 @@ import (
 )
 
 const modelProxyRequestAttributionTTL = 7 * 24 * time.Hour
+const modelProxyRequestAttributionWindow = 30 * time.Minute
 
 var modelProxyRequestIDHeaders = []string{
 	"x-cpa-request-id",
 	"x-request-id",
 	"request-id",
 	"openai-request-id",
+}
+
+type modelProxyRequestAttributionMetadata struct {
+	Model       string
+	Endpoint    string
+	StartedAt   time.Time
+	CompletedAt *time.Time
+	StatusCode  *int
 }
 
 func newModelProxyRequestID() string {
@@ -54,9 +63,28 @@ func modelProxyRequestIDFromBody(payload []byte) string {
 }
 
 func (a *App) recordModelProxyRequestAttributions(ctx context.Context, apiKeyHash string, requestIDs ...string) error {
+	return a.recordModelProxyRequestAttributionsWithMetadata(ctx, apiKeyHash, modelProxyRequestAttributionMetadata{StartedAt: time.Now()}, requestIDs...)
+}
+
+func (a *App) recordModelProxyRequestAttributionsWithMetadata(ctx context.Context, apiKeyHash string, meta modelProxyRequestAttributionMetadata, requestIDs ...string) error {
 	apiKeyHash = strings.TrimSpace(apiKeyHash)
 	if apiKeyHash == "" {
 		return nil
+	}
+	startedAt := meta.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	model := nullableTrimmedString(meta.Model)
+	endpoint := nullableTrimmedString(meta.Endpoint)
+	startedValue := dbTime(startedAt)
+	var completedValue any
+	if meta.CompletedAt != nil && !meta.CompletedAt.IsZero() {
+		completedValue = dbTime(*meta.CompletedAt)
+	}
+	var statusValue any
+	if meta.StatusCode != nil {
+		statusValue = *meta.StatusCode
 	}
 	now := dbTime(time.Now())
 	for _, requestID := range requestIDs {
@@ -65,15 +93,31 @@ func (a *App) recordModelProxyRequestAttributions(ctx context.Context, apiKeyHas
 			continue
 		}
 		if _, err := a.db.ExecContext(ctx, `
-			INSERT INTO model_proxy_request_attributions (request_id, api_key_hash, created_at, updated_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(request_id) DO UPDATE SET api_key_hash = excluded.api_key_hash, updated_at = excluded.updated_at
-		`, requestID, apiKeyHash, now, now); err != nil {
+			INSERT INTO model_proxy_request_attributions (
+				request_id, api_key_hash, model, endpoint, started_at, completed_at, status_code, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(request_id) DO UPDATE SET
+				api_key_hash = excluded.api_key_hash,
+				model = COALESCE(NULLIF(excluded.model, ''), model),
+				endpoint = COALESCE(NULLIF(excluded.endpoint, ''), endpoint),
+				started_at = COALESCE(excluded.started_at, started_at),
+				completed_at = COALESCE(excluded.completed_at, completed_at),
+				status_code = COALESCE(excluded.status_code, status_code),
+				updated_at = excluded.updated_at
+		`, requestID, apiKeyHash, model, endpoint, startedValue, completedValue, statusValue, now, now); err != nil {
 			return err
 		}
 	}
 	_, err := a.db.ExecContext(ctx, `DELETE FROM model_proxy_request_attributions WHERE created_at < ?`, dbTime(time.Now().Add(-modelProxyRequestAttributionTTL)))
 	return err
+}
+
+func nullableTrimmedString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func (a *App) modelProxyRequestAttribution(ctx context.Context, requestID string) (string, bool, error) {
@@ -100,5 +144,157 @@ func (a *App) usageOwnerAPIKeyHash(ctx context.Context, normalized normalizedUsa
 			return apiKeyHash, nil
 		}
 	}
+	if ok, err := a.userAPIKeyHashExists(ctx, normalized.APIKeyHash); err != nil {
+		return "", err
+	} else if ok {
+		return normalized.APIKeyHash, nil
+	}
+	if apiKeyHash, ok, err := a.modelProxyRequestAttributionForUsage(ctx, normalized); err != nil {
+		return "", err
+	} else if ok {
+		return apiKeyHash, nil
+	}
 	return normalized.APIKeyHash, nil
+}
+
+func (a *App) userAPIKeyHashExists(ctx context.Context, apiKeyHash string) (bool, error) {
+	apiKeyHash = strings.TrimSpace(apiKeyHash)
+	if apiKeyHash == "" {
+		return false, nil
+	}
+	var count int
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_api_keys WHERE api_key_hash = ?`, apiKeyHash).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+type modelProxyAttributionCandidate struct {
+	APIKeyHash string
+	Model      string
+	Endpoint   string
+	MatchedAt  time.Time
+	Distance   time.Duration
+}
+
+func (a *App) modelProxyRequestAttributionForUsage(ctx context.Context, normalized normalizedUsage) (string, bool, error) {
+	usageTime := normalized.Timestamp
+	if usageTime.IsZero() {
+		usageTime = time.Now().In(appTimeLocation)
+	}
+	start := usageTime.Add(-modelProxyRequestAttributionWindow)
+	end := usageTime.Add(modelProxyRequestAttributionWindow)
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT api_key_hash, COALESCE(model, ''), COALESCE(endpoint, ''), CAST(COALESCE(started_at, created_at) AS TEXT)
+		FROM model_proxy_request_attributions
+		WHERE api_key_hash != ''
+		  AND COALESCE(started_at, created_at) >= ?
+		  AND COALESCE(started_at, created_at) <= ?
+		ORDER BY ABS(strftime('%s', COALESCE(started_at, created_at)) - strftime('%s', ?)) ASC, updated_at DESC
+		LIMIT 300
+	`, dbTime(start), dbTime(end), dbTime(usageTime))
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+
+	usageModel := stringPtrValue(normalized.Model)
+	usageEndpoint := stringPtrValue(normalized.Endpoint)
+	var best *modelProxyAttributionCandidate
+	ambiguous := false
+	for rows.Next() {
+		var candidate modelProxyAttributionCandidate
+		var matchedAtText string
+		if err := rows.Scan(&candidate.APIKeyHash, &candidate.Model, &candidate.Endpoint, &matchedAtText); err != nil {
+			return "", false, err
+		}
+		if !modelProxyAttributionModelMatches(candidate.Model, usageModel) {
+			continue
+		}
+		if !modelProxyAttributionEndpointMatches(candidate.Endpoint, usageEndpoint) {
+			continue
+		}
+		matchedAt, ok := parseDBTime(matchedAtText)
+		if !ok {
+			continue
+		}
+		candidate.MatchedAt = matchedAt
+		candidate.Distance = absDuration(matchedAt.Sub(usageTime))
+		if best == nil || candidate.Distance < best.Distance {
+			copyCandidate := candidate
+			best = &copyCandidate
+			ambiguous = false
+			continue
+		}
+		if candidate.Distance == best.Distance && candidate.APIKeyHash != best.APIKeyHash {
+			ambiguous = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if best == nil || ambiguous {
+		return "", false, nil
+	}
+	return best.APIKeyHash, true, nil
+}
+
+func modelProxyAttributionModelMatches(candidateModel, usageModel string) bool {
+	candidateModel = strings.TrimSpace(candidateModel)
+	usageModel = strings.TrimSpace(usageModel)
+	if candidateModel == "" || usageModel == "" {
+		return true
+	}
+	candidateLower := strings.ToLower(candidateModel)
+	usageLower := strings.ToLower(usageModel)
+	return candidateLower == usageLower ||
+		strings.HasPrefix(usageLower, candidateLower+" ") ||
+		strings.HasPrefix(candidateLower, usageLower+" ")
+}
+
+func modelProxyAttributionEndpointMatches(candidateEndpoint, usageEndpoint string) bool {
+	candidateEndpoint = strings.TrimSpace(candidateEndpoint)
+	usageEndpoint = strings.TrimSpace(usageEndpoint)
+	if candidateEndpoint == "" || usageEndpoint == "" {
+		return true
+	}
+	if strings.EqualFold(candidateEndpoint, usageEndpoint) {
+		return true
+	}
+	candidateMethod, candidatePath := modelProxyEndpointParts(candidateEndpoint)
+	usageMethod, usagePath := modelProxyEndpointParts(usageEndpoint)
+	if candidatePath == "" || usagePath == "" || candidatePath != usagePath {
+		return false
+	}
+	return candidateMethod == "" || usageMethod == "" || candidateMethod == usageMethod
+}
+
+func modelProxyEndpointParts(value string) (string, string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	fields := strings.Fields(value)
+	if len(fields) >= 2 && strings.HasPrefix(fields[1], "/") {
+		return strings.ToUpper(fields[0]), normalizeModelProxyEndpointPath(fields[1])
+	}
+	if strings.HasPrefix(value, "/") {
+		return "", normalizeModelProxyEndpointPath(value)
+	}
+	return "", strings.ToLower(value)
+}
+
+func normalizeModelProxyEndpointPath(value string) string {
+	value = strings.TrimSpace(value)
+	if index := strings.Index(value, "?"); index >= 0 {
+		value = value[:index]
+	}
+	return strings.ToLower(strings.TrimRight(value, "/"))
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
