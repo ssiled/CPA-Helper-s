@@ -626,6 +626,28 @@ func authPoolModelFilterAllows(filter map[string]bool, model string) bool {
 	return filter[strings.ToLower(strings.TrimSpace(model))]
 }
 
+func authPoolRequiredError() error {
+	return validationError("当前 API KEY 必须先选择请求号池")
+}
+
+func (a *App) ensureAPIKeyAuthPoolSelected(ctx context.Context, apiKeyHash string) error {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !authPoolProxyModeEnabled(cfg) {
+		return nil
+	}
+	_, bound, err := a.localAuthPoolIDForAPIKey(ctx, apiKeyHash)
+	if err != nil {
+		return err
+	}
+	if !bound {
+		return authPoolRequiredError()
+	}
+	return nil
+}
+
 func authPoolModelFilter(pool authPool) map[string]bool {
 	filter := map[string]bool{}
 	for _, model := range pool.Models {
@@ -665,8 +687,10 @@ func (a *App) authPoolModelFiltersForAPIKeys(ctx context.Context, apiKeyHashes [
 			keyPools[binding.APIKeyHash] = strings.TrimSpace(binding.PoolID)
 		}
 	}
-	if len(keyPools) == 0 {
-		return filters, nil
+	for apiKeyHash := range requested {
+		if strings.TrimSpace(keyPools[apiKeyHash]) == "" {
+			return nil, authPoolRequiredError()
+		}
 	}
 	var status authPoolStatus
 	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
@@ -697,8 +721,11 @@ func (a *App) ensureAPIKeyModelAllowedByPool(ctx context.Context, apiKeyHash str
 		return nil
 	}
 	poolID, bound, err := a.localAuthPoolIDForAPIKey(ctx, apiKeyHash)
-	if err != nil || !bound {
+	if err != nil {
 		return err
+	}
+	if !bound {
+		return authPoolRequiredError()
 	}
 	var status authPoolStatus
 	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {

@@ -618,10 +618,10 @@ function renderAuthPoolSelector(row: UserApiKeySummary) {
     class: 'api-key-pool-select',
     value: currentPoolIDForKey(row.api_key_hash),
     options: authPoolOptions.value,
-    clearable: true,
+    clearable: false,
     filterable: true,
     size: 'small',
-    placeholder: t('\u9ed8\u8ba4\u8c03\u5ea6', 'Default scheduling'),
+    placeholder: t('\u8bf7\u9009\u62e9\u8bf7\u6c42\u53f7\u6c60', 'Select an auth pool'),
     disabled: saving,
     loading: saving,
     onUpdateValue: (value: string | null) => updateApiKeyAuthPool(row, value),
@@ -676,6 +676,11 @@ async function saveApiKey() {
     message.error(t('API KEY 描述不能为空', 'API key description is required'))
     return
   }
+
+  if (!selectedPoolID.value) {
+    message.error(t('\u8bf7\u9009\u62e9\u8bf7\u6c42\u53f7\u6c60', 'Select an auth pool'))
+    return
+  }
   isSaving.value = true
   try {
     let savedApiKeyHash = editingApiKeyHash.value
@@ -694,11 +699,7 @@ async function saveApiKey() {
       message.success(t('API 密钥已创建并同步到 CPA', 'API key created and synced to CPA'))
     }
     if (savedApiKeyHash) {
-      if (selectedPoolID.value) {
-        await bindApiKeyToAuthPool({ api_key_hash: savedApiKeyHash, pool_id: selectedPoolID.value })
-      } else if (authPoolIDByApiKeyHash.value.has(savedApiKeyHash)) {
-        await unbindApiKeyFromAuthPool(savedApiKeyHash)
-      }
+      await bindApiKeyToAuthPool({ api_key_hash: savedApiKeyHash, pool_id: selectedPoolID.value })
     }
     editorVisible.value = false
     editingApiKeyHash.value = null
@@ -909,11 +910,10 @@ onMounted(refresh)
         <NFormItem :label="t('请求号池', 'Auth pool')">
           <NSelect
             v-model:value="selectedPoolID"
-            clearable
             filterable
             :options="authPoolOptions"
             :disabled="isSaving || authPoolOptions.length === 0"
-            :placeholder="t('不选择则使用 CPA 默认调度', 'Leave empty to use CPA default scheduling')"
+            :placeholder="t('\u8bf7\u9009\u62e9\u8bf7\u6c42\u53f7\u6c60', 'Select an auth pool')"
           />
         </NFormItem>
         <div class="modal-actions">

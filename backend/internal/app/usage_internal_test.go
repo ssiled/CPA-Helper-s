@@ -61,3 +61,32 @@ func TestSaveUsageMessageIgnoresZeroTTFT(t *testing.T) {
 		t.Fatalf("stored ttft_ms = %v, want NULL", ttftMS.Float64)
 	}
 }
+
+func TestSaveUsageMessageUsesModelProxyRequestAttribution(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	ctx := context.Background()
+	apiKey := "sk-user-attribution"
+	userID := seedQuotaTestUser(t, app, "member")
+	seedQuotaTestAPIKey(t, app, userID, apiKey)
+	if err := app.recordModelProxyRequestAttributions(ctx, hashAPIKey(apiKey), "req-proxy-attribution"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := `{"api_key":"sk-forwarding-proxy","provider":"codex","model":"gpt-5.5","request_id":"req-proxy-attribution","input_tokens":10,"output_tokens":2}`
+	record, created, err := app.saveUsageMessage(ctx, []byte(raw))
+	if err != nil || !created {
+		t.Fatalf("saveUsageMessage created=%v err=%v", created, err)
+	}
+	if record.UsageUsername == nil || *record.UsageUsername != "member" {
+		t.Fatalf("usage_username = %#v, want member", record.UsageUsername)
+	}
+	if record.APIKeyDescription == nil || *record.APIKeyDescription != "VSCode" {
+		t.Fatalf("api_key_description = %#v, want VSCode", record.APIKeyDescription)
+	}
+}

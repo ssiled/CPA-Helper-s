@@ -36,6 +36,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testColumnExists(t, app.db, "usage_records", "ttft_ms") {
 		t.Fatal("usage_records.ttft_ms was not created")
 	}
+	if !testTableExists(t, app.db, "model_proxy_request_attributions") {
+		t.Fatal("model_proxy_request_attributions was not created")
+	}
 	if !testColumnExists(t, app.db, "model_prices", "cache_read_usd_per_million") {
 		t.Fatal("model_prices.cache_read_usd_per_million was not created")
 	}

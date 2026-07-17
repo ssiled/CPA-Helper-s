@@ -14,6 +14,14 @@ type apiKeyCreateResponse struct {
 	APIKeyHash string `json:"api_key_hash"`
 }
 
+func bindTestAPIKeyToAuthPool(t *testing.T, handler http.Handler, cookies []*http.Cookie, apiKeyHash string) {
+	t.Helper()
+	requestJSON(t, handler, http.MethodPost, "/api/auth-pools/bindings", map[string]any{
+		"api_key_hash": apiKeyHash,
+		"pool_id":      "test",
+	}, cookies, nil)
+}
+
 func TestListAPIKeysReturnsEmptyArrayForFreshAccount(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 
@@ -170,6 +178,10 @@ func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 		switch {
 		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{"id": "test", "name": "Test", "enabled": true, "models": []string{"gpt-test"}}}})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": map[string]any{"api_key_hash": expectedHash, "pool_id": "test"}})
 		case r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost:
 			chatCalls++
 			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
@@ -238,6 +250,7 @@ func TestAccountModelRequestTestUsesCurrentUserAPIKey(t *testing.T) {
 		"description": "VSCode",
 	}, cookies, &created)
 	expectedHash = created.APIKeyHash
+	bindTestAPIKeyToAuthPool(t, handler, cookies, created.APIKeyHash)
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -278,6 +291,10 @@ func TestAccountModelRequestTestSupportsResponsesEndpoint(t *testing.T) {
 		switch {
 		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{"id": "test", "name": "Test", "enabled": true, "models": []string{"gpt-response-test"}}}})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": map[string]any{"api_key_hash": expectedHash, "pool_id": "test"}})
 		case r.URL.Path == "/v1/responses" && r.Method == http.MethodPost:
 			responsesCalls++
 			if got := r.Header.Get("Authorization"); got != "Bearer "+proxyKey {
@@ -341,6 +358,7 @@ func TestAccountModelRequestTestSupportsResponsesEndpoint(t *testing.T) {
 		"description": "VSCode",
 	}, cookies, &created)
 	expectedHash = created.APIKeyHash
+	bindTestAPIKeyToAuthPool(t, handler, cookies, created.APIKeyHash)
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -378,6 +396,10 @@ func TestAccountModelRequestTestSupportsClaudeMessagesEndpoint(t *testing.T) {
 		switch {
 		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
 			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{"id": "test", "name": "Test", "enabled": true, "models": []string{"claude-test"}}}})
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": map[string]any{"api_key_hash": expectedHash, "pool_id": "test"}})
 		case r.URL.Path == "/v1/messages" && r.Method == http.MethodPost:
 			claudeCalls++
 			if got := r.Header.Get("x-api-key"); got != proxyKey {
@@ -449,6 +471,7 @@ func TestAccountModelRequestTestSupportsClaudeMessagesEndpoint(t *testing.T) {
 		"description": "VSCode",
 	}, cookies, &created)
 	expectedHash = created.APIKeyHash
+	bindTestAPIKeyToAuthPool(t, handler, cookies, created.APIKeyHash)
 
 	var result struct {
 		Endpoint   string         `json:"endpoint"`
@@ -621,6 +644,66 @@ func TestCreateGeneratedAPIKeyDoesNotSyncToCPAInAuthPoolProxyMode(t *testing.T) 
 	}
 	if remoteCalls != 0 {
 		t.Fatalf("CPA api-key sync calls = %d, want 0", remoteCalls)
+	}
+}
+
+func TestModelProxyRequiresAuthPoolBinding(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	cpaCalls := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"proxy_key_count": 1})
+		case r.URL.Path == "/v1/models" || r.URL.Path == "/v1/chat/completions":
+			cpaCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{{"id": "gpt-test"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "pass1234",
+		"nickname": "Admin",
+	}, nil, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
+		"cliaproxy_url":     cpa.URL,
+		"management_key":    "mgmt-secret",
+		"collector_enabled": false,
+	}, cookies, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/auth-pools/proxy-config", map[string]any{
+		"api_key": "sk-cpa-proxy",
+	}, cookies, nil)
+
+	created := apiKeyCreateResponse{}
+	requestJSON(t, handler, http.MethodPost, "/api/api-keys", map[string]any{"description": "Proxy key"}, cookies, &created)
+
+	requestJSONExpectStatus(t, handler, http.MethodPost, "/api/account/model-request/test", map[string]any{
+		"api_key_hash": created.APIKeyHash,
+		"model":        "gpt-test",
+		"message":      "ping",
+	}, cookies, http.StatusUnprocessableEntity)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer "+created.APIKey)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("GET /v1/models returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if cpaCalls != 0 {
+		t.Fatalf("CPA calls = %d, want 0 before auth pool binding", cpaCalls)
 	}
 }
 

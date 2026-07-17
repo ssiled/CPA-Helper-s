@@ -1256,7 +1256,11 @@ func (a *App) saveUsageMessage(ctx context.Context, raw []byte) (UsageRecord, bo
 	if err != nil {
 		return UsageRecord{}, false, err
 	}
-	usageUsername, description, err := a.usageOwnerSnapshot(ctx, normalized.APIKeyHash)
+	ownerAPIKeyHash, err := a.usageOwnerAPIKeyHash(ctx, normalized)
+	if err != nil {
+		return UsageRecord{}, false, err
+	}
+	usageUsername, description, err := a.usageOwnerSnapshot(ctx, ownerAPIKeyHash)
 	if err != nil {
 		return UsageRecord{}, false, err
 	}

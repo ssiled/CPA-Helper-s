@@ -95,6 +95,9 @@ func (a *App) ensureAPIKeyUserActive(ctx context.Context, userID int) error {
 }
 
 func (a *App) handleModelProxyModels(w http.ResponseWriter, r *http.Request, apiKey UserAPIKey) error {
+	if err := a.ensureAPIKeyAuthPoolSelected(r.Context(), apiKey.APIKeyHash); err != nil {
+		return err
+	}
 	cfg, err := a.loadConfig(r.Context())
 	if err != nil {
 		return err
@@ -154,6 +157,9 @@ func filterRawModelItems(payload []byte, filter map[string]bool) ([]any, error) 
 }
 
 func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, apiKey UserAPIKey) error {
+	if err := a.ensureAPIKeyAuthPoolSelected(r.Context(), apiKey.APIKeyHash); err != nil {
+		return err
+	}
 	body, err := readLimitedProxyBody(r)
 	if err != nil {
 		return validationError("Request body too large")
@@ -177,11 +183,30 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 		return err
 	}
 	request.Header = modelProxyRequestHeaders(r, upstreamAPIKey, apiKey.APIKeyHash, useProxyHeader)
+	requestID := newModelProxyRequestID()
+	request.Header.Set("X-Request-Id", requestID)
+	request.Header.Set("X-CPA-Helper-Request-Id", requestID)
 	response, err := httpClient(0).Do(request)
 	if err != nil {
 		return validationError("CPA request failed: " + err.Error())
 	}
 	defer response.Body.Close()
+	if shouldBufferModelProxyResponse(response) {
+		payload, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+		responseRequestID := modelProxyRequestIDFromResponse(response, payload)
+		if err := a.recordModelProxyRequestAttributions(r.Context(), apiKey.APIKeyHash, requestID, responseRequestID); err != nil {
+			return err
+		}
+		writeRawProxyResponse(w, response, payload)
+		return nil
+	}
+	responseRequestID := modelProxyRequestIDFromResponse(response, nil)
+	if err := a.recordModelProxyRequestAttributions(r.Context(), apiKey.APIKeyHash, requestID, responseRequestID); err != nil {
+		return err
+	}
 	copyProxyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
@@ -254,6 +279,20 @@ func modelProxyRequestHeaders(r *http.Request, apiKey string, apiKeyHash string,
 	}
 	headers.Set("Authorization", "Bearer "+apiKey)
 	return headers
+}
+
+func shouldBufferModelProxyResponse(response *http.Response) bool {
+	if response == nil {
+		return false
+	}
+	contentType := strings.ToLower(response.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/event-stream") {
+		return false
+	}
+	if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "+json") {
+		return response.ContentLength < 0 || response.ContentLength <= modelProxyBodyLimit
+	}
+	return false
 }
 
 func copyProxyHeaders(target, source http.Header) {
