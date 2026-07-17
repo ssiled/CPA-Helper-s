@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestAuthPoolPathParts(t *testing.T) {
@@ -30,6 +32,85 @@ func TestAuthPoolPathParts(t *testing.T) {
 				t.Fatalf("authPoolPathParts(%q) = %#v, want %#v", test.path, got, test.want)
 			}
 		})
+	}
+}
+
+func TestAuthPoolStatusRestoresLocalPoolsWhenPluginStateIsEmpty(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	postCount := 0
+	bindingPostCount := 0
+	restoredPools := []authPool{}
+	restoredBindings := []authPoolBinding{}
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": restoredPools, "bindings": restoredBindings})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/pools":
+			postCount++
+			var pool authPool
+			if err := json.NewDecoder(r.Body).Decode(&pool); err != nil {
+				t.Fatalf("decode pool: %v", err)
+			}
+			restoredPools = append(restoredPools, pool)
+			_ = json.NewEncoder(w).Encode(map[string]any{"pool": pool})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/bindings":
+			bindingPostCount++
+			var binding authPoolBinding
+			if err := json.NewDecoder(r.Body).Decode(&binding); err != nil {
+				t.Fatalf("decode binding: %v", err)
+			}
+			restoredBindings = append(restoredBindings, binding)
+			_ = json.NewEncoder(w).Encode(map[string]any{"binding": binding})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	seed := authPool{ID: "plus", Name: "Plus", Description: "plus pool", AuthIDs: []string{"auth-a"}, AccountTypes: []string{"plus"}, Models: []string{"gpt-5.5 xhigh"}, Enabled: true}
+	if err := app.saveLocalAuthPool(context.Background(), seed); err != nil {
+		t.Fatalf("save local pool: %v", err)
+	}
+	now := dbTime(time.Now())
+	apiKeyHash := hashAPIKey("sk-local")
+	if _, err := app.db.Exec(`
+		INSERT INTO users (id, username, is_admin, created_at, updated_at) VALUES (10, 'pool-user', 0, ?, ?)
+	`, now, now); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := app.db.Exec(`
+		INSERT INTO user_api_keys (api_key_hash, user_id, api_key, description, created_at, updated_at) VALUES (?, 10, 'sk-local', 'local', ?, ?)
+	`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("insert api key: %v", err)
+	}
+	if _, err := app.db.Exec(`
+		INSERT INTO user_api_key_pools (api_key_hash, pool_id, created_at, updated_at) VALUES (?, 'plus', ?, ?)
+	`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("insert api key pool: %v", err)
+	}
+
+	status, err := app.authPoolStatus(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("authPoolStatus failed: %v", err)
+	}
+	if postCount != 1 {
+		t.Fatalf("restore posts = %d, want 1", postCount)
+	}
+	if bindingPostCount != 1 {
+		t.Fatalf("binding restore posts = %d, want 1", bindingPostCount)
+	}
+	if len(status.Pools) != 1 || status.Pools[0].ID != seed.ID || status.Pools[0].Models[0] != seed.Models[0] {
+		t.Fatalf("status pools = %#v, want restored seed", status.Pools)
+	}
+	if len(restoredBindings) != 1 || restoredBindings[0].APIKeyHash != apiKeyHash || restoredBindings[0].PoolID != seed.ID {
+		t.Fatalf("restored bindings = %#v, want local api key binding", restoredBindings)
 	}
 }
 

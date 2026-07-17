@@ -87,6 +87,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testTableExists(t, app.db, "user_card_shop_tags") {
 		t.Fatal("user_card_shop_tags was not created")
 	}
+	if !testTableExists(t, app.db, "auth_pools") {
+		t.Fatal("auth_pools was not created")
+	}
 	if !testColumnExists(t, app.db, "user_quota_charges", "lifetime_deducted_usd") {
 		t.Fatal("user_quota_charges.lifetime_deducted_usd was not created")
 	}

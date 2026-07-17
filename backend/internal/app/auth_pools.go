@@ -245,6 +245,50 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 		return status, nil
 	}
 	status.PluginInstalled = true
+	localBindings, err := a.localAuthPoolBindings(ctx, nil)
+	if err != nil {
+		return authPoolStatus{}, err
+	}
+	localPools, err := a.localAuthPools(ctx)
+	if err != nil {
+		return authPoolStatus{}, err
+	}
+	restoredPluginState := false
+	if len(status.Pools) == 0 && len(localPools) > 0 {
+		if err := a.restoreLocalAuthPoolsToPlugin(ctx, localPools); err != nil {
+			status.PluginError = err.Error()
+			status.Pools = localPools
+		} else {
+			restoredPluginState = true
+		}
+	}
+	if len(status.Bindings) == 0 && len(localBindings) > 0 {
+		if err := a.restoreLocalAuthPoolBindingsToPlugin(ctx, localBindings); err != nil {
+			if status.PluginError == "" {
+				status.PluginError = err.Error()
+			}
+			status.Bindings = localBindings
+		} else {
+			restoredPluginState = true
+		}
+	}
+	if restoredPluginState {
+		var restored authPoolStatus
+		if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &restored); err == nil {
+			status = restored
+			status.PluginInstalled = true
+		} else if status.PluginError == "" {
+			status.Pools = localPools
+			status.Bindings = localBindings
+			status.PluginError = err.Error()
+		}
+	}
+	if len(status.Pools) > 0 {
+		_ = a.saveLocalAuthPools(ctx, status.Pools)
+	}
+	if len(status.Bindings) > 0 {
+		_ = a.saveLocalAuthPoolBindings(ctx, status.Bindings)
+	}
 	if authPoolsNeedModelSync(status.Pools) {
 		go func() {
 			syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -252,7 +296,7 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 			_ = a.syncAuthPoolModels(syncCtx)
 		}()
 	}
-	localBindings, err := a.localAuthPoolBindings(ctx, user)
+	localBindings, err = a.localAuthPoolBindings(ctx, user)
 	if err != nil {
 		return authPoolStatus{}, err
 	}
@@ -273,6 +317,9 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	if err := a.saveLocalAuthPool(ctx, response.Pool); err != nil {
+		return authPool{}, err
+	}
 	_ = a.syncAuthPoolModels(ctx)
 	a.refreshChannelStatusAfterChange()
 	return response.Pool, nil
@@ -284,10 +331,161 @@ func (a *App) deleteAuthPool(ctx context.Context, id string) error {
 	}
 	_, err := a.db.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE pool_id = ?`, id)
 	if err == nil {
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM auth_pools WHERE id = ?`, id)
 		_ = a.syncAuthPoolModels(ctx)
 		a.refreshChannelStatusAfterChange()
 	}
 	return err
+}
+
+func (a *App) saveLocalAuthPools(ctx context.Context, pools []authPool) error {
+	for _, pool := range pools {
+		if err := a.saveLocalAuthPool(ctx, pool); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
+	pool.ID = strings.TrimSpace(pool.ID)
+	pool.Name = strings.TrimSpace(pool.Name)
+	if pool.ID == "" || pool.Name == "" {
+		return nil
+	}
+	authIDsJSON, err := marshalStringList(pool.AuthIDs)
+	if err != nil {
+		return err
+	}
+	accountTypesJSON, err := marshalStringList(pool.AccountTypes)
+	if err != nil {
+		return err
+	}
+	modelsJSON, err := marshalStringList(pool.Models)
+	if err != nil {
+		return err
+	}
+	now := dbTime(time.Now())
+	_, err = a.db.ExecContext(ctx, `
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, account_types_json, models_json, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			description = excluded.description,
+			auth_ids_json = excluded.auth_ids_json,
+			account_types_json = excluded.account_types_json,
+			models_json = excluded.models_json,
+			enabled = excluded.enabled,
+			updated_at = excluded.updated_at
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, accountTypesJSON, modelsJSON, pool.Enabled, now, now)
+	return err
+}
+
+func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, account_types_json, models_json, enabled
+		FROM auth_pools
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pools := []authPool{}
+	for rows.Next() {
+		var pool authPool
+		var authIDsJSON, accountTypesJSON, modelsJSON string
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Enabled); err != nil {
+			return nil, err
+		}
+		pool.AuthIDs = unmarshalStringList(authIDsJSON)
+		pool.AccountTypes = unmarshalStringList(accountTypesJSON)
+		pool.Models = unmarshalStringList(modelsJSON)
+		pools = append(pools, pool)
+	}
+	return pools, rows.Err()
+}
+
+func (a *App) restoreLocalAuthPoolsToPlugin(ctx context.Context, pools []authPool) error {
+	for _, pool := range pools {
+		if strings.TrimSpace(pool.ID) == "" || strings.TrimSpace(pool.Name) == "" {
+			continue
+		}
+		var response struct {
+			Pool authPool `json:"pool"`
+		}
+		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) restoreLocalAuthPoolBindingsToPlugin(ctx context.Context, bindings []authPoolBinding) error {
+	for _, binding := range bindings {
+		binding.APIKeyHash = strings.TrimSpace(binding.APIKeyHash)
+		binding.PoolID = strings.TrimSpace(binding.PoolID)
+		if binding.APIKeyHash == "" || binding.PoolID == "" {
+			continue
+		}
+		var response struct {
+			Binding authPoolBinding `json:"binding"`
+		}
+		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/bindings", binding, &response); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) saveLocalAuthPoolBindings(ctx context.Context, bindings []authPoolBinding) error {
+	now := dbTime(time.Now())
+	for _, binding := range bindings {
+		apiKeyHash := strings.TrimSpace(binding.APIKeyHash)
+		poolID := strings.TrimSpace(binding.PoolID)
+		if apiKeyHash == "" || poolID == "" {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `
+			INSERT INTO user_api_key_pools (api_key_hash, pool_id, created_at, updated_at)
+			SELECT ?, ?, ?, ?
+			WHERE EXISTS (SELECT 1 FROM user_api_keys WHERE api_key_hash = ?)
+			ON CONFLICT(api_key_hash) DO UPDATE SET pool_id = excluded.pool_id, updated_at = excluded.updated_at
+		`, apiKeyHash, poolID, now, now, apiKeyHash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func marshalStringList(values []string) (string, error) {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	raw, err := json.Marshal(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func unmarshalStringList(raw string) []string {
+	values := []string{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &values); err != nil {
+		return []string{}
+	}
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	return cleaned
 }
 
 func (a *App) authPoolProxyConfig(ctx context.Context) (authPoolProxyConfigResponse, error) {
