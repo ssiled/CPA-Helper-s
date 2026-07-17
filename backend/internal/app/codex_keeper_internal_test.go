@@ -46,6 +46,7 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	modelsCalls := 0
 	apiCalls := 0
+	creditsCalls := 0
 	disabledPatches := []string{}
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -64,6 +65,26 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "gemini-3.5-flash"}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
 			apiCalls++
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if payload["url"] == "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+				creditsCalls++
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status_code": 200,
+					"body": map[string]any{
+						"paidTier": map[string]any{
+							"id": "tier-1",
+							"availableCredits": []map[string]any{
+								{"creditType": "GOOGLE_ONE_AI", "creditAmount": "25000", "minimumCreditAmountForUsage": "50"},
+							},
+						},
+					},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status_code": 403,
 				"body":        map[string]any{"error": map[string]any{"message": "permission denied"}},
@@ -107,8 +128,8 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	if modelsCalls != 1 {
 		t.Fatalf("models calls = %d, want 1", modelsCalls)
 	}
-	if apiCalls != 0 {
-		t.Fatalf("api-call count = %d, want 0 because CPA models probe succeeded", apiCalls)
+	if apiCalls != 1 || creditsCalls != 1 {
+		t.Fatalf("api-call/credits calls = %d/%d, want one credits probe and no external provider probe", apiCalls, creditsCalls)
 	}
 	if len(disabledPatches) != 0 {
 		t.Fatalf("disabled patches = %#v, want none", disabledPatches)
@@ -119,6 +140,15 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	}
 	if state.LastStatusCode == nil || *state.LastStatusCode != http.StatusOK {
 		t.Fatalf("last_status_code = %v, want 200", state.LastStatusCode)
+	}
+	if state.CreditsAmount == nil || *state.CreditsAmount != 25000 {
+		t.Fatalf("credits_amount = %v, want 25000", state.CreditsAmount)
+	}
+	if state.CreditsMinimumAmount == nil || *state.CreditsMinimumAmount != 50 {
+		t.Fatalf("credits_minimum_amount = %v, want 50", state.CreditsMinimumAmount)
+	}
+	if state.CreditsTierID == nil || *state.CreditsTierID != "tier-1" {
+		t.Fatalf("credits_tier_id = %v, want tier-1", state.CreditsTierID)
 	}
 }
 

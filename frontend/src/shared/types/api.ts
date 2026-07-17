@@ -351,6 +351,9 @@ export interface CodexKeeperAccount {
   priority: number | null
   primary_used_percent: number | null
   secondary_used_percent: number | null
+  credits_amount: number | null
+  credits_minimum_amount: number | null
+  credits_tier_id: string | null
   primary_reset_at: string | null
   secondary_reset_at: string | null
   primary_window_seconds: number | null

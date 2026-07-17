@@ -120,6 +120,9 @@ type keeperAccount struct {
 	Priority               *int       `json:"priority"`
 	PrimaryUsedPercent     *int       `json:"primary_used_percent"`
 	SecondaryUsedPercent   *int       `json:"secondary_used_percent"`
+	CreditsAmount          *float64   `json:"credits_amount"`
+	CreditsMinimumAmount   *float64   `json:"credits_minimum_amount"`
+	CreditsTierID          *string    `json:"credits_tier_id"`
 	PrimaryResetAt         *time.Time `json:"primary_reset_at"`
 	SecondaryResetAt       *time.Time `json:"secondary_reset_at"`
 	PrimaryWindowSeconds   *int       `json:"primary_window_seconds"`
@@ -140,6 +143,9 @@ type keeperAccountResponse struct {
 	Priority               *int                            `json:"priority"`
 	PrimaryUsedPercent     *int                            `json:"primary_used_percent"`
 	SecondaryUsedPercent   *int                            `json:"secondary_used_percent"`
+	CreditsAmount          *float64                        `json:"credits_amount"`
+	CreditsMinimumAmount   *float64                        `json:"credits_minimum_amount"`
+	CreditsTierID          *string                         `json:"credits_tier_id"`
 	PrimaryResetAt         *string                         `json:"primary_reset_at"`
 	SecondaryResetAt       *string                         `json:"secondary_reset_at"`
 	PrimaryWindowSeconds   *int                            `json:"primary_window_seconds"`
@@ -240,6 +246,9 @@ type keeperAccountResult struct {
 	Disabled               *bool
 	PrimaryUsedPercent     *int
 	SecondaryUsedPercent   *int
+	CreditsAmount          *float64
+	CreditsMinimumAmount   *float64
+	CreditsTierID          *string
 	PrimaryResetAt         *time.Time
 	SecondaryResetAt       *time.Time
 	PrimaryWindowSeconds   *int
@@ -1048,6 +1057,9 @@ func keeperAccountResponses(accounts []keeperAccount, windowUsages map[string]ke
 			Priority:               keeperDisplayPriority(account.Priority),
 			PrimaryUsedPercent:     account.PrimaryUsedPercent,
 			SecondaryUsedPercent:   account.SecondaryUsedPercent,
+			CreditsAmount:          account.CreditsAmount,
+			CreditsMinimumAmount:   account.CreditsMinimumAmount,
+			CreditsTierID:          account.CreditsTierID,
 			PrimaryResetAt:         apiDateTimePtr(account.PrimaryResetAt),
 			SecondaryResetAt:       apiDateTimePtr(account.SecondaryResetAt),
 			PrimaryWindowSeconds:   account.PrimaryWindowSeconds,
@@ -2563,6 +2575,11 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, provider string, detail map[string]any, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
 	if provider == "antigravity" {
 		if probe := a.checkKeeperProviderViaCPAModels(ctx, cfg, result.Name); probe.StatusCode != nil {
+			if credits := a.checkKeeperAntigravityCredits(ctx, cfg, detail); credits.Known {
+				result.CreditsAmount = &credits.CreditAmount
+				result.CreditsMinimumAmount = &credits.MinCreditAmount
+				result.CreditsTierID = stringPtrIfNotBlank(credits.PaidTierID)
+			}
 			return a.applyKeeperProviderProbeResult(ctx, cfg, provider, probe, result, disabled, logFn)
 		}
 	}
@@ -2577,6 +2594,69 @@ func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, prov
 		return result
 	}
 	return a.applyKeeperProviderProbeResult(ctx, cfg, provider, probe, result, disabled, logFn)
+}
+
+type keeperAntigravityCreditsInfo struct {
+	Known           bool
+	CreditAmount    float64
+	MinCreditAmount float64
+	PaidTierID      string
+}
+
+func (a *App) checkKeeperAntigravityCredits(ctx context.Context, cfg AppConfig, detail map[string]any) keeperAntigravityCreditsInfo {
+	body := map[string]any{
+		"auth_index": keeperAuthIndex(detail),
+		"method":     http.MethodPost,
+		"url":        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+			"Accept":        "*/*",
+			"Content-Type":  "application/json",
+			"User-Agent":    "antigravity/1.0",
+		},
+		"data": `{"metadata":{"ideType":"ANTIGRAVITY"}}`,
+	}
+	response, payload, err := a.keeperRequest(ctx, cfg, http.MethodPost, "/v0/management/api-call", nil, body, time.Duration(cfg.CodexKeeper.UsageTimeoutSeconds)*time.Second)
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return keeperAntigravityCreditsInfo{}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return keeperAntigravityCreditsInfo{}
+	}
+	statusCode := keeperIntPtr(raw["status_code"], raw["statusCode"])
+	if statusCode == nil || *statusCode < 200 || *statusCode >= 300 {
+		return keeperAntigravityCreditsInfo{}
+	}
+	return parseKeeperAntigravityCredits(keeperBodyJSON(raw["body"]))
+}
+
+func parseKeeperAntigravityCredits(payload map[string]any) keeperAntigravityCreditsInfo {
+	if payload == nil {
+		return keeperAntigravityCreditsInfo{}
+	}
+	paidTier, _ := payload["paidTier"].(map[string]any)
+	result := keeperAntigravityCreditsInfo{
+		Known:      true,
+		PaidTierID: keeperString(paidTier["id"]),
+	}
+	if paidTier == nil {
+		return result
+	}
+	for _, credit := range keeperObjectSlice(paidTier["availableCredits"]) {
+		if !strings.EqualFold(keeperString(credit["creditType"]), "GOOGLE_ONE_AI") {
+			continue
+		}
+		amount, okAmount := keeperFloat64(credit["creditAmount"])
+		minimum, okMinimum := keeperFloat64(credit["minimumCreditAmountForUsage"])
+		if !okAmount || !okMinimum {
+			continue
+		}
+		result.CreditAmount = amount
+		result.MinCreditAmount = minimum
+		return result
+	}
+	return result
 }
 
 func (a *App) applyKeeperProviderProbeResult(ctx context.Context, cfg AppConfig, provider string, probe keeperHTTPResult, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
@@ -3222,7 +3302,8 @@ func (a *App) listKeeperAccounts(ctx context.Context) ([]keeperAccount, error) {
 		SELECT auth_name, email, auth_index, account_type, disabled, priority, primary_used_percent,
 		       secondary_used_percent, CAST(primary_reset_at AS TEXT), CAST(secondary_reset_at AS TEXT), quota_threshold,
 		       last_status_code, last_error, latest_action, CAST(last_checked_at AS TEXT), CAST(last_healthy_at AS TEXT),
-		       primary_window_seconds, secondary_window_seconds, restore_priority, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
+		       primary_window_seconds, secondary_window_seconds, restore_priority, credits_amount, credits_minimum_amount,
+		       credits_tier_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
 		FROM codex_keeper_auth_states
 		ORDER BY COALESCE(email, ''), auth_name
 	`)
@@ -3296,7 +3377,8 @@ func (a *App) getKeeperState(ctx context.Context, name string) (*keeperAuthState
 		SELECT auth_name, email, auth_index, account_type, disabled, priority, primary_used_percent,
 		       secondary_used_percent, CAST(primary_reset_at AS TEXT), CAST(secondary_reset_at AS TEXT), quota_threshold,
 		       last_status_code, last_error, latest_action, CAST(last_checked_at AS TEXT), CAST(last_healthy_at AS TEXT),
-		       primary_window_seconds, secondary_window_seconds, restore_priority, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
+		       primary_window_seconds, secondary_window_seconds, restore_priority, credits_amount, credits_minimum_amount,
+		       credits_tier_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
 		FROM codex_keeper_auth_states WHERE auth_name = ?
 	`, name)
 	if err != nil {
@@ -3315,13 +3397,14 @@ func (a *App) getKeeperState(ctx context.Context, name string) (*keeperAuthState
 
 func scanKeeperState(scanner interface{ Scan(dest ...any) error }) (keeperAuthState, error) {
 	var state keeperAuthState
-	var email, authIndex, accountType, primaryReset, secondaryReset, lastError, latestAction, lastChecked, lastHealthy, createdAt, updatedAt sql.NullString
+	var email, authIndex, accountType, primaryReset, secondaryReset, lastError, latestAction, lastChecked, lastHealthy, creditsTierID, createdAt, updatedAt sql.NullString
 	var priority, primaryUsed, secondaryUsed, quotaThreshold, lastStatus, primaryWindowSeconds, secondaryWindowSeconds, restorePriority sql.NullInt64
+	var creditsAmount, creditsMinimumAmount sql.NullFloat64
 	err := scanner.Scan(
 		&state.Name, &email, &authIndex, &accountType, &state.Disabled, &priority, &primaryUsed,
 		&secondaryUsed, &primaryReset, &secondaryReset, &quotaThreshold, &lastStatus,
 		&lastError, &latestAction, &lastChecked, &lastHealthy, &primaryWindowSeconds, &secondaryWindowSeconds, &restorePriority,
-		&createdAt, &updatedAt,
+		&creditsAmount, &creditsMinimumAmount, &creditsTierID, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return keeperAuthState{}, err
@@ -3336,6 +3419,9 @@ func scanKeeperState(scanner interface{ Scan(dest ...any) error }) (keeperAuthSt
 	state.SecondaryResetAt = timePtr(secondaryReset)
 	state.PrimaryWindowSeconds = nullableInt(primaryWindowSeconds)
 	state.SecondaryWindowSeconds = nullableInt(secondaryWindowSeconds)
+	state.CreditsAmount = nullableFloat(creditsAmount)
+	state.CreditsMinimumAmount = nullableFloat(creditsMinimumAmount)
+	state.CreditsTierID = nullableString(creditsTierID)
 	state.QuotaThreshold = nullableInt(quotaThreshold)
 	state.LastStatusCode = nullableInt(lastStatus)
 	state.LastError = nullableString(lastError)
@@ -3364,8 +3450,9 @@ func (a *App) upsertKeeperState(ctx context.Context, result keeperAccountResult)
 			auth_name, email, auth_index, account_type, disabled, priority, restore_priority, latest_action, last_error,
 			last_status_code, primary_used_percent, secondary_used_percent, quota_threshold,
 			primary_reset_at, secondary_reset_at, primary_window_seconds, secondary_window_seconds,
+			credits_amount, credits_minimum_amount, credits_tier_id,
 			last_checked_at, last_healthy_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(auth_name) DO UPDATE SET
 			email = excluded.email,
 			auth_index = excluded.auth_index,
@@ -3387,10 +3474,13 @@ func (a *App) upsertKeeperState(ctx context.Context, result keeperAccountResult)
 			secondary_reset_at = excluded.secondary_reset_at,
 			primary_window_seconds = excluded.primary_window_seconds,
 			secondary_window_seconds = excluded.secondary_window_seconds,
+			credits_amount = excluded.credits_amount,
+			credits_minimum_amount = excluded.credits_minimum_amount,
+			credits_tier_id = excluded.credits_tier_id,
 			last_checked_at = excluded.last_checked_at,
 			last_healthy_at = COALESCE(excluded.last_healthy_at, codex_keeper_auth_states.last_healthy_at),
 			updated_at = excluded.updated_at
-	`, result.Name, result.Email, result.AuthIndex, result.AccountType, boolValue(result.Disabled), result.Priority, result.RestorePriority, result.LatestAction, result.LastError, result.LastStatusCode, result.PrimaryUsedPercent, result.SecondaryUsedPercent, result.QuotaThreshold, dbTimePtr(result.PrimaryResetAt), dbTimePtr(result.SecondaryResetAt), result.PrimaryWindowSeconds, result.SecondaryWindowSeconds, checkedAt, lastHealthy, now, now, result.ClearRestorePriority)
+	`, result.Name, result.Email, result.AuthIndex, result.AccountType, boolValue(result.Disabled), result.Priority, result.RestorePriority, result.LatestAction, result.LastError, result.LastStatusCode, result.PrimaryUsedPercent, result.SecondaryUsedPercent, result.QuotaThreshold, dbTimePtr(result.PrimaryResetAt), dbTimePtr(result.SecondaryResetAt), result.PrimaryWindowSeconds, result.SecondaryWindowSeconds, result.CreditsAmount, result.CreditsMinimumAmount, result.CreditsTierID, checkedAt, lastHealthy, now, now, result.ClearRestorePriority)
 	return err
 }
 
@@ -3743,14 +3833,17 @@ func keeperAccountTypeForProvider(provider string, detail map[string]any, usage 
 
 func keeperAccountFromRemoteAuthFile(item map[string]any, provider string) keeperAccount {
 	return keeperAccount{
-		Name:           firstKeeperString(item, "name", "file_name", "filename", "id", "path"),
-		Email:          keeperStringPtr(item["email"], item["account_email"], item["user_email"], item["username"], item["subject"]),
-		AuthIndex:      keeperRemoteAuthIndex(item),
-		AccountType:    keeperAccountTypeForProvider(provider, item, nil),
-		Disabled:       keeperBool(item["disabled"]),
-		Priority:       keeperIntPtr(item["priority"]),
-		LastStatusCode: keeperIntPtr(item["last_status_code"], item["status_code"]),
-		LastError:      keeperStringPtr(item["last_error"], item["error"]),
+		Name:                 firstKeeperString(item, "name", "file_name", "filename", "id", "path"),
+		Email:                keeperStringPtr(item["email"], item["account_email"], item["user_email"], item["username"], item["subject"]),
+		AuthIndex:            keeperRemoteAuthIndex(item),
+		AccountType:          keeperAccountTypeForProvider(provider, item, nil),
+		Disabled:             keeperBool(item["disabled"]),
+		Priority:             keeperIntPtr(item["priority"]),
+		CreditsAmount:        keeperFloat64Ptr(item["credits_amount"], item["credit_amount"]),
+		CreditsMinimumAmount: keeperFloat64Ptr(item["credits_minimum_amount"], item["minimum_credit_amount"]),
+		CreditsTierID:        keeperStringPtr(item["credits_tier_id"], item["paid_tier_id"]),
+		LastStatusCode:       keeperIntPtr(item["last_status_code"], item["status_code"]),
+		LastError:            keeperStringPtr(item["last_error"], item["error"]),
 	}
 }
 
@@ -3767,6 +3860,15 @@ func mergeKeeperAccountWithRemote(local keeperAccount, remote keeperAccount) kee
 	}
 	if local.Priority == nil {
 		local.Priority = remote.Priority
+	}
+	if local.CreditsAmount == nil {
+		local.CreditsAmount = remote.CreditsAmount
+	}
+	if local.CreditsMinimumAmount == nil {
+		local.CreditsMinimumAmount = remote.CreditsMinimumAmount
+	}
+	if local.CreditsTierID == nil {
+		local.CreditsTierID = remote.CreditsTierID
 	}
 	if local.LastStatusCode == nil {
 		local.LastStatusCode = remote.LastStatusCode
@@ -4018,6 +4120,14 @@ func keeperStringPtr(values ...any) *string {
 	return nil
 }
 
+func stringPtrIfNotBlank(value string) *string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return nil
+	}
+	return &text
+}
+
 func keeperIntPtr(values ...any) *int {
 	for _, value := range values {
 		switch typed := value.(type) {
@@ -4039,6 +4149,50 @@ func keeperIntPtr(values ...any) *int {
 		}
 	}
 	return nil
+}
+
+func keeperFloat64(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func keeperFloat64Ptr(values ...any) *float64 {
+	for _, value := range values {
+		if parsed, ok := keeperFloat64(value); ok {
+			return &parsed
+		}
+	}
+	return nil
+}
+
+func keeperObjectSlice(value any) []map[string]any {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	objects := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if object, ok := item.(map[string]any); ok {
+			objects = append(objects, object)
+		}
+	}
+	return objects
 }
 
 func keeperBool(value any) bool {

@@ -838,6 +838,30 @@ function isFreeQuotaWindowAccount(accountType: string | null): boolean {
   return accountType?.trim().toLowerCase() === 'free'
 }
 
+function isAntigravityAccount(account: CodexKeeperAccount): boolean {
+  return account.account_type?.trim().toLowerCase() === 'antigravity'
+}
+
+function antigravityCreditsText(account: CodexKeeperAccount): string | null {
+  if (!isAntigravityAccount(account) || account.credits_amount === null) {
+    return null
+  }
+  const amount = formatCompact(account.credits_amount)
+  const minimum =
+    account.credits_minimum_amount !== null
+      ? t(`可用门槛 ${formatCompact(account.credits_minimum_amount)}`, `Minimum ${formatCompact(account.credits_minimum_amount)}`)
+      : t('未返回门槛', 'No minimum returned')
+  const tier = account.credits_tier_id ? ` · ${account.credits_tier_id}` : ''
+  return t(`AI Credits ${amount} · ${minimum}${tier}`, `AI Credits ${amount} · ${minimum}${tier}`)
+}
+
+function quotaUnavailableText(account: CodexKeeperAccount): string {
+  if (isAntigravityAccount(account)) {
+    return t('暂未获取到 Antigravity AI Credits，请刷新该账号或先触发一次请求。', 'Antigravity AI Credits not available yet. Refresh this account or trigger one request first.')
+  }
+  return t('暂无额度窗口', 'No quota windows')
+}
+
 function quotaWindowSecondsFor(account: CodexKeeperAccount, window: 'primary' | 'secondary'): number | null {
   if (window === 'primary') {
     return account.primary_window_seconds ?? account.primary_window_usage?.window_seconds ?? null
@@ -957,9 +981,13 @@ function formatQuotaResetTime(value: string | null): string | null {
 }
 
 function quotaText(account: CodexKeeperAccount): string {
+  const credits = antigravityCreditsText(account)
+  if (credits) {
+    return credits
+  }
   const items = quotaWindowItems(account)
   if (items.length === 0) {
-    return '-'
+    return quotaUnavailableText(account)
   }
   return items
     .map((item) => {
@@ -1059,9 +1087,13 @@ function disabledStatusCodeTitle(account: CodexKeeperAccount): string | null {
 }
 
 function renderQuotaCell(account: CodexKeeperAccount) {
+  const credits = antigravityCreditsText(account)
+  if (credits) {
+    return h('span', { class: 'quota-credit-text' }, credits)
+  }
   const items = quotaWindowItems(account)
   if (items.length === 0) {
-    return '-'
+    return h('span', { class: 'quota-empty-text' }, quotaUnavailableText(account))
   }
   return h(
     'div',
@@ -1105,7 +1137,7 @@ function renderQuotaCell(account: CodexKeeperAccount) {
 function renderQuotaUsageCell(account: CodexKeeperAccount) {
   const items = quotaWindowItems(account)
   if (items.length === 0) {
-    return '-'
+    return h('span', { class: 'quota-empty-text' }, isAntigravityAccount(account) ? t('Credits 不统计 Tokens 窗口', 'Credits do not use token windows') : '-')
   }
   return h(
     'div',
@@ -2337,7 +2369,9 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </template>
-                <div v-else class="card-quota-empty">{{ t('暂无额度窗口', 'No quota windows') }}</div>
+                <div v-else class="card-quota-empty">
+                  {{ antigravityCreditsText(account) ?? quotaUnavailableText(account) }}
+                </div>
               </div>
             </button>
           </div>
@@ -3425,6 +3459,33 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-width: 0;
   padding: 4px 0;
+}
+
+:global(.quota-credit-text) {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 5px 8px;
+  overflow: hidden;
+  color: var(--cpa-success);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--cpa-success) 8%, var(--cpa-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--cpa-success) 18%, var(--cpa-border));
+  border-radius: 999px;
+}
+
+:global(.quota-empty-text) {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 :global(.quota-window-item) {
