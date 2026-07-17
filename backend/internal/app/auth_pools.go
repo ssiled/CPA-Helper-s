@@ -32,10 +32,17 @@ type authPoolBinding struct {
 }
 
 type authPoolStatus struct {
-	Pools           []authPool        `json:"pools"`
-	Bindings        []authPoolBinding `json:"bindings"`
-	PluginInstalled bool              `json:"plugin_installed"`
-	PluginError     string            `json:"plugin_error,omitempty"`
+	Pools                  []authPool           `json:"pools"`
+	Bindings               []authPoolBinding    `json:"bindings"`
+	CodexConcurrencyLimits map[string]int       `json:"codex_concurrency_limits,omitempty"`
+	Concurrency            *authPoolConcurrency `json:"concurrency,omitempty"`
+	PluginInstalled        bool                 `json:"plugin_installed"`
+	PluginError            string               `json:"plugin_error,omitempty"`
+}
+
+type authPoolConcurrency struct {
+	Counts map[string]int `json:"counts"`
+	Limits map[string]int `json:"limits"`
 }
 
 type authPoolAccountsResponse struct {
@@ -43,18 +50,21 @@ type authPoolAccountsResponse struct {
 }
 
 type authPoolProxyConfigResponse struct {
-	CPAURL          string                    `json:"cpa_url"`
-	APIKeySet       bool                      `json:"api_key_set"`
-	APIKeyPreview   string                    `json:"api_key_preview"`
-	Mode            string                    `json:"mode"`
-	PluginInstalled bool                      `json:"plugin_installed"`
-	PluginError     string                    `json:"plugin_error,omitempty"`
-	Targets         []authPoolProxyTargetView `json:"targets"`
+	CPAURL                 string                    `json:"cpa_url"`
+	APIKeySet              bool                      `json:"api_key_set"`
+	APIKeyPreview          string                    `json:"api_key_preview"`
+	Mode                   string                    `json:"mode"`
+	PluginInstalled        bool                      `json:"plugin_installed"`
+	PluginError            string                    `json:"plugin_error,omitempty"`
+	Targets                []authPoolProxyTargetView `json:"targets"`
+	CodexConcurrencyLimits map[string]int            `json:"codex_concurrency_limits,omitempty"`
+	Concurrency            *authPoolConcurrency      `json:"concurrency,omitempty"`
 }
 
 type authPoolProxyConfigPayload struct {
-	APIKey  *string                      `json:"api_key"`
-	Targets []authPoolProxyTargetPayload `json:"targets"`
+	APIKey                 *string                      `json:"api_key"`
+	Targets                []authPoolProxyTargetPayload `json:"targets"`
+	CodexConcurrencyLimits map[string]int               `json:"codex_concurrency_limits"`
 }
 
 type authPoolAPIKeyAccountPayload struct {
@@ -299,10 +309,13 @@ func (a *App) authPoolProxyConfig(ctx context.Context) (authPoolProxyConfigRespo
 		response.APIKeySet = strings.TrimSpace(target.APIKey) != ""
 		response.APIKeyPreview = maskAPIKey(target.APIKey)
 	}
-	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, nil); err != nil {
+	var status authPoolStatus
+	if err := a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodGet, "/status", nil, &status); err != nil {
 		response.PluginError = err.Error()
 	} else {
 		response.PluginInstalled = true
+		response.CodexConcurrencyLimits = authPoolConcurrencyLimitsFromStatus(status)
+		response.Concurrency = status.Concurrency
 	}
 	return response, nil
 }
@@ -321,6 +334,11 @@ func (a *App) updateAuthPoolProxyConfig(ctx context.Context, payload authPoolPro
 	}
 	if err := a.registerAuthPoolProxyTargets(ctx, cfg); err != nil {
 		return authPoolProxyConfigResponse{}, err
+	}
+	if payload.CodexConcurrencyLimits != nil {
+		if err := a.updateAuthPoolCodexConcurrencyLimits(ctx, cfg, payload.CodexConcurrencyLimits); err != nil {
+			return authPoolProxyConfigResponse{}, err
+		}
 	}
 	if err := a.saveConfig(ctx, cfg); err != nil {
 		return authPoolProxyConfigResponse{}, err
@@ -399,6 +417,72 @@ func (a *App) registerAuthPoolProxyTargets(ctx context.Context, cfg AppConfig) e
 		}
 	}
 	return nil
+}
+
+func (a *App) updateAuthPoolCodexConcurrencyLimits(ctx context.Context, cfg AppConfig, limits map[string]int) error {
+	normalized := normalizeAuthPoolCodexConcurrencyLimits(limits)
+	targets := normalizeAuthPoolProxyTargets(cfg.AuthPoolProxyTargets)
+	updated := false
+	for _, target := range targets {
+		if !target.Enabled {
+			continue
+		}
+		if strings.TrimSpace(target.CPAURL) == "" || strings.TrimSpace(target.ManagementKey) == "" {
+			return validationError("CPA URL and management key are required for enabled proxy targets")
+		}
+		if err := a.authPoolPluginRequestWithTarget(ctx, target, http.MethodPost, "/codex-concurrency-limits", map[string]any{"limits": normalized}, nil); err != nil {
+			return err
+		}
+		updated = true
+	}
+	if !updated {
+		return a.authPoolPluginRequestWithConfig(ctx, cfg, http.MethodPost, "/codex-concurrency-limits", map[string]any{"limits": normalized}, nil)
+	}
+	return nil
+}
+
+func authPoolConcurrencyLimitsFromStatus(status authPoolStatus) map[string]int {
+	if status.Concurrency != nil && len(status.Concurrency.Limits) > 0 {
+		return normalizeAuthPoolCodexConcurrencyLimits(status.Concurrency.Limits)
+	}
+	return normalizeAuthPoolCodexConcurrencyLimits(status.CodexConcurrencyLimits)
+}
+
+func normalizeAuthPoolCodexConcurrencyLimits(limits map[string]int) map[string]int {
+	result := map[string]int{"default": 0}
+	for tier, limit := range limits {
+		tier = normalizeAuthPoolConcurrencyTier(tier)
+		if tier == "" {
+			continue
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		result[tier] = limit
+	}
+	return result
+}
+
+func normalizeAuthPoolConcurrencyTier(value string) string {
+	value = sanitizeAuthPoolAccountType(value)
+	switch value {
+	case "chatgpt_free", "codex_free", "openai_free":
+		return "free"
+	case "chatgpt_plus", "codex_plus", "openai_plus":
+		return "plus"
+	case "chatgpt_team", "codex_team", "openai_team":
+		return "team"
+	case "chatgpt_pro", "codex_pro", "openai_pro":
+		return "pro"
+	case "chatgpt_enterprise", "codex_enterprise", "openai_enterprise":
+		return "enterprise"
+	case "chatgpt_business", "codex_business", "openai_business":
+		return "business"
+	case "free", "plus", "team", "pro", "enterprise", "business", "edu", "default":
+		return value
+	default:
+		return ""
+	}
 }
 
 func maskAPIKey(apiKey string) string {

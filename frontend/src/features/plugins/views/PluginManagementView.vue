@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputGroup, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { getAuthPoolProxyConfig, updateAuthPoolProxyConfig } from '@/features/auth-pools/api/authPoolsApi'
 import type { AuthPoolProxyConfig, AuthPoolProxyTargetPayload } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
@@ -18,7 +18,19 @@ interface AuthPoolProxyTargetForm extends AuthPoolProxyTargetPayload {
   api_key_preview: string
 }
 
+const concurrencyTiers = [
+  { id: 'default', label: '默认', description: '未识别等级的 Codex 账号' },
+  { id: 'free', label: 'Free', description: '免费账号' },
+  { id: 'plus', label: 'Plus', description: 'Plus 账号' },
+  { id: 'team', label: 'Team', description: 'Team 账号' },
+  { id: 'pro', label: 'Pro', description: 'Pro 账号' },
+  { id: 'business', label: 'Business', description: 'Business 账号' },
+  { id: 'enterprise', label: 'Enterprise', description: 'Enterprise 账号' },
+  { id: 'edu', label: 'Edu', description: '教育账号' },
+]
+
 const targets = reactive<AuthPoolProxyTargetForm[]>([])
+const concurrencyLimits = reactive<Record<string, number | null>>({})
 
 function emptyTarget(index: number): AuthPoolProxyTargetForm {
   return {
@@ -52,6 +64,11 @@ function applyConfig(next: AuthPoolProxyConfig) {
   if (targets.length === 0) {
     targets.push(emptyTarget(0))
   }
+
+  const limits = next.codex_concurrency_limits || next.concurrency?.limits || {}
+  for (const tier of concurrencyTiers) {
+    concurrencyLimits[tier.id] = Math.max(0, Number(limits[tier.id] || 0))
+  }
 }
 
 async function refresh() {
@@ -78,18 +95,37 @@ function removeTarget(index: number) {
 
 function managementKeyPlaceholder(target: AuthPoolProxyTargetForm) {
   return target.management_key_set
-    ? t('\u5df2\u4fdd\u5b58\uff0c\u7559\u7a7a\u4e0d\u4fee\u6539', 'Saved; leave blank to keep unchanged')
+    ? t('已保存，留空不修改', 'Saved; leave blank to keep unchanged')
     : t('CPA Management Key', 'CPA management secret')
 }
 
 function apiKeyPlaceholder(target: AuthPoolProxyTargetForm) {
   if (!target.api_key_set) {
-    return t('\u53ea\u7ed9 CPA-Helper \u4f7f\u7528\u7684 CPA API KEY', 'CPA API key used only by CPA-Helper')
+    return t('只给 CPA-Helper 使用的 CPA API KEY', 'CPA API key used only by CPA-Helper')
   }
   const preview = target.api_key_preview ? ` ${target.api_key_preview}` : ''
-  return t(`\u5df2\u4fdd\u5b58${preview}\uff0c\u7559\u7a7a\u4e0d\u4fee\u6539`, `Saved${preview}; leave blank to keep unchanged`)
+  return t(`已保存${preview}，留空不修改`, `Saved${preview}; leave blank to keep unchanged`)
 }
 
+function concurrencyCount(tier: string) {
+  return config.value?.concurrency?.counts?.[tier] || 0
+}
+
+function concurrencyLimitPayload() {
+  const payload: Record<string, number> = {}
+  for (const tier of concurrencyTiers) {
+    payload[tier.id] = Math.max(0, Number(concurrencyLimits[tier.id] || 0))
+  }
+  return payload
+}
+
+function concurrencyLimitValue(tier: string) {
+  return concurrencyLimits[tier] ?? 0
+}
+
+function setConcurrencyLimit(tier: string, value: number | null) {
+  concurrencyLimits[tier] = Math.max(0, Number(value || 0))
+}
 
 async function save() {
   const payload = targets.map((target) => ({
@@ -106,12 +142,15 @@ async function save() {
     (!target.api_key.trim() && !target.api_key_set)
   ))
   if (missingRequired) {
-    message.error(t('\u542f\u7528\u7684 CPA \u8fde\u63a5\u5fc5\u987b\u586b\u5199 URL\u3001Management Key \u548c\u8f6c\u53d1 API KEY\uff1b\u5df2\u4fdd\u5b58\u7684\u5bc6\u94a5\u53ef\u4ee5\u7559\u7a7a\u4e0d\u4fee\u6539', 'Enabled CPA connections require URL, management key, and forwarding API key. Saved secrets can be left blank to keep them unchanged.'))
+    message.error(t('启用的 CPA 连接必须填写 URL、Management Key 和转发 API KEY；已保存的密钥可以留空不修改', 'Enabled CPA connections require URL, management key, and forwarding API key. Saved secrets can be left blank to keep them unchanged.'))
     return
   }
   isSaving.value = true
   try {
-    applyConfig(await updateAuthPoolProxyConfig({ targets: payload }))
+    applyConfig(await updateAuthPoolProxyConfig({
+      targets: payload,
+      codex_concurrency_limits: concurrencyLimitPayload(),
+    }))
     message.success(t('插件配置已保存', 'Plugin settings saved'))
   } catch (error) {
     message.error(errorText(error, '保存插件配置失败', 'Failed to save plugin settings'))
@@ -128,7 +167,7 @@ onMounted(refresh)
     <div class="page-heading">
       <div>
         <h1 class="page-title">{{ t('插件管理', 'Plugin Management') }}</h1>
-        <p class="page-subtitle">{{ t('管理 cpa-auth-pool 插件连接；未配置时 CPA-Helper 使用最初的 CPA API Key 同步模式。', 'Manage cpa-auth-pool plugin connections. Without proxy targets, CPA-Helper uses the original CPA API key sync mode.') }}</p>
+        <p class="page-subtitle">{{ t('管理 cpa-auth-pool 插件连接和 Codex 并发限制。未配置代理连接时，CPA-Helper 使用原来的 CPA API Key 同步模式。', 'Manage cpa-auth-pool plugin connections and Codex concurrency limits. Without proxy targets, CPA-Helper uses the original CPA API key sync mode.') }}</p>
       </div>
       <NSpace>
         <NButton secondary :loading="isLoading" @click="refresh">{{ t('刷新', 'Refresh') }}</NButton>
@@ -137,12 +176,12 @@ onMounted(refresh)
     </div>
 
     <NAlert v-if="config?.plugin_installed" type="success" class="panel-alert" :show-icon="true">
-      <template #header>{{ t('已连接插件', 'Plugin connected') }}</template>
-      {{ t('已检测到 cpa-auth-pool 插件，CPA-Helper 当前可以通过插件管理号池连接。', 'cpa-auth-pool is detected. CPA-Helper can manage auth pool connections through the plugin.') }}
+      <template #header>{{ t('插件已连接', 'Plugin connected') }}</template>
+      {{ t('已检测到 cpa-auth-pool 插件，CPA-Helper 会通过插件管理号池、转发 Key 和并发限制。', 'cpa-auth-pool is detected. CPA-Helper can manage auth pools, forwarding keys, and concurrency limits through the plugin.') }}
     </NAlert>
 
     <NAlert v-if="config && !config.plugin_installed" type="warning" class="panel-alert">
-      {{ t('未检测到 cpa-auth-pool 插件。请先在 CPA 安装并启用 cpa-auth-pool；未安装时 CPA-Helper 会继续使用最初的 CPA API Key 同步模式。', 'cpa-auth-pool is not detected. Install and enable it in CPA first. Until then, CPA-Helper keeps using the original CPA API key sync mode.') }}
+      {{ t('未检测到 cpa-auth-pool 插件。请先在 CPA 安装并启用 cpa-auth-pool；未安装时 CPA-Helper 会继续使用原来的 CPA API Key 同步模式。', 'cpa-auth-pool is not detected. Install and enable it in CPA first. Until then, CPA-Helper keeps using the original CPA API key sync mode.') }}
       <template v-if="config.plugin_error">
         <br />{{ config.plugin_error }}
       </template>
@@ -153,7 +192,7 @@ onMounted(refresh)
         <div class="card-header">
           <div>
             <div class="card-title">{{ t('CPA 转发连接', 'CPA forwarding connections') }}</div>
-            <div class="card-subtitle">{{ t('可配置多个 CPA；当前请求会使用第一个已启用的连接。保存时会把每个转发 Key 注册到对应 CPA 的 cpa-auth-pool 插件。', 'Configure multiple CPA instances. Requests use the first enabled connection. Saving registers each forwarding key with that CPA cpa-auth-pool plugin.') }}</div>
+            <div class="card-subtitle">{{ t('可配置多个 CPA；当前请求使用第一个已启用连接。保存时会把每个转发 Key 注册到对应 CPA 的 cpa-auth-pool 插件。', 'Configure multiple CPA instances. Requests use the first enabled connection. Saving registers each forwarding key with that CPA cpa-auth-pool plugin.') }}</div>
           </div>
           <NTag :type="config?.mode === 'proxy' ? 'success' : 'default'" size="small">
             {{ config?.mode === 'proxy' ? t('转发模式', 'Proxy mode') : t('原始模式', 'Legacy mode') }}
@@ -183,19 +222,46 @@ onMounted(refresh)
               </NFormItem>
               <NFormItem :label="t('Management Key', 'Management Key')">
                 <NInput v-model:value="target.management_key" type="password" show-password-on="click" :placeholder="managementKeyPlaceholder(target)" />
-                <div v-if="target.management_key_set" class="secret-hint">{{ t('Management Key \u5df2\u4fdd\u5b58\uff0c\u91cd\u65b0\u586b\u5199\u624d\u4f1a\u8986\u76d6', 'Management key is saved. Enter a new value only to replace it.') }}</div>
+                <div v-if="target.management_key_set" class="secret-hint">{{ t('Management Key 已保存，重新填写才会覆盖', 'Management key is saved. Enter a new value only to replace it.') }}</div>
               </NFormItem>
               <NFormItem :label="t('CPA 转发 API KEY', 'CPA forwarding API key')">
                 <NInputGroup>
                   <NInput v-model:value="target.api_key" type="password" show-password-on="click" :placeholder="apiKeyPlaceholder(target)" />
                 </NInputGroup>
-                <div v-if="target.api_key_set" class="secret-hint">{{ t(`\u8f6c\u53d1 Key \u5df2\u4fdd\u5b58\uff1a${target.api_key_preview || '\u5df2\u4fdd\u5b58'}`, `Forwarding key saved: ${target.api_key_preview || 'saved'}`) }}</div>
+                <div v-if="target.api_key_set" class="secret-hint">{{ t(`转发 Key 已保存：${target.api_key_preview || '已保存'}`, `Forwarding key saved: ${target.api_key_preview || 'saved'}`) }}</div>
               </NFormItem>
             </div>
           </NForm>
         </div>
       </div>
       <NButton secondary @click="addTarget">{{ t('添加 CPA 连接', 'Add CPA connection') }}</NButton>
+    </NCard>
+
+    <NCard :bordered="false" class="panel-card">
+      <template #header>
+        <div class="card-header">
+          <div>
+            <div class="card-title">{{ t('Codex 等级并发限制', 'Codex tier concurrency limits') }}</div>
+            <div class="card-subtitle">{{ t('按账号等级限制同时请求数量，0 表示不限制。插件会在 CPA 选择凭证前按等级拦截，避免同等级账号同时跑太多请求触发 429。', 'Limit simultaneous requests by account tier. 0 means unlimited. The plugin applies limits before CPA selects credentials to reduce 429s.') }}</div>
+          </div>
+          <NTag size="small">{{ t('实时占用来自插件状态', 'Live counts from plugin status') }}</NTag>
+        </div>
+      </template>
+
+      <div class="tier-grid">
+        <div v-for="tier in concurrencyTiers" :key="tier.id" class="tier-row">
+          <div>
+            <div class="tier-label">{{ tier.label }}</div>
+            <div class="tier-description">{{ t(tier.description, tier.description) }}</div>
+          </div>
+          <div class="tier-controls">
+            <NTag size="small" :type="concurrencyCount(tier.id) > 0 ? 'warning' : 'default'">
+              {{ t('运行中', 'Running') }} {{ concurrencyCount(tier.id) }}
+            </NTag>
+            <NInputNumber :value="concurrencyLimitValue(tier.id)" :min="0" :max="999" :precision="0" class="tier-input" @update:value="(value) => setConcurrencyLimit(tier.id, value)" />
+          </div>
+        </div>
+      </div>
     </NCard>
   </section>
 </template>
@@ -212,5 +278,11 @@ onMounted(refresh)
 .target-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .secret-hint { margin-top: 6px; font-size: 12px; color: var(--cpa-text-muted); }
-@media (max-width: 860px) { .form-grid { grid-template-columns: 1fr; } .card-header { flex-direction: column; } }
+.tier-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.tier-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px; border: 1px solid rgba(148, 163, 184, .22); border-radius: 12px; background: rgba(255, 255, 255, .72); }
+.tier-label { font-weight: 700; }
+.tier-description { margin-top: 2px; color: var(--cpa-text-muted); font-size: 12px; }
+.tier-controls { display: flex; align-items: center; gap: 8px; }
+.tier-input { width: 104px; }
+@media (max-width: 860px) { .form-grid, .tier-grid { grid-template-columns: 1fr; } .card-header { flex-direction: column; } .tier-row { align-items: flex-start; flex-direction: column; } }
 </style>

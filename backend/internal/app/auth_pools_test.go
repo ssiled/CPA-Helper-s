@@ -74,6 +74,60 @@ func TestListAuthPoolAccountsIncludesRemoteGeminiAndGrok(t *testing.T) {
 	}
 }
 
+func TestUpdateAuthPoolProxyConfigWritesCodexConcurrencyLimits(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var limitsPayload map[string]any
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/proxy-keys":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/codex-concurrency-limits":
+			if err := json.NewDecoder(r.Body).Decode(&limitsPayload); err != nil {
+				t.Fatalf("decode limits payload: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pools":       []any{},
+				"bindings":    []any{},
+				"concurrency": map[string]any{"counts": map[string]int{}, "limits": map[string]int{"plus": 2, "default": 1}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	config, err := app.updateAuthPoolProxyConfig(t.Context(), authPoolProxyConfigPayload{
+		Targets: []authPoolProxyTargetPayload{{
+			ID: "main", Name: "Main", CPAURL: cpa.URL, ManagementKey: "mgmt", APIKey: "sk-forward", Enabled: true,
+		}},
+		CodexConcurrencyLimits: map[string]int{"plus": 2, "default": 1, "unknown": 9, "free": -1},
+	})
+	if err != nil {
+		t.Fatalf("updateAuthPoolProxyConfig failed: %v", err)
+	}
+	limits, ok := limitsPayload["limits"].(map[string]any)
+	if !ok {
+		t.Fatalf("limits payload = %#v", limitsPayload)
+	}
+	if limits["plus"] != float64(2) || limits["default"] != float64(1) || limits["free"] != float64(0) {
+		t.Fatalf("limits = %#v, want normalized plus/default/free", limits)
+	}
+	if _, ok := limits["unknown"]; ok {
+		t.Fatalf("limits = %#v, unknown tier should be dropped", limits)
+	}
+	if config.CodexConcurrencyLimits["plus"] != 2 || config.CodexConcurrencyLimits["default"] != 1 {
+		t.Fatalf("response limits = %#v", config.CodexConcurrencyLimits)
+	}
+}
+
 func TestAddAuthPoolAPIKeyAccountWritesCPAConfig(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	var putPayload map[string]any

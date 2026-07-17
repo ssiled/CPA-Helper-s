@@ -276,8 +276,15 @@ export interface AuthPoolBinding {
 export interface AuthPoolStatus {
   pools: AuthPool[]
   bindings: AuthPoolBinding[]
+  codex_concurrency_limits?: Record<string, number>
+  concurrency?: AuthPoolConcurrency
   plugin_installed?: boolean
   plugin_error?: string
+}
+
+export interface AuthPoolConcurrency {
+  counts: Record<string, number>
+  limits: Record<string, number>
 }
 
 export interface AuthPoolProxyTarget {
@@ -299,6 +306,8 @@ export interface AuthPoolProxyConfig {
   plugin_installed: boolean
   plugin_error?: string
   targets: AuthPoolProxyTarget[]
+  codex_concurrency_limits?: Record<string, number>
+  concurrency?: AuthPoolConcurrency
 }
 
 export interface AuthPoolProxyTargetPayload {
@@ -313,6 +322,7 @@ export interface AuthPoolProxyTargetPayload {
 export interface AuthPoolProxyConfigPayload {
   api_key?: string
   targets?: AuthPoolProxyTargetPayload[]
+  codex_concurrency_limits?: Record<string, number>
 }
 
 export interface AuthPoolAccountsResponse {
