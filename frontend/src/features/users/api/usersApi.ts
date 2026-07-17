@@ -36,6 +36,10 @@ export function enableUser(userId: number): Promise<void> {
   return apiClient.post<void>(`/users/${userId}/enable`)
 }
 
+export function deleteUser(userId: number): Promise<void> {
+  return apiClient.delete(`/users/${userId}`)
+}
+
 export function listObservedApiKeys(): Promise<UserApiKeySummary[]> {
   return apiClient.get<UserApiKeySummary[]>('/users/observed-api-keys')
 }

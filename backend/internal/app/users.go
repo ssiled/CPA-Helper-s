@@ -193,7 +193,7 @@ func (a *App) handleUserByPath(w http.ResponseWriter, r *http.Request) error {
 			writeJSON(w, http.StatusOK, user)
 			return nil
 		case http.MethodDelete:
-			if err := a.disableUser(r.Context(), userID); err != nil {
+			if err := a.deleteUser(r.Context(), userID); err != nil {
 				return err
 			}
 			writeNoContent(w)
@@ -462,6 +462,66 @@ func (a *App) disableUser(ctx context.Context, id int) error {
 		}
 	}
 	_, err = a.db.ExecContext(ctx, `UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?`, dbTime(time.Now()), dbTime(time.Now()), id)
+	return err
+}
+
+func (a *App) deleteUser(ctx context.Context, id int) error {
+	user, err := a.getUser(ctx, id)
+	if err != nil {
+		return err
+	}
+	if user.ID == 1 {
+		return conflictError("初始管理员账号不能删除")
+	}
+	keys, err := a.userAPIKeys(ctx, id)
+	if err != nil {
+		return err
+	}
+	if cfg, err := a.loadConfig(ctx); err == nil && !authPoolProxyModeEnabled(cfg) {
+		for _, key := range keys {
+			if err := a.removeRemoteAPIKeyHash(ctx, key.APIKeyHash); err != nil {
+				return err
+			}
+		}
+	}
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, key := range keys {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM user_api_key_pools WHERE api_key_hash = ?`, key.APIKeyHash); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM model_proxy_request_attributions WHERE api_key_hash = ?`, key.APIKeyHash); err != nil {
+			return err
+		}
+	}
+	statements := []string{
+		`DELETE FROM user_card_shop_favorites WHERE user_id = ?`,
+		`DELETE FROM user_card_shop_tags WHERE user_id = ?`,
+		`DELETE FROM user_quota_charges WHERE user_id = ?`,
+		`DELETE FROM user_api_keys WHERE user_id = ?`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.ExecContext(ctx, statement, id); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return notFoundError("用户不存在")
+	}
+	err = tx.Commit()
 	return err
 }
 

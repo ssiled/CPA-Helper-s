@@ -21,6 +21,7 @@ import { CircleDollarSign, KeyRound, ShieldCheck, UserRound } from 'lucide-vue-n
 
 import {
   createUser,
+  deleteUser,
   disableUser,
   enableUser,
   listUsers,
@@ -234,6 +235,16 @@ async function enableUserRow(row: UserSummary) {
   }
 }
 
+async function deleteUserRow(row: UserSummary) {
+  try {
+    await deleteUser(row.id)
+    message.success(t('用户已删除', 'User deleted'))
+    await refresh()
+  } catch (error) {
+    message.error(errorText(error, '删除用户失败', 'Failed to delete user'))
+  }
+}
+
 async function saveUser() {
   const nickname = userNickname.value.trim()
   if (!nickname) {
@@ -412,7 +423,7 @@ const columns = computed<DataTableColumns<UserSummary>>(() => [
   {
     title: '',
     key: 'actions',
-    width: 90,
+    width: 130,
     fixed: 'right',
     render: (row) =>
       h(
@@ -454,6 +465,25 @@ const columns = computed<DataTableColumns<UserSummary>>(() => [
                       default: () => t(`禁用用户 ${userLabel(row)} 并从 CPA 移除其 API KEY？`, `Disable user ${userLabel(row)} and remove their API keys from CPA?`),
                     },
                   ),
+            row.id === 1
+              ? null
+              : h(
+                  NPopconfirm,
+                  { onPositiveClick: () => deleteUserRow(row) },
+                  {
+                    trigger: () =>
+                      h(
+                        NButton,
+                        { size: 'small', quaternary: true, type: 'error' },
+                        { default: () => t('删除', 'Delete') },
+                      ),
+                    default: () =>
+                      t(
+                        `永久删除用户 ${userLabel(row)} 及其本地 API KEY 绑定？历史用量记录会保留用于审计。`,
+                        `Permanently delete user ${userLabel(row)} and local API key bindings? Historical usage records are retained for audit.`,
+                      ),
+                  },
+                ),
           ],
         },
       ),
@@ -508,7 +538,7 @@ onMounted(refresh)
       :style="{ width: 'min(520px, calc(100vw - 32px))' }"
     >
       <NAlert v-if="editingUserId === null" type="warning" :bordered="false" class="user-editor-warning">
-        {{ t('账号一旦创建，不允许删除，只允许禁用，请谨慎操作。', 'Accounts cannot be deleted after creation. They can only be disabled, so proceed carefully.') }}
+        {{ t('账号创建后可以禁用或永久删除；删除会清理本地 API KEY 绑定，历史用量记录仍保留用于审计。', 'Accounts can be disabled or permanently deleted after creation. Deleting clears local API key bindings while retaining historical usage records for audit.') }}
       </NAlert>
 
       <NForm label-placement="top">
