@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NIcon, NInput, NModal, NSelect, NSpin, NSwitch, NTag } from 'naive-ui'
 import {
@@ -983,7 +983,7 @@ function telegramHref(value: string | null | undefined): string | null {
               <strong v-else class="product-name">{{ displayText(product.name) }}</strong>
               <div class="product-meta">
                 <span>{{ formatShopPrice(product.price) }}</span>
-                <span>{{ t(`?? ${formatCount(product.stockCount)}`, `Stock ${formatCount(product.stockCount)}`) }}</span>
+                <span>{{ t(`库存 ${formatCount(product.stockCount)}`, `Stock ${formatCount(product.stockCount)}`) }}</span>
                 <span>{{ displayText(product.group) }}</span>
                 <span>{{ displayText(product.category) }}</span>
               </div>
@@ -1702,3 +1702,4 @@ function telegramHref(value: string | null | undefined): string | null {
   }
 }
 </style>
+
