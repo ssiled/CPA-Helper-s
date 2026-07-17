@@ -307,6 +307,7 @@ func buildChannelStatusItems(pools []authPool, accounts []keeperAccount, records
 		}
 		applyChannelAccountStats(&item, members)
 		applyChannelUsageStats(&item, memberKeys, records, prices)
+		applyChannelRecentRequestStatus(&item)
 		items = append(items, item)
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -375,6 +376,29 @@ func applyChannelUsageStats(item *channelStatusItem, memberKeys map[string]bool,
 		cost, _ := recordCost(record, prices)
 		item.WindowCostUSD = mathRound(item.WindowCostUSD+cost, 8)
 	}
+}
+
+func applyChannelRecentRequestStatus(item *channelStatusItem) {
+	if !item.Enabled {
+		item.Status = "disabled"
+		item.Available = false
+		return
+	}
+	if item.WindowRecords <= 0 {
+		return
+	}
+	if item.WindowFailedRecords == 0 {
+		item.Status = "normal"
+		item.Available = true
+		return
+	}
+	if item.WindowFailedRecords > item.WindowSuccessRecords {
+		item.Status = "error"
+		item.Available = false
+		return
+	}
+	item.Status = "degraded"
+	item.Available = true
 }
 
 func channelPoolStatus(item *channelStatusItem) (string, bool) {

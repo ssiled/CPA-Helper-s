@@ -40,8 +40,8 @@ func TestBuildChannelStatusItemsUsesPoolsAndHidesAccounts(t *testing.T) {
 	if plus.Name != "Plus pool" || plus.AccountCount != 2 || plus.AvailableAccounts != 1 {
 		t.Fatalf("plus snapshot = %+v", plus)
 	}
-	if plus.Status != "degraded" || !plus.Available {
-		t.Fatalf("plus status = %q available = %v, want degraded true", plus.Status, plus.Available)
+	if plus.Status != "normal" || !plus.Available {
+		t.Fatalf("plus status = %q available = %v, want normal true from recent successful requests", plus.Status, plus.Available)
 	}
 	if plus.WindowRecords != 1 || plus.WindowSuccessRecords != 1 || plus.WindowFailedRecords != 0 || plus.WindowCostUSD != 4 {
 		t.Fatalf("plus window = records %d success %d failed %d cost %f", plus.WindowRecords, plus.WindowSuccessRecords, plus.WindowFailedRecords, plus.WindowCostUSD)
@@ -102,6 +102,26 @@ func TestChannelPoolStatusUnavailableStates(t *testing.T) {
 	applyChannelAccountStats(&disabled, []keeperAccount{{Name: "hidden.json"}})
 	if disabled.Status != "disabled" || disabled.Available {
 		t.Fatalf("disabled status = %q available = %v", disabled.Status, disabled.Available)
+	}
+}
+
+func TestApplyChannelRecentRequestStatusPrefersWindowResults(t *testing.T) {
+	allSuccess := channelStatusItem{Enabled: true, AccountCount: 75, AvailableAccounts: 2, QuotaExhaustedAccounts: 73, Status: "degraded", Available: true, WindowRecords: 998, WindowSuccessRecords: 998}
+	applyChannelRecentRequestStatus(&allSuccess)
+	if allSuccess.Status != "normal" || !allSuccess.Available {
+		t.Fatalf("all-success status = %q available = %v, want normal true", allSuccess.Status, allSuccess.Available)
+	}
+
+	mixed := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, QuotaExhaustedAccounts: 6, Status: "degraded", Available: true, WindowRecords: 1201, WindowSuccessRecords: 1200, WindowFailedRecords: 1}
+	applyChannelRecentRequestStatus(&mixed)
+	if mixed.Status != "degraded" || !mixed.Available {
+		t.Fatalf("mixed status = %q available = %v, want degraded true", mixed.Status, mixed.Available)
+	}
+
+	mostlyFailed := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, Status: "normal", Available: true, WindowRecords: 9, WindowSuccessRecords: 4, WindowFailedRecords: 5}
+	applyChannelRecentRequestStatus(&mostlyFailed)
+	if mostlyFailed.Status != "error" || mostlyFailed.Available {
+		t.Fatalf("mostly-failed status = %q available = %v, want error false", mostlyFailed.Status, mostlyFailed.Available)
 	}
 }
 
