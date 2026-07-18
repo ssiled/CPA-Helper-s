@@ -47,6 +47,7 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	modelsCalls := 0
 	apiCalls := 0
 	creditsCalls := 0
+	quotaCalls := 0
 	disabledPatches := []string{}
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -55,7 +56,7 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{"name": "antigravity.json", "type": "antigravity"}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/download":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"name": "antigravity.json", "type": "antigravity", "auth_index": "antigravity-auth", "disabled": false,
+				"name": "antigravity.json", "type": "antigravity", "auth_index": "antigravity-auth", "project_id": "antigravity-project", "disabled": false,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files/models":
 			modelsCalls++
@@ -79,6 +80,34 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 							"id": "tier-1",
 							"availableCredits": []map[string]any{
 								{"creditType": "GOOGLE_ONE_AI", "creditAmount": "25000", "minimumCreditAmountForUsage": "50"},
+							},
+						},
+					},
+				})
+				return
+			}
+			if strings.Contains(keeperString(payload["url"]), "retrieveUserQuotaSummary") {
+				quotaCalls++
+				if payload["data"] != `{"project":"antigravity-project"}` {
+					t.Fatalf("quota data = %v", payload["data"])
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status_code": 200,
+					"body": map[string]any{
+						"groups": []map[string]any{
+							{
+								"displayName": "Gemini models",
+								"description": "Models within this group: Gemini Flash, Gemini Pro",
+								"buckets": []map[string]any{
+									{"bucketId": "gemini-5h", "displayName": "5 hour limit", "window": "5h", "remainingFraction": 0.8, "resetTime": "2026-07-18T22:30:00Z"},
+									{"bucketId": "gemini-week", "displayName": "Weekly limit", "window": "weekly", "remainingFraction": 0.65},
+								},
+							},
+							{
+								"displayName": "Claude and GPT models",
+								"buckets": []map[string]any{
+									{"bucketId": "claude-gpt-5h", "displayName": "5 hour limit", "remainingFraction": 1.0},
+								},
 							},
 						},
 					},
@@ -128,8 +157,8 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	if modelsCalls != 1 {
 		t.Fatalf("models calls = %d, want 1", modelsCalls)
 	}
-	if apiCalls != 1 || creditsCalls != 1 {
-		t.Fatalf("api-call/credits calls = %d/%d, want one credits probe and no external provider probe", apiCalls, creditsCalls)
+	if apiCalls != 2 || creditsCalls != 1 || quotaCalls != 1 {
+		t.Fatalf("api-call/credits/quota calls = %d/%d/%d, want one credits and one quota call", apiCalls, creditsCalls, quotaCalls)
 	}
 	if len(disabledPatches) != 0 {
 		t.Fatalf("disabled patches = %#v, want none", disabledPatches)
@@ -149,6 +178,17 @@ func TestAntigravityRefreshUsesCPAModelsBeforeExternalProbe(t *testing.T) {
 	}
 	if state.CreditsTierID == nil || *state.CreditsTierID != "tier-1" {
 		t.Fatalf("credits_tier_id = %v, want tier-1", state.CreditsTierID)
+	}
+	if state.AntigravityQuota == nil || len(state.AntigravityQuota.Groups) != 2 {
+		t.Fatalf("antigravity quota = %#v, want two groups", state.AntigravityQuota)
+	}
+	gemini := state.AntigravityQuota.Groups[0]
+	if gemini.Label != "Gemini models" || len(gemini.Buckets) != 2 || gemini.Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("gemini quota group = %#v", gemini)
+	}
+	accounts, err := app.listKeeperAccounts(context.Background())
+	if err != nil || len(accounts) != 1 || accounts[0].AntigravityQuota == nil {
+		t.Fatalf("persisted antigravity quota accounts=%#v err=%v", accounts, err)
 	}
 }
 

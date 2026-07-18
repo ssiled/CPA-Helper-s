@@ -48,6 +48,7 @@ import {
   updateCodexKeeperPriority,
 } from '@/features/codex-keeper/api/codexKeeperApi'
 import type {
+  CodexKeeperAntigravityQuotaBucket,
   CodexKeeperAccount,
   CodexKeeperPriorityRule,
   CodexKeeperQuotaWindowUsage,
@@ -80,6 +81,18 @@ type QuotaWindowItem = {
   usage: CodexKeeperQuotaWindowUsage | null
 }
 type QuotaUsageTag = { label: string; value: string; tone?: 'stale' }
+type AntigravityQuotaItem = CodexKeeperAntigravityQuotaBucket & {
+  groupID: string
+  groupLabel: string
+  groupDescription: string | undefined
+  remainingPercent: number
+}
+type AntigravityQuotaDisplayGroup = {
+  id: string
+  label: string
+  description: string | undefined
+  items: AntigravityQuotaItem[]
+}
 type AccountStatusPreferences = {
   displaySize?: unknown
   viewMode?: unknown
@@ -859,9 +872,100 @@ function antigravityCreditsText(account: CodexKeeperAccount): string | null {
   return t(`AI Credits ${amount} · ${minimum}${tier}`, `AI Credits ${amount} · ${minimum}${tier}`)
 }
 
+function normalizedAntigravityLabel(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function antigravityGroupLabel(value: string): string {
+  const normalized = normalizedAntigravityLabel(value)
+  if (normalized === 'gemini models') {
+    return t('Gemini 模型', 'Gemini Models')
+  }
+  if (normalized === 'claude and gpt models') {
+    return t('Claude 和 GPT 模型', 'Claude and GPT Models')
+  }
+  return value
+}
+
+function antigravityBucketLabel(value: string): string {
+  const normalized = normalizedAntigravityLabel(value)
+  if (normalized === 'weekly limit') {
+    return t('周限额', 'Weekly Limit')
+  }
+  if (normalized === 'daily limit') {
+    return t('日限额', 'Daily Limit')
+  }
+  if (normalized === '5 hour limit' || normalized === '5-hour limit' || normalized === 'five hour limit') {
+    return t('5小时限额', '5-Hour Limit')
+  }
+  if (normalized === 'monthly limit') {
+    return t('月限额', 'Monthly Limit')
+  }
+  return value
+}
+
+function antigravityDescription(value?: string): string | undefined {
+  if (!value) {
+    return undefined
+  }
+  const matched = value.match(/^models within this group:\s*(.+)$/i)
+  const models = matched?.[1]?.trim()
+  return models ? t(`此分组包含：${models}`, `Models in this group: ${models}`) : value
+}
+
+function antigravityQuotaItems(account: CodexKeeperAccount): AntigravityQuotaItem[] {
+  if (!isAntigravityAccount(account) || account.disabled) {
+    return []
+  }
+  const groups = account.antigravity_quota?.groups ?? []
+  return groups.flatMap((group) =>
+    group.buckets
+      .filter((bucket) => Number.isFinite(bucket.remaining_fraction))
+      .map((bucket) => ({
+        ...bucket,
+        groupID: group.id,
+        groupLabel: antigravityGroupLabel(group.label),
+        groupDescription: antigravityDescription(group.description),
+        remainingPercent: Math.round(Math.max(0, Math.min(1, bucket.remaining_fraction)) * 100),
+      })),
+  )
+}
+
+function antigravityQuotaDisplayGroups(account: CodexKeeperAccount): AntigravityQuotaDisplayGroup[] {
+  const groups: AntigravityQuotaDisplayGroup[] = []
+  for (const item of antigravityQuotaItems(account)) {
+    const group = groups.find((candidate) => candidate.id === item.groupID)
+    if (group) {
+      group.items.push(item)
+    } else {
+      groups.push({
+        id: item.groupID,
+        label: item.groupLabel,
+        description: item.groupDescription,
+        items: [item],
+      })
+    }
+  }
+  return groups
+}
+
+function antigravityQuotaResetText(item: AntigravityQuotaItem): string {
+  const resetTime = formatQuotaResetTime(item.reset_time ?? null)
+  return resetTime ? t(`刷新 ${resetTime}`, `Refreshes ${resetTime}`) : t('可用', 'Available')
+}
+
+function antigravityQuotaTitle(item: AntigravityQuotaItem): string {
+  const description = antigravityDescription(item.description) ?? item.groupDescription
+  const suffix = description ? ` · ${description}` : ''
+  return t(
+    `${item.groupLabel} / ${antigravityBucketLabel(item.label)}：剩余 ${item.remainingPercent}%${suffix}`,
+    `${item.groupLabel} / ${antigravityBucketLabel(item.label)}: ${item.remainingPercent}% remaining${suffix}`,
+  )
+}
+
 function quotaUnavailableText(account: CodexKeeperAccount): string {
   if (isAntigravityAccount(account)) {
-    return t('暂未获取到 Antigravity AI Credits，请刷新该账号或先触发一次请求。', 'Antigravity AI Credits not available yet. Refresh this account or trigger one request first.')
+    return t('暂未获取到 Antigravity 分组额度，请刷新该账号。', 'Antigravity grouped quota is not available yet. Refresh this account.')
   }
   return t('暂无额度窗口', 'No quota windows')
 }
@@ -985,6 +1089,12 @@ function formatQuotaResetTime(value: string | null): string | null {
 }
 
 function quotaText(account: CodexKeeperAccount): string {
+  const antigravityItems = antigravityQuotaItems(account)
+  if (antigravityItems.length > 0) {
+    return antigravityItems
+      .map((item) => `${item.groupLabel} / ${antigravityBucketLabel(item.label)} ${item.remainingPercent}%`)
+      .join(' / ')
+  }
   const credits = antigravityCreditsText(account)
   if (credits) {
     return credits
@@ -1091,6 +1201,35 @@ function disabledStatusCodeTitle(account: CodexKeeperAccount): string | null {
 }
 
 function renderQuotaCell(account: CodexKeeperAccount) {
+  const antigravityItems = antigravityQuotaItems(account)
+  if (antigravityItems.length > 0) {
+    return h(
+      'div',
+      { class: 'quota-window-cell quota-antigravity-cell' },
+      antigravityItems.map((item) => {
+        const resetTime = formatQuotaResetTime(item.reset_time ?? null)
+        return h(
+          'div',
+          { class: 'quota-window-item', title: antigravityQuotaTitle(item) },
+          [
+            h('div', { class: 'quota-window-head' }, [
+              h('span', { class: 'quota-window-label' }, `${item.groupLabel} / ${antigravityBucketLabel(item.label)}`),
+              h('span', { class: 'quota-window-meta' }, [
+                h('span', { class: 'quota-window-percent' }, `${item.remainingPercent}%`),
+                resetTime ? h('span', { class: 'quota-window-reset' }, resetTime) : null,
+              ]),
+            ]),
+            h('div', { class: 'quota-window-track' }, [
+              h('div', {
+                class: ['quota-window-fill', quotaBarTone(item.remainingPercent)],
+                style: { width: `${item.remainingPercent}%` },
+              }),
+            ]),
+          ],
+        )
+      }),
+    )
+  }
   const credits = antigravityCreditsText(account)
   if (credits) {
     return h('span', { class: 'quota-credit-text' }, credits)
@@ -1139,9 +1278,12 @@ function renderQuotaCell(account: CodexKeeperAccount) {
 }
 
 function renderQuotaUsageCell(account: CodexKeeperAccount) {
+  if (isAntigravityAccount(account)) {
+    return h('span', { class: 'quota-empty-text' }, t('分组额度', 'Grouped quota'))
+  }
   const items = quotaWindowItems(account)
   if (items.length === 0) {
-    return h('span', { class: 'quota-empty-text' }, isAntigravityAccount(account) ? t('Credits 不统计 Tokens 窗口', 'Credits do not use token windows') : '-')
+    return h('span', { class: 'quota-empty-text' }, '-')
   }
   return h(
     'div',
@@ -2314,7 +2456,72 @@ onBeforeUnmount(() => {
                 <strong>{{ disabledCardErrorText(account) }}</strong>
               </div>
               <div v-else-if="shouldShowQuotaWindow(account)" class="account-card-quota">
-                <template v-if="quotaWindowItems(account).length > 0">
+                <template v-if="antigravityQuotaItems(account).length > 0">
+                  <template v-if="isBarCardView">
+                    <div
+                      v-for="group in antigravityQuotaDisplayGroups(account)"
+                      :key="group.id"
+                      class="card-antigravity-group"
+                    >
+                      <div class="card-antigravity-group-head">
+                        <strong>{{ group.label }}</strong>
+                        <span v-if="group.description">{{ group.description }}</span>
+                      </div>
+                      <div
+                        v-for="item in group.items"
+                        :key="item.id"
+                        class="card-quota-bar"
+                        :title="antigravityQuotaTitle(item)"
+                      >
+                        <div class="card-quota-head">
+                          <span>{{ antigravityBucketLabel(item.label) }}</span>
+                          <strong>{{ t(`剩余 ${item.remainingPercent}%`, `${item.remainingPercent}% remaining`) }}</strong>
+                        </div>
+                        <div class="card-quota-track">
+                          <div
+                            class="card-quota-fill"
+                            :class="quotaBarTone(item.remainingPercent)"
+                            :style="{ width: `${item.remainingPercent}%` }"
+                          />
+                        </div>
+                        <span class="card-quota-reset">{{ antigravityQuotaResetText(item) }}</span>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else class="card-quota-rings">
+                    <div
+                      v-for="group in antigravityQuotaDisplayGroups(account)"
+                      :key="group.id"
+                      class="card-antigravity-group"
+                    >
+                      <div class="card-antigravity-group-head">
+                        <strong>{{ group.label }}</strong>
+                        <span v-if="group.description">{{ group.description }}</span>
+                      </div>
+                      <div
+                        v-for="item in group.items"
+                        :key="item.id"
+                        class="card-quota-ring-item"
+                        :title="antigravityQuotaTitle(item)"
+                      >
+                        <div class="card-quota-ring-head">
+                          <div
+                            class="quota-ring"
+                            :class="quotaBarTone(item.remainingPercent)"
+                            :style="{ '--quota-deg': `${item.remainingPercent * 3.6}deg` }"
+                          >
+                            <span>{{ item.remainingPercent }}%</span>
+                          </div>
+                          <div class="quota-ring-caption">
+                            <strong>{{ antigravityBucketLabel(item.label) }}</strong>
+                            <span>{{ antigravityQuotaResetText(item) }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+                <template v-else-if="quotaWindowItems(account).length > 0">
                   <template v-if="isBarCardView">
                     <div
                       v-for="item in quotaWindowItems(account)"
@@ -3157,6 +3364,38 @@ onBeforeUnmount(() => {
   gap: 10px;
   min-width: 0;
   padding-top: 2px;
+}
+
+.card-antigravity-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.card-antigravity-group-head {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.card-antigravity-group-head strong {
+  overflow: hidden;
+  color: var(--cpa-text);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-antigravity-group-head span {
+  overflow: hidden;
+  color: var(--cpa-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-quota-bar {

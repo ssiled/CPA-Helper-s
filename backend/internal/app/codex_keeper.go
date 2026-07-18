@@ -112,28 +112,29 @@ type keeperPriorityUpdateRequest struct {
 }
 
 type keeperAccount struct {
-	Name                   string     `json:"name"`
-	Email                  *string    `json:"email"`
-	AuthIndex              *string    `json:"auth_index"`
-	AccountType            *string    `json:"account_type"`
-	Disabled               bool       `json:"disabled"`
-	Priority               *int       `json:"priority"`
-	LegacyRestorePriority  *int       `json:"-"`
-	PrimaryUsedPercent     *int       `json:"primary_used_percent"`
-	SecondaryUsedPercent   *int       `json:"secondary_used_percent"`
-	CreditsAmount          *float64   `json:"credits_amount"`
-	CreditsMinimumAmount   *float64   `json:"credits_minimum_amount"`
-	CreditsTierID          *string    `json:"credits_tier_id"`
-	PrimaryResetAt         *time.Time `json:"primary_reset_at"`
-	SecondaryResetAt       *time.Time `json:"secondary_reset_at"`
-	PrimaryWindowSeconds   *int       `json:"primary_window_seconds"`
-	SecondaryWindowSeconds *int       `json:"secondary_window_seconds"`
-	QuotaThreshold         *int       `json:"quota_threshold"`
-	LastStatusCode         *int       `json:"last_status_code"`
-	LastError              *string    `json:"last_error"`
-	LatestAction           *string    `json:"latest_action"`
-	LastCheckedAt          *time.Time `json:"last_checked_at"`
-	LastHealthyAt          *time.Time `json:"last_healthy_at"`
+	Name                   string                  `json:"name"`
+	Email                  *string                 `json:"email"`
+	AuthIndex              *string                 `json:"auth_index"`
+	AccountType            *string                 `json:"account_type"`
+	Disabled               bool                    `json:"disabled"`
+	Priority               *int                    `json:"priority"`
+	LegacyRestorePriority  *int                    `json:"-"`
+	PrimaryUsedPercent     *int                    `json:"primary_used_percent"`
+	SecondaryUsedPercent   *int                    `json:"secondary_used_percent"`
+	CreditsAmount          *float64                `json:"credits_amount"`
+	CreditsMinimumAmount   *float64                `json:"credits_minimum_amount"`
+	CreditsTierID          *string                 `json:"credits_tier_id"`
+	AntigravityQuota       *keeperAntigravityQuota `json:"antigravity_quota"`
+	PrimaryResetAt         *time.Time              `json:"primary_reset_at"`
+	SecondaryResetAt       *time.Time              `json:"secondary_reset_at"`
+	PrimaryWindowSeconds   *int                    `json:"primary_window_seconds"`
+	SecondaryWindowSeconds *int                    `json:"secondary_window_seconds"`
+	QuotaThreshold         *int                    `json:"quota_threshold"`
+	LastStatusCode         *int                    `json:"last_status_code"`
+	LastError              *string                 `json:"last_error"`
+	LatestAction           *string                 `json:"latest_action"`
+	LastCheckedAt          *time.Time              `json:"last_checked_at"`
+	LastHealthyAt          *time.Time              `json:"last_healthy_at"`
 }
 
 type keeperAccountResponse struct {
@@ -147,6 +148,7 @@ type keeperAccountResponse struct {
 	CreditsAmount          *float64                        `json:"credits_amount"`
 	CreditsMinimumAmount   *float64                        `json:"credits_minimum_amount"`
 	CreditsTierID          *string                         `json:"credits_tier_id"`
+	AntigravityQuota       *keeperAntigravityQuota         `json:"antigravity_quota"`
 	PrimaryResetAt         *string                         `json:"primary_reset_at"`
 	SecondaryResetAt       *string                         `json:"secondary_reset_at"`
 	PrimaryWindowSeconds   *int                            `json:"primary_window_seconds"`
@@ -250,6 +252,7 @@ type keeperAccountResult struct {
 	CreditsAmount          *float64
 	CreditsMinimumAmount   *float64
 	CreditsTierID          *string
+	AntigravityQuota       *keeperAntigravityQuota
 	PrimaryResetAt         *time.Time
 	SecondaryResetAt       *time.Time
 	PrimaryWindowSeconds   *int
@@ -259,6 +262,30 @@ type keeperAccountResult struct {
 	LastError              *string
 	LatestAction           *string
 	CheckedAt              time.Time
+}
+
+// keeperAntigravityQuota mirrors the quota summary returned by CPA's
+// retrieveUserQuotaSummary endpoint. It is intentionally provider-specific:
+// Antigravity exposes model groups and rolling buckets rather than Codex-style
+// primary/secondary token windows.
+type keeperAntigravityQuota struct {
+	Groups []keeperAntigravityQuotaGroup `json:"groups"`
+}
+
+type keeperAntigravityQuotaGroup struct {
+	ID          string                         `json:"id"`
+	Label       string                         `json:"label"`
+	Description *string                        `json:"description,omitempty"`
+	Buckets     []keeperAntigravityQuotaBucket `json:"buckets"`
+}
+
+type keeperAntigravityQuotaBucket struct {
+	ID                string  `json:"id"`
+	Label             string  `json:"label"`
+	Window            string  `json:"window,omitempty"`
+	RemainingFraction float64 `json:"remaining_fraction"`
+	ResetTime         *string `json:"reset_time,omitempty"`
+	Description       *string `json:"description,omitempty"`
 }
 
 func NewKeeperRunner(app *App) *KeeperRunner {
@@ -1070,6 +1097,7 @@ func keeperAccountResponses(accounts []keeperAccount, windowUsages map[string]ke
 			CreditsAmount:          account.CreditsAmount,
 			CreditsMinimumAmount:   account.CreditsMinimumAmount,
 			CreditsTierID:          account.CreditsTierID,
+			AntigravityQuota:       account.AntigravityQuota,
 			PrimaryResetAt:         apiDateTimePtr(account.PrimaryResetAt),
 			SecondaryResetAt:       apiDateTimePtr(account.SecondaryResetAt),
 			PrimaryWindowSeconds:   account.PrimaryWindowSeconds,
@@ -2607,6 +2635,7 @@ func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map
 func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, provider string, detail map[string]any, result keeperAccountResult, disabled bool, logFn func(string)) keeperAccountResult {
 	if provider == "antigravity" {
 		if probe := a.checkKeeperProviderViaCPAModels(ctx, cfg, result.Name); probe.StatusCode != nil {
+			result.AntigravityQuota = a.checkKeeperAntigravityQuota(ctx, cfg, detail)
 			if credits := a.checkKeeperAntigravityCredits(ctx, cfg, detail); credits.Known {
 				result.CreditsAmount = &credits.CreditAmount
 				result.CreditsMinimumAmount = &credits.MinCreditAmount
@@ -2626,6 +2655,182 @@ func (a *App) processKeeperProviderAuth(ctx context.Context, cfg AppConfig, prov
 		return result
 	}
 	return a.applyKeeperProviderProbeResult(ctx, cfg, provider, probe, result, disabled, logFn)
+}
+
+func (a *App) checkKeeperAntigravityQuota(ctx context.Context, cfg AppConfig, detail map[string]any) *keeperAntigravityQuota {
+	projectID := keeperAntigravityProjectID(detail)
+	if projectID == "" {
+		return nil
+	}
+	body := map[string]any{
+		"auth_index": keeperAuthIndex(detail),
+		"method":     http.MethodPost,
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+			"Content-Type":  "application/json",
+			"User-Agent":    "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)",
+		},
+		"data": fmt.Sprintf(`{"project":%s}`, strconv.Quote(projectID)),
+	}
+	endpoints := []string{
+		"https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+		"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+		"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+	}
+	for _, endpoint := range endpoints {
+		body["url"] = endpoint
+		response, payload, err := a.keeperRequest(ctx, cfg, http.MethodPost, "/v0/management/api-call", nil, body, time.Duration(cfg.CodexKeeper.UsageTimeoutSeconds)*time.Second)
+		if err != nil || response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+			continue
+		}
+		var raw map[string]any
+		if json.Unmarshal(payload, &raw) != nil {
+			continue
+		}
+		statusCode := keeperIntPtr(raw["status_code"], raw["statusCode"])
+		if statusCode == nil || *statusCode < 200 || *statusCode >= 300 {
+			continue
+		}
+		if quota := parseKeeperAntigravityQuota(keeperBodyJSON(raw["body"])); quota != nil {
+			return quota
+		}
+	}
+	return nil
+}
+
+func parseKeeperAntigravityQuota(payload map[string]any) *keeperAntigravityQuota {
+	if payload == nil {
+		return nil
+	}
+	groups := make([]keeperAntigravityQuotaGroup, 0)
+	for groupIndex, group := range keeperObjectSlice(payload["groups"]) {
+		label := firstKeeperString(group, "displayName", "display_name", "name")
+		if label == "" {
+			label = fmt.Sprintf("Quota Group %d", groupIndex+1)
+		}
+		groupID := keeperAntigravityQuotaID(label, fmt.Sprintf("quota-group-%d", groupIndex+1))
+		buckets := make([]keeperAntigravityQuotaBucket, 0)
+		for bucketIndex, bucket := range keeperObjectSlice(group["buckets"]) {
+			remaining, ok := keeperRemainingFraction(bucket["remainingFraction"], bucket["remaining_fraction"])
+			if !ok {
+				continue
+			}
+			window := firstKeeperString(bucket, "window")
+			bucketLabel := firstKeeperString(bucket, "displayName", "display_name", "name")
+			if bucketLabel == "" {
+				bucketLabel = firstKeeperString(bucket, "bucketId", "bucket_id")
+			}
+			if bucketLabel == "" {
+				bucketLabel = fmt.Sprintf("Quota %d", bucketIndex+1)
+			}
+			bucketID := firstKeeperString(bucket, "bucketId", "bucket_id", "id")
+			if bucketID == "" {
+				bucketID = keeperAntigravityQuotaID(groupID+"-"+window+"-"+strconv.Itoa(bucketIndex+1), fmt.Sprintf("%s-bucket-%d", groupID, bucketIndex+1))
+			}
+			buckets = append(buckets, keeperAntigravityQuotaBucket{
+				ID:                bucketID,
+				Label:             bucketLabel,
+				Window:            window,
+				RemainingFraction: remaining,
+				ResetTime:         keeperStringPtr(bucket["resetTime"], bucket["reset_time"]),
+				Description:       keeperStringPtr(bucket["description"]),
+			})
+		}
+		if len(buckets) == 0 {
+			continue
+		}
+		groups = append(groups, keeperAntigravityQuotaGroup{
+			ID:          groupID,
+			Label:       label,
+			Description: keeperStringPtr(group["description"]),
+			Buckets:     buckets,
+		})
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	return &keeperAntigravityQuota{Groups: groups}
+}
+
+func keeperAntigravityQuotaJSON(quota *keeperAntigravityQuota) any {
+	if quota == nil || len(quota.Groups) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(quota)
+	if err != nil {
+		return nil
+	}
+	return string(payload)
+}
+
+func parseKeeperAntigravityQuotaJSON(value string) *keeperAntigravityQuota {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var quota keeperAntigravityQuota
+	if json.Unmarshal([]byte(value), &quota) != nil || len(quota.Groups) == 0 {
+		return nil
+	}
+	return &quota
+}
+
+func keeperAntigravityProjectID(detail map[string]any) string {
+	if detail == nil {
+		return ""
+	}
+	for _, object := range []map[string]any{
+		detail,
+		keeperObject(detail["metadata"]),
+		keeperObject(detail["attributes"]),
+		keeperObject(detail["installed"]),
+		keeperObject(detail["web"]),
+	} {
+		if projectID := firstKeeperString(object, "project_id", "projectId", "cloudaicompanionProject", "gemini_virtual_project", "project"); projectID != "" {
+			return projectID
+		}
+	}
+	return ""
+}
+
+func keeperRemainingFraction(values ...any) (float64, bool) {
+	for _, value := range values {
+		if text, ok := value.(string); ok && strings.HasSuffix(strings.TrimSpace(text), "%") {
+			parsed, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(text), "%"), 64)
+			if err == nil {
+				return min(1, max(0, parsed/100)), true
+			}
+		}
+		parsed, ok := keeperFloat64(value)
+		if !ok {
+			continue
+		}
+		if parsed > 1 && parsed <= 100 {
+			parsed /= 100
+		}
+		return min(1, max(0, parsed)), true
+	}
+	return 0, false
+}
+
+func keeperAntigravityQuotaID(value, fallback string) string {
+	var result strings.Builder
+	lastDash := false
+	for _, char := range strings.ToLower(strings.TrimSpace(value)) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			result.WriteRune(char)
+			lastDash = false
+			continue
+		}
+		if result.Len() > 0 && !lastDash {
+			result.WriteByte('-')
+			lastDash = true
+		}
+	}
+	resultValue := strings.TrimSuffix(result.String(), "-")
+	if resultValue == "" {
+		return fallback
+	}
+	return resultValue
 }
 
 type keeperAntigravityCreditsInfo struct {
@@ -3343,7 +3548,7 @@ func (a *App) listKeeperAccounts(ctx context.Context) ([]keeperAccount, error) {
 		       secondary_used_percent, CAST(primary_reset_at AS TEXT), CAST(secondary_reset_at AS TEXT), quota_threshold,
 		       last_status_code, last_error, latest_action, CAST(last_checked_at AS TEXT), CAST(last_healthy_at AS TEXT),
 		       primary_window_seconds, secondary_window_seconds, restore_priority, credits_amount, credits_minimum_amount,
-		       credits_tier_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
+		       credits_tier_id, antigravity_quota_json, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
 		FROM codex_keeper_auth_states
 		ORDER BY COALESCE(email, ''), auth_name
 	`)
@@ -3420,7 +3625,7 @@ func (a *App) getKeeperState(ctx context.Context, name string) (*keeperAuthState
 		       secondary_used_percent, CAST(primary_reset_at AS TEXT), CAST(secondary_reset_at AS TEXT), quota_threshold,
 		       last_status_code, last_error, latest_action, CAST(last_checked_at AS TEXT), CAST(last_healthy_at AS TEXT),
 		       primary_window_seconds, secondary_window_seconds, restore_priority, credits_amount, credits_minimum_amount,
-		       credits_tier_id, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
+		       credits_tier_id, antigravity_quota_json, CAST(created_at AS TEXT), CAST(updated_at AS TEXT)
 		FROM codex_keeper_auth_states WHERE auth_name = ?
 	`, name)
 	if err != nil {
@@ -3439,14 +3644,14 @@ func (a *App) getKeeperState(ctx context.Context, name string) (*keeperAuthState
 
 func scanKeeperState(scanner interface{ Scan(dest ...any) error }) (keeperAuthState, error) {
 	var state keeperAuthState
-	var email, authIndex, accountType, primaryReset, secondaryReset, lastError, latestAction, lastChecked, lastHealthy, creditsTierID, createdAt, updatedAt sql.NullString
+	var email, authIndex, accountType, primaryReset, secondaryReset, lastError, latestAction, lastChecked, lastHealthy, creditsTierID, antigravityQuotaJSON, createdAt, updatedAt sql.NullString
 	var priority, primaryUsed, secondaryUsed, quotaThreshold, lastStatus, primaryWindowSeconds, secondaryWindowSeconds, restorePriority sql.NullInt64
 	var creditsAmount, creditsMinimumAmount sql.NullFloat64
 	err := scanner.Scan(
 		&state.Name, &email, &authIndex, &accountType, &state.Disabled, &priority, &primaryUsed,
 		&secondaryUsed, &primaryReset, &secondaryReset, &quotaThreshold, &lastStatus,
 		&lastError, &latestAction, &lastChecked, &lastHealthy, &primaryWindowSeconds, &secondaryWindowSeconds, &restorePriority,
-		&creditsAmount, &creditsMinimumAmount, &creditsTierID, &createdAt, &updatedAt,
+		&creditsAmount, &creditsMinimumAmount, &creditsTierID, &antigravityQuotaJSON, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return keeperAuthState{}, err
@@ -3464,6 +3669,7 @@ func scanKeeperState(scanner interface{ Scan(dest ...any) error }) (keeperAuthSt
 	state.CreditsAmount = nullableFloat(creditsAmount)
 	state.CreditsMinimumAmount = nullableFloat(creditsMinimumAmount)
 	state.CreditsTierID = nullableString(creditsTierID)
+	state.AntigravityQuota = parseKeeperAntigravityQuotaJSON(antigravityQuotaJSON.String)
 	state.QuotaThreshold = nullableInt(quotaThreshold)
 	state.LastStatusCode = nullableInt(lastStatus)
 	state.LastError = nullableString(lastError)
@@ -3493,8 +3699,9 @@ func (a *App) upsertKeeperState(ctx context.Context, result keeperAccountResult)
 			last_status_code, primary_used_percent, secondary_used_percent, quota_threshold,
 			primary_reset_at, secondary_reset_at, primary_window_seconds, secondary_window_seconds,
 			credits_amount, credits_minimum_amount, credits_tier_id,
+			antigravity_quota_json,
 			last_checked_at, last_healthy_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(auth_name) DO UPDATE SET
 			email = excluded.email,
 			auth_index = excluded.auth_index,
@@ -3519,10 +3726,11 @@ func (a *App) upsertKeeperState(ctx context.Context, result keeperAccountResult)
 			credits_amount = excluded.credits_amount,
 			credits_minimum_amount = excluded.credits_minimum_amount,
 			credits_tier_id = excluded.credits_tier_id,
+			antigravity_quota_json = COALESCE(excluded.antigravity_quota_json, codex_keeper_auth_states.antigravity_quota_json),
 			last_checked_at = excluded.last_checked_at,
 			last_healthy_at = COALESCE(excluded.last_healthy_at, codex_keeper_auth_states.last_healthy_at),
 			updated_at = excluded.updated_at
-	`, result.Name, result.Email, result.AuthIndex, result.AccountType, boolValue(result.Disabled), result.Priority, result.RestorePriority, result.LatestAction, result.LastError, result.LastStatusCode, result.PrimaryUsedPercent, result.SecondaryUsedPercent, result.QuotaThreshold, dbTimePtr(result.PrimaryResetAt), dbTimePtr(result.SecondaryResetAt), result.PrimaryWindowSeconds, result.SecondaryWindowSeconds, result.CreditsAmount, result.CreditsMinimumAmount, result.CreditsTierID, checkedAt, lastHealthy, now, now, result.ClearRestorePriority)
+	`, result.Name, result.Email, result.AuthIndex, result.AccountType, boolValue(result.Disabled), result.Priority, result.RestorePriority, result.LatestAction, result.LastError, result.LastStatusCode, result.PrimaryUsedPercent, result.SecondaryUsedPercent, result.QuotaThreshold, dbTimePtr(result.PrimaryResetAt), dbTimePtr(result.SecondaryResetAt), result.PrimaryWindowSeconds, result.SecondaryWindowSeconds, result.CreditsAmount, result.CreditsMinimumAmount, result.CreditsTierID, keeperAntigravityQuotaJSON(result.AntigravityQuota), checkedAt, lastHealthy, now, now, result.ClearRestorePriority)
 	return err
 }
 
@@ -3917,6 +4125,7 @@ func keeperAccountFromRemoteAuthFile(item map[string]any, provider string) keepe
 		CreditsAmount:        keeperFloat64Ptr(item["credits_amount"], item["credit_amount"]),
 		CreditsMinimumAmount: keeperFloat64Ptr(item["credits_minimum_amount"], item["minimum_credit_amount"]),
 		CreditsTierID:        keeperStringPtr(item["credits_tier_id"], item["paid_tier_id"]),
+		AntigravityQuota:     parseKeeperAntigravityQuotaJSON(keeperString(item["antigravity_quota_json"])),
 		LastStatusCode:       keeperIntPtr(item["last_status_code"], item["status_code"]),
 		LastError:            keeperStringPtr(item["last_error"], item["error"]),
 	}
@@ -3944,6 +4153,9 @@ func mergeKeeperAccountWithRemote(local keeperAccount, remote keeperAccount) kee
 	}
 	if local.CreditsTierID == nil {
 		local.CreditsTierID = remote.CreditsTierID
+	}
+	if local.AntigravityQuota == nil {
+		local.AntigravityQuota = remote.AntigravityQuota
 	}
 	if local.LastStatusCode == nil {
 		local.LastStatusCode = remote.LastStatusCode
@@ -4276,6 +4488,11 @@ func keeperObjectSlice(value any) []map[string]any {
 		}
 	}
 	return objects
+}
+
+func keeperObject(value any) map[string]any {
+	object, _ := value.(map[string]any)
+	return object
 }
 
 func keeperBool(value any) bool {

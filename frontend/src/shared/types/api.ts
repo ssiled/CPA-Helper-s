@@ -420,6 +420,7 @@ export interface CodexKeeperAccount {
   credits_amount: number | null
   credits_minimum_amount: number | null
   credits_tier_id: string | null
+  antigravity_quota: CodexKeeperAntigravityQuota | null
   primary_reset_at: string | null
   secondary_reset_at: string | null
   primary_window_seconds: number | null
@@ -441,6 +442,26 @@ export interface CodexKeeperAccountsResponse {
 export interface ChannelStatusRecentRequest {
   timestamp: string
   failed: boolean
+}
+
+export interface CodexKeeperAntigravityQuota {
+  groups: CodexKeeperAntigravityQuotaGroup[]
+}
+
+export interface CodexKeeperAntigravityQuotaGroup {
+  id: string
+  label: string
+  description?: string
+  buckets: CodexKeeperAntigravityQuotaBucket[]
+}
+
+export interface CodexKeeperAntigravityQuotaBucket {
+  id: string
+  label: string
+  window?: string
+  remaining_fraction: number
+  reset_time?: string
+  description?: string
 }
 
 export interface ChannelStatusItem {
