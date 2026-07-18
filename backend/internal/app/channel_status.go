@@ -281,10 +281,11 @@ func (a *App) handleChannelStatus(w http.ResponseWriter, r *http.Request) error 
 	if err := requireMethod(r, http.MethodGet); err != nil {
 		return err
 	}
-	if _, err := a.currentUser(r.Context(), r); err != nil {
+	user, err := a.currentUser(r.Context(), r)
+	if err != nil {
 		return err
 	}
-	items, refreshedAt, err := a.listChannelStatusSnapshots(r.Context())
+	items, refreshedAt, err := a.listChannelStatusSnapshots(r.Context(), user)
 	if err != nil {
 		return err
 	}
@@ -354,7 +355,7 @@ func (a *App) refreshChannelStatusSnapshot(ctx context.Context, cache *channelSt
 	return nextCache, nil
 }
 
-func (a *App) listChannelStatusSnapshots(ctx context.Context) ([]channelStatusItem, *string, error) {
+func (a *App) listChannelStatusSnapshots(ctx context.Context, user *AuthUser) ([]channelStatusItem, *string, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT pool_id, pool_name, description, enabled, account_types, account_count,
 		       available_accounts, disabled_accounts, error_accounts, quota_exhausted_accounts,
@@ -386,7 +387,36 @@ func (a *App) listChannelStatusSnapshots(ctx context.Context) ([]channelStatusIt
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	return items, apiDateTimePtr(latest), nil
+	if user == nil || user.IsAdmin {
+		return items, apiDateTimePtr(latest), nil
+	}
+	localPools, err := a.localAuthPools(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return channelStatusItemsVisibleToUser(items, localPools, user), apiDateTimePtr(latest), nil
+}
+
+func channelStatusItemsVisibleToUser(items []channelStatusItem, pools []authPool, user *AuthUser) []channelStatusItem {
+	if user == nil || user.IsAdmin {
+		return items
+	}
+	poolByID := make(map[string]authPool, len(pools))
+	for _, pool := range pools {
+		pool.AllowedUserIDs = normalizeAuthPoolUserIDs(pool.AllowedUserIDs)
+		if pool.Visibility == "" {
+			pool.Visibility = authPoolVisibilityAdminsOnly
+		}
+		poolByID[strings.TrimSpace(pool.ID)] = pool
+	}
+	visible := make([]channelStatusItem, 0, len(items))
+	for _, item := range items {
+		pool, ok := poolByID[strings.TrimSpace(item.ID)]
+		if ok && authPoolVisibleToUser(pool, user) {
+			visible = append(visible, item)
+		}
+	}
+	return visible
 }
 
 func scanChannelStatusItem(scanner interface{ Scan(dest ...any) error }) (channelStatusItem, *time.Time, error) {

@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,6 +22,10 @@ const (
 	authPoolModelSyncBackoffMax  = 5 * time.Minute
 	authPoolResolvedSyncTimeout  = 15 * time.Second
 	authPoolResolvedSyncInterval = 30 * time.Second
+
+	authPoolVisibilityAdminsOnly = "admins_only"
+	authPoolVisibilityAllUsers   = "all_users"
+	authPoolVisibilitySelected   = "selected_users"
 )
 
 type authPool struct {
@@ -30,6 +36,7 @@ type authPool struct {
 	ResolvedAuthIDs []string `json:"resolved_auth_ids,omitempty"`
 	AccountTypes    []string `json:"account_types,omitempty"`
 	Models          []string `json:"models,omitempty"`
+	Visibility      string   `json:"visibility,omitempty"`
 	AllowedUserIDs  []int    `json:"allowed_user_ids"`
 	Enabled         bool     `json:"enabled"`
 	Accounts        []any    `json:"accounts,omitempty"`
@@ -105,7 +112,38 @@ type authPoolPayload struct {
 	AuthIDs        []string `json:"auth_ids"`
 	AccountTypes   []string `json:"account_types"`
 	Models         []string `json:"models,omitempty"`
+	Visibility     string   `json:"visibility"`
 	AllowedUserIDs []int    `json:"allowed_user_ids"`
+}
+
+func normalizeAuthPoolVisibility(value string, allowedUserIDs []int) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		if len(normalizeAuthPoolUserIDs(allowedUserIDs)) > 0 {
+			return authPoolVisibilitySelected, nil
+		}
+		return authPoolVisibilityAdminsOnly, nil
+	}
+	switch value {
+	case authPoolVisibilityAdminsOnly, authPoolVisibilityAllUsers, authPoolVisibilitySelected:
+		return value, nil
+	default:
+		return "", validationError("invalid auth pool visibility")
+	}
+}
+
+func authPoolVisibleToUser(pool authPool, user *AuthUser) bool {
+	if user == nil || user.IsAdmin {
+		return true
+	}
+	switch pool.Visibility {
+	case authPoolVisibilityAllUsers:
+		return true
+	case authPoolVisibilitySelected:
+		return authPoolUserIDAllowed(pool.AllowedUserIDs, user.ID)
+	default:
+		return false
+	}
 }
 
 type authPoolBindingPayload struct {
@@ -356,10 +394,8 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 	if err != nil {
 		return authPoolStatus{}, err
 	}
-	if len(localBindings) > 0 {
-		status.Bindings = localBindings
-	}
 	status.Pools = authPoolsVisibleToUser(status.Pools, localPools, user)
+	status.Bindings = authPoolBindingsVisibleToPools(localBindings, status.Pools)
 	return status, nil
 }
 
@@ -775,7 +811,15 @@ func authPoolModelSyncBackoff(failures int) time.Duration {
 }
 
 func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (authPool, error) {
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, AllowedUserIDs: normalizeAuthPoolUserIDs(payload.AllowedUserIDs), Enabled: true}
+	visibility, err := normalizeAuthPoolVisibility(payload.Visibility, payload.AllowedUserIDs)
+	if err != nil {
+		return authPool{}, err
+	}
+	allowedUserIDs := normalizeAuthPoolUserIDs(payload.AllowedUserIDs)
+	if visibility != authPoolVisibilitySelected {
+		allowedUserIDs = []int{}
+	}
+	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}
@@ -801,11 +845,12 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	response.Pool.Visibility = pool.Visibility
 	response.Pool.AllowedUserIDs = pool.AllowedUserIDs
 	if err := a.saveLocalAuthPool(ctx, response.Pool); err != nil {
 		return authPool{}, err
 	}
-	if err := a.replaceAuthPoolEntitlements(ctx, response.Pool.ID, pool.AllowedUserIDs); err != nil {
+	if err := a.replaceAuthPoolAccess(ctx, response.Pool.ID, pool.Visibility, pool.AllowedUserIDs); err != nil {
 		return authPool{}, err
 	}
 	if err := a.syncAuthPoolModels(ctx); err != nil {
@@ -845,6 +890,23 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	if pool.ID == "" || pool.Name == "" {
 		return nil
 	}
+	if strings.TrimSpace(pool.Visibility) == "" {
+		var storedVisibility string
+		err := a.db.QueryRowContext(ctx, `SELECT visibility FROM auth_pools WHERE id = ?`, pool.ID).Scan(&storedVisibility)
+		switch {
+		case err == nil:
+			pool.Visibility = storedVisibility
+		case errors.Is(err, sql.ErrNoRows):
+			pool.Visibility = authPoolVisibilityAdminsOnly
+		default:
+			return err
+		}
+	}
+	visibility, err := normalizeAuthPoolVisibility(pool.Visibility, pool.AllowedUserIDs)
+	if err != nil {
+		return err
+	}
+	pool.Visibility = visibility
 	authIDsJSON, err := marshalStringList(pool.AuthIDs)
 	if err != nil {
 		return err
@@ -863,8 +925,8 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	}
 	now := dbTime(time.Now())
 	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, visibility, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
@@ -872,15 +934,16 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 			resolved_auth_ids_json = excluded.resolved_auth_ids_json,
 			account_types_json = excluded.account_types_json,
 			models_json = excluded.models_json,
+			visibility = excluded.visibility,
 			enabled = excluded.enabled,
 			updated_at = excluded.updated_at
-	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON, pool.Enabled, now, now)
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON, pool.Visibility, pool.Enabled, now, now)
 	return err
 }
 
 func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, enabled
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, visibility, enabled
 		FROM auth_pools
 		ORDER BY id
 	`)
@@ -892,7 +955,7 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	for rows.Next() {
 		var pool authPool
 		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON string
-		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Enabled); err != nil {
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Visibility, &pool.Enabled); err != nil {
 			return nil, err
 		}
 		pool.AuthIDs = unmarshalStringList(authIDsJSON)
@@ -921,12 +984,28 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 }
 
 func (a *App) replaceAuthPoolEntitlements(ctx context.Context, poolID string, userIDs []int) error {
+	visibility := authPoolVisibilityAdminsOnly
+	if len(normalizeAuthPoolUserIDs(userIDs)) > 0 {
+		visibility = authPoolVisibilitySelected
+	}
+	return a.replaceAuthPoolAccess(ctx, poolID, visibility, userIDs)
+}
+
+func (a *App) replaceAuthPoolAccess(ctx context.Context, poolID, visibility string, userIDs []int) error {
 	poolID = strings.TrimSpace(poolID)
 	if poolID == "" {
 		return validationError("pool id is required")
 	}
+	var err error
+	visibility, err = normalizeAuthPoolVisibility(visibility, userIDs)
+	if err != nil {
+		return err
+	}
 	userIDs = normalizeAuthPoolUserIDs(userIDs)
-	revokedBindings, err := a.authPoolBindingsRevokedByEntitlements(ctx, poolID, userIDs)
+	if visibility != authPoolVisibilitySelected {
+		userIDs = []int{}
+	}
+	revokedBindings, err := a.authPoolBindingsRevokedByVisibility(ctx, poolID, visibility, userIDs)
 	if err != nil {
 		return err
 	}
@@ -940,6 +1019,10 @@ func (a *App) replaceAuthPoolEntitlements(ctx context.Context, poolID string, us
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_pool_entitlements WHERE pool_id = ?`, poolID); err != nil {
+		a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_pools SET visibility = ?, updated_at = ? WHERE id = ?`, visibility, dbTime(time.Now()), poolID); err != nil {
 		a.restoreAuthPoolBindingsInPlugin(ctx, revokedBindings)
 		return err
 	}
@@ -966,7 +1049,10 @@ func (a *App) replaceAuthPoolEntitlements(ctx context.Context, poolID string, us
 	return nil
 }
 
-func (a *App) authPoolBindingsRevokedByEntitlements(ctx context.Context, poolID string, allowedUserIDs []int) ([]authPoolBinding, error) {
+func (a *App) authPoolBindingsRevokedByVisibility(ctx context.Context, poolID, visibility string, allowedUserIDs []int) ([]authPoolBinding, error) {
+	if visibility == authPoolVisibilityAllUsers {
+		return nil, nil
+	}
 	query := `
 		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, '')
 		FROM user_api_key_pools p
@@ -975,7 +1061,7 @@ func (a *App) authPoolBindingsRevokedByEntitlements(ctx context.Context, poolID 
 		WHERE p.pool_id = ? AND u.is_admin = 0
 	`
 	args := []any{poolID}
-	if len(allowedUserIDs) > 0 {
+	if visibility == authPoolVisibilitySelected && len(allowedUserIDs) > 0 {
 		placeholders := make([]string, 0, len(allowedUserIDs))
 		for _, userID := range allowedUserIDs {
 			placeholders = append(placeholders, "?")
@@ -1057,17 +1143,23 @@ func normalizeAuthPoolUserIDs(userIDs []int) []int {
 }
 
 func authPoolsVisibleToUser(pools []authPool, localPools []authPool, user *AuthUser) []authPool {
-	entitlements := make(map[string][]int, len(localPools))
+	accessByPoolID := make(map[string]authPool, len(localPools))
 	for _, pool := range localPools {
-		entitlements[strings.TrimSpace(pool.ID)] = normalizeAuthPoolUserIDs(pool.AllowedUserIDs)
+		pool.AllowedUserIDs = normalizeAuthPoolUserIDs(pool.AllowedUserIDs)
+		accessByPoolID[strings.TrimSpace(pool.ID)] = pool
 	}
 	visible := make([]authPool, 0, len(pools))
 	for _, pool := range pools {
-		pool.AllowedUserIDs = entitlements[strings.TrimSpace(pool.ID)]
+		access := accessByPoolID[strings.TrimSpace(pool.ID)]
+		pool.Visibility = access.Visibility
+		if pool.Visibility == "" {
+			pool.Visibility = authPoolVisibilityAdminsOnly
+		}
+		pool.AllowedUserIDs = access.AllowedUserIDs
 		if pool.AllowedUserIDs == nil {
 			pool.AllowedUserIDs = []int{}
 		}
-		if user != nil && !user.IsAdmin && !authPoolUserIDAllowed(pool.AllowedUserIDs, user.ID) {
+		if !authPoolVisibleToUser(pool, user) {
 			continue
 		}
 		visible = append(visible, pool)
@@ -1082,6 +1174,20 @@ func authPoolUserIDAllowed(allowedUserIDs []int, userID int) bool {
 		}
 	}
 	return false
+}
+
+func authPoolBindingsVisibleToPools(bindings []authPoolBinding, pools []authPool) []authPoolBinding {
+	visiblePoolIDs := make(map[string]struct{}, len(pools))
+	for _, pool := range pools {
+		visiblePoolIDs[strings.TrimSpace(pool.ID)] = struct{}{}
+	}
+	visible := make([]authPoolBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		if _, ok := visiblePoolIDs[strings.TrimSpace(binding.PoolID)]; ok {
+			visible = append(visible, binding)
+		}
+	}
+	return visible
 }
 
 func (a *App) restoreLocalAuthPoolsToPlugin(ctx context.Context, pools []authPool) error {
@@ -1522,7 +1628,7 @@ func (a *App) ensureAPIKeyPoolAccess(ctx context.Context, user *AuthUser, apiKey
 }
 
 func (a *App) ensureAuthPoolBindingAccess(ctx context.Context, user *AuthUser, poolID string) error {
-	exists, enabled, err := a.localAuthPoolAvailability(ctx, poolID)
+	exists, enabled, visibility, err := a.localAuthPoolAvailability(ctx, poolID)
 	if err != nil {
 		return err
 	}
@@ -1534,7 +1640,7 @@ func (a *App) ensureAuthPoolBindingAccess(ctx context.Context, user *AuthUser, p
 		if err := a.saveLocalAuthPools(ctx, status.Pools); err != nil {
 			return err
 		}
-		exists, enabled, err = a.localAuthPoolAvailability(ctx, poolID)
+		exists, enabled, visibility, err = a.localAuthPoolAvailability(ctx, poolID)
 		if err != nil {
 			return err
 		}
@@ -1551,6 +1657,12 @@ func (a *App) ensureAuthPoolBindingAccess(ctx context.Context, user *AuthUser, p
 	if user == nil {
 		return forbiddenError("auth pool access denied")
 	}
+	if visibility == authPoolVisibilityAllUsers {
+		return nil
+	}
+	if visibility != authPoolVisibilitySelected {
+		return forbiddenError("auth pool access denied")
+	}
 	var entitled int
 	if err := a.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -1565,17 +1677,21 @@ func (a *App) ensureAuthPoolBindingAccess(ctx context.Context, user *AuthUser, p
 	return nil
 }
 
-func (a *App) localAuthPoolAvailability(ctx context.Context, poolID string) (bool, bool, error) {
+func (a *App) localAuthPoolAvailability(ctx context.Context, poolID string) (bool, bool, string, error) {
 	var count int
 	var enabled bool
+	var visibility string
 	if err := a.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(MAX(enabled), 0)
+		SELECT COUNT(*), COALESCE(MAX(enabled), 0), COALESCE(MAX(visibility), '')
 		FROM auth_pools
 		WHERE id = ?
-	`, poolID).Scan(&count, &enabled); err != nil {
-		return false, false, err
+	`, poolID).Scan(&count, &enabled, &visibility); err != nil {
+		return false, false, "", err
 	}
-	return count > 0, enabled, nil
+	if visibility == "" {
+		visibility = authPoolVisibilityAdminsOnly
+	}
+	return count > 0, enabled, visibility, nil
 }
 
 func (a *App) localAuthPoolBindings(ctx context.Context, user *AuthUser) ([]authPoolBinding, error) {

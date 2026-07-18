@@ -38,6 +38,57 @@ func TestAuthPoolPathParts(t *testing.T) {
 	}
 }
 
+func TestNormalizeAuthPoolVisibilityPreservesLegacyDefaults(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		allowed []int
+		want    string
+		wantErr bool
+	}{
+		{name: "legacy empty is admin only", want: authPoolVisibilityAdminsOnly},
+		{name: "legacy selected users", allowed: []int{7}, want: authPoolVisibilitySelected},
+		{name: "all users", value: authPoolVisibilityAllUsers, want: authPoolVisibilityAllUsers},
+		{name: "invalid", value: "public", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeAuthPoolVisibility(test.value, test.allowed)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, want error %v", err, test.wantErr)
+			}
+			if !test.wantErr && got != test.want {
+				t.Fatalf("visibility = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAuthPoolsVisibleToUserHonorsVisibility(t *testing.T) {
+	user := &AuthUser{ID: 7, Username: "user"}
+	pools := []authPool{
+		{ID: "admin", Visibility: authPoolVisibilityAdminsOnly},
+		{ID: "all", Visibility: authPoolVisibilityAllUsers},
+		{ID: "selected", Visibility: authPoolVisibilitySelected, AllowedUserIDs: []int{7}},
+		{ID: "other", Visibility: authPoolVisibilitySelected, AllowedUserIDs: []int{8}},
+	}
+	visible := authPoolsVisibleToUser(pools, pools, user)
+	if got := []string{visible[0].ID, visible[1].ID}; !reflect.DeepEqual(got, []string{"all", "selected"}) {
+		t.Fatalf("visible pools = %#v, want all and selected", got)
+	}
+	if got := len(authPoolsVisibleToUser(pools, pools, &AuthUser{ID: 1, IsAdmin: true})); got != len(pools) {
+		t.Fatalf("admin visible pool count = %d, want %d", got, len(pools))
+	}
+}
+
+func TestAuthPoolBindingsVisibleToPoolsFiltersHiddenPools(t *testing.T) {
+	bindings := []authPoolBinding{{APIKeyHash: "key-all", PoolID: "all"}, {APIKeyHash: "key-hidden", PoolID: "hidden"}}
+	visible := authPoolBindingsVisibleToPools(bindings, []authPool{{ID: "all"}})
+	if len(visible) != 1 || visible[0].APIKeyHash != "key-all" {
+		t.Fatalf("visible bindings = %#v, want only all-pool binding", visible)
+	}
+}
+
 func TestAuthPoolModelSyncAsyncCoalescesAndBacksOff(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -326,6 +377,13 @@ func TestBindAPIKeyToAuthPoolRequiresUserEntitlement(t *testing.T) {
 	}
 	if _, err := app.bindAPIKeyToAuthPool(ctx, user, payload); err == nil || !strings.Contains(err.Error(), "auth pool access denied") {
 		t.Fatalf("bind after entitlement revocation error = %v, want access denied", err)
+	}
+
+	if err := app.replaceAuthPoolAccess(ctx, pool.ID, authPoolVisibilityAllUsers, nil); err != nil {
+		t.Fatalf("make auth pool visible to all users: %v", err)
+	}
+	if _, err := app.bindAPIKeyToAuthPool(ctx, user, payload); err != nil {
+		t.Fatalf("bind all-users auth pool: %v", err)
 	}
 }
 

@@ -207,6 +207,7 @@ func requireSchemaShape(ctx context.Context, db *sql.DB) error {
 		{"model_proxy_request_attributions", "request_id"},
 		{"model_proxy_request_attributions", "started_at"},
 		{"model_prices", "request_usd"},
+		{"auth_pools", "visibility"},
 		{"user_quota_charges", "lifetime_deducted_usd"},
 		{"user_card_shop_favorites", "shop_key"},
 		{"user_card_shop_tags", "tag"},

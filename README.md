@@ -49,6 +49,7 @@ For clarity, model requests initiated by an Agent are still sent directly from t
 - **Model pricing maintenance**: Maintain token-model input, output and cache prices in USD per million tokens; models whose name contains `image` are charged by a fixed USD price per successful request, with CPA model comparison for quickly filling LiteLLM / manual prices.
 - **Card shop index**: Admins can browse real-time public card-shop and product snapshots, search by product title, use popular tags, sort results and favorite shops for faster lookup. This is only a public information index and does not participate in transactions.
 - **Available model aggregation**: Query available models through the current account's bound CPA API keys and enrich them with local pricing data.
+- **Auth-pool visibility**: Set each pool to administrators only, all users, or selected users; API-key selection and channel status use the same access scope.
 - **CLIProxyAPI / CPAMC integration**: Configure the service URL, management key, usage queue and local collector options to persist remote usage events into SQLite.
 - **Auth-pool plugin monitoring**: Inspect scheduler selections, candidate accounts, selected auth IDs, completion status and failure reasons across configured CPA targets.
 - **Codex auth file inspection**: Support Cron scheduling, quota thresholds, check-only mode, conditional scanning, concurrent workers, priority rules, account enable/disable and deletion.

@@ -1,9 +1,9 @@
 ﻿<script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
-import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, listAuthPoolAccounts, saveAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listUsers } from '@/features/users/api/usersApi'
-import type { AuthPool, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
+import type { AuthPool, AuthPoolVisibility, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 
 const message = useMessage()
@@ -23,6 +23,7 @@ const poolDescription = ref('')
 const selectedAuthIDs = ref<string[]>([])
 const selectedBatchType = ref<string | null>(null)
 const selectedAccountTypes = ref<string[]>([])
+const poolVisibility = ref<AuthPoolVisibility>('admins_only')
 const selectedAllowedUserIDs = ref<number[]>([])
 const apiKeyProvider = ref<'gemini' | 'grok'>('gemini')
 const apiKeyValue = ref('')
@@ -64,7 +65,7 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
   { title: t('ID', 'ID'), key: 'id' },
   { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(row.auth_ids.length + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
-  { title: t('授权用户', 'Authorized users'), key: 'allowed_user_ids', render: (row) => String(row.allowed_user_ids?.length ?? 0) },
+  { title: t('可见范围', 'Visibility'), key: 'visibility', render: (row) => visibilityLabel(row) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
     key: 'accounts',
@@ -101,6 +102,14 @@ function accountStatus(id: string): string {
   if (account.disabled) return '\u7981\u7528'
   if (account.last_status_code && account.last_status_code >= 400) return `\u5f02\u5e38 ${account.last_status_code}`
   return '\u6b63\u5e38'
+}
+
+function visibilityLabel(pool: AuthPool): string {
+  if (pool.visibility === 'all_users') return t('全部用户', 'All users')
+  if (pool.visibility === 'selected_users') {
+    return t(`指定用户（${pool.allowed_user_ids?.length ?? 0}）`, `Selected users (${pool.allowed_user_ids?.length ?? 0})`)
+  }
+  return t('仅管理员', 'Administrators only')
 }
 
 function accountLabel(account: CodexKeeperAccount): string {
@@ -159,6 +168,7 @@ function openCreate() {
   selectedAuthIDs.value = []
   selectedBatchType.value = null
   selectedAccountTypes.value = []
+  poolVisibility.value = 'admins_only'
   selectedAllowedUserIDs.value = []
   editorVisible.value = true
 }
@@ -191,6 +201,7 @@ function editPool(pool: AuthPool) {
   selectedAuthIDs.value = [...pool.auth_ids]
   selectedBatchType.value = null
   selectedAccountTypes.value = [...(pool.account_types ?? [])]
+  poolVisibility.value = pool.visibility || ((pool.allowed_user_ids?.length ?? 0) > 0 ? 'selected_users' : 'admins_only')
   selectedAllowedUserIDs.value = [...(pool.allowed_user_ids ?? [])]
   editorVisible.value = true
 }
@@ -202,9 +213,13 @@ async function savePool() {
     message.error(t('\u53f7\u6c60 ID \u548c\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a', 'Pool ID and name are required'))
     return
   }
+  if (poolVisibility.value === 'selected_users' && selectedAllowedUserIDs.value.length === 0) {
+    message.error(t('请选择至少一个授权用户', 'Select at least one authorized user'))
+    return
+  }
   isSaving.value = true
   try {
-    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, allowed_user_ids: selectedAllowedUserIDs.value })
+    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, visibility: poolVisibility.value, allowed_user_ids: poolVisibility.value === 'selected_users' ? selectedAllowedUserIDs.value : [] })
     message.success(t('\u53f7\u6c60\u5df2\u4fdd\u5b58', 'Pool saved'))
     editorVisible.value = false
     await refresh()
@@ -313,8 +328,15 @@ onMounted(refresh)
             </div>
           </div>
         </NFormItem>
-        <NFormItem :label="t('允许使用号池的用户', 'Users allowed to use this pool')">
-          <NSelect v-model:value="selectedAllowedUserIDs" multiple filterable :options="userOptions" :disabled="isSaving" :placeholder="t('未选择时仅管理员可以绑定该号池', 'When empty, only administrators can bind this pool')" />
+        <NFormItem :label="t('用户可见范围', 'User visibility')">
+          <NRadioGroup v-model:value="poolVisibility" class="visibility-options" :disabled="isSaving">
+            <NRadioButton value="admins_only">{{ t('仅管理员', 'Administrators only') }}</NRadioButton>
+            <NRadioButton value="all_users">{{ t('全部用户', 'All users') }}</NRadioButton>
+            <NRadioButton value="selected_users">{{ t('指定用户', 'Selected users') }}</NRadioButton>
+          </NRadioGroup>
+        </NFormItem>
+        <NFormItem v-if="poolVisibility === 'selected_users'" :label="t('授权用户', 'Authorized users')">
+          <NSelect v-model:value="selectedAllowedUserIDs" multiple filterable :options="userOptions" :disabled="isSaving" :placeholder="t('选择可以查看并绑定该号池的用户', 'Select users who can view and bind this pool')" />
         </NFormItem>
         <div class="modal-actions">
           <NButton secondary :disabled="isSaving" @click="editorVisible = false">{{ t('\u53d6\u6d88', 'Cancel') }}</NButton>
@@ -362,6 +384,7 @@ onMounted(refresh)
 .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .batch-type-select { min-width: 200px; max-width: 280px; }
 .selected-type-rules { display: flex; flex-wrap: wrap; gap: 6px; }
+.visibility-options { display: flex; flex-wrap: wrap; }
 .form-help { margin: 0 0 16px; color: var(--cpa-text-muted); font-size: 12px; line-height: 1.6; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>

@@ -183,7 +183,7 @@ onMounted(refresh)
     <NAlert v-if="config && !config.plugin_installed" type="warning" class="panel-alert">
       {{ t('未检测到 cpa-auth-pool 插件。请先在 CPA 安装并启用 cpa-auth-pool；未安装时 CPA-Helper 会继续使用原来的 CPA API Key 同步模式。', 'cpa-auth-pool is not detected. Install and enable it in CPA first. Until then, CPA-Helper keeps using the original CPA API key sync mode.') }}
       <template v-if="config.plugin_error">
-        <br />{{ config.plugin_error }}
+        <br>{{ config.plugin_error }}
       </template>
     </NAlert>
 

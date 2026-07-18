@@ -71,6 +71,28 @@ func TestBuildChannelStatusItemsUsesPoolsAndHidesAccounts(t *testing.T) {
 	}
 }
 
+func TestChannelStatusItemsVisibleToUserHonorsPoolVisibility(t *testing.T) {
+	items := []channelStatusItem{
+		{ID: "admin"},
+		{ID: "all"},
+		{ID: "selected"},
+		{ID: "other"},
+	}
+	pools := []authPool{
+		{ID: "admin", Visibility: authPoolVisibilityAdminsOnly},
+		{ID: "all", Visibility: authPoolVisibilityAllUsers},
+		{ID: "selected", Visibility: authPoolVisibilitySelected, AllowedUserIDs: []int{7}},
+		{ID: "other", Visibility: authPoolVisibilitySelected, AllowedUserIDs: []int{8}},
+	}
+	visible := channelStatusItemsVisibleToUser(items, pools, &AuthUser{ID: 7, Username: "user"})
+	if got := []string{visible[0].ID, visible[1].ID}; !reflect.DeepEqual(got, []string{"all", "selected"}) {
+		t.Fatalf("visible channel status = %#v, want all and selected", got)
+	}
+	if got := len(channelStatusItemsVisibleToUser(items, pools, &AuthUser{ID: 1, IsAdmin: true})); got != len(items) {
+		t.Fatalf("admin channel status count = %d, want %d", got, len(items))
+	}
+}
+
 func TestBuildChannelStatusItemsWeightsRemainingByPoolSize(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, appTimeLocation)
 	accountType := "plus"
@@ -243,7 +265,7 @@ func TestChannelStatusSnapshotRoundTripsRecentRequests(t *testing.T) {
 	if err := app.replaceChannelStatusSnapshots(context.Background(), []channelStatusItem{item}); err != nil {
 		t.Fatalf("replaceChannelStatusSnapshots failed: %v", err)
 	}
-	stored, _, err := app.listChannelStatusSnapshots(context.Background())
+	stored, _, err := app.listChannelStatusSnapshots(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("listChannelStatusSnapshots failed: %v", err)
 	}

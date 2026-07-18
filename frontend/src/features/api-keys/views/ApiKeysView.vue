@@ -109,14 +109,6 @@ const apiKeyPoolBindings = computed(() => {
   return bindings
 })
 
-const authPoolNameByID = computed(() => {
-  const names = new Map<string, string>()
-  for (const pool of authPools.value) {
-    names.set(pool.id, pool.name || pool.id)
-  }
-  return names
-})
-
 const authPoolIDByApiKeyHash = computed(() => {
   const bindings = new Map<string, string>()
   for (const binding of authPoolBindings.value) {

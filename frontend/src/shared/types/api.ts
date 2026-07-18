@@ -259,6 +259,8 @@ export interface CodexKeeperQuotaWindowUsage {
 }
 
 
+export type AuthPoolVisibility = 'admins_only' | 'all_users' | 'selected_users'
+
 export interface AuthPool {
   id: string
   name: string
@@ -267,6 +269,7 @@ export interface AuthPool {
   resolved_auth_ids?: string[]
   account_types?: string[]
   models?: string[]
+  visibility: AuthPoolVisibility
   allowed_user_ids: number[]
   enabled: boolean
 }
@@ -397,6 +400,7 @@ export interface AuthPoolPayload {
   auth_ids: string[]
   account_types: string[]
   models?: string[]
+  visibility: AuthPoolVisibility
   allowed_user_ids: number[]
 }
 
