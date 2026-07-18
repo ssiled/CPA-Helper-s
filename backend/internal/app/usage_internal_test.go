@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,89 @@ func TestSaveUsageMessageUsesModelProxyRequestAttribution(t *testing.T) {
 	record, created, err := app.saveUsageMessage(ctx, []byte(raw))
 	if err != nil || !created {
 		t.Fatalf("saveUsageMessage created=%v err=%v", created, err)
+	}
+	if record.UsageUsername == nil || *record.UsageUsername != "member" {
+		t.Fatalf("usage_username = %#v, want member", record.UsageUsername)
+	}
+	if record.APIKeyDescription == nil || *record.APIKeyDescription != "VSCode" {
+		t.Fatalf("api_key_description = %#v, want VSCode", record.APIKeyDescription)
+	}
+}
+
+func TestCurrentModelRequestTestRecordsUsageAttribution(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	const responseRequestID = "req-model-test-attribution"
+	var helperRequestID string
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		helperRequestID = r.Header.Get("X-CPA-Helper-Request-Id")
+		if helperRequestID == "" || r.Header.Get("X-Request-Id") != helperRequestID {
+			t.Fatalf("request IDs = helper %q request %q, want matching non-empty IDs", helperRequestID, r.Header.Get("X-Request-Id"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-CPA-Request-Id", responseRequestID)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	ctx := context.Background()
+	const apiKey = "helper-owned-model-test-key"
+	const forwardingKey = "cpa-forwarding-model-test-key"
+	userID := seedQuotaTestUser(t, app, "member")
+	seedQuotaTestAPIKey(t, app, userID, apiKey)
+	apiKeyHash := hashAPIKey(apiKey)
+	if err := app.saveLocalAuthPool(ctx, authPool{ID: "test", Name: "Test", Models: []string{"gpt-test"}, Visibility: authPoolVisibilityAllUsers, Enabled: true}); err != nil {
+		t.Fatalf("save auth pool: %v", err)
+	}
+	now := dbTime(time.Now())
+	if _, err := app.db.Exec(`INSERT INTO user_api_key_pools (api_key_hash, pool_id, created_at, updated_at) VALUES (?, 'test', ?, ?)`, apiKeyHash, now, now); err != nil {
+		t.Fatalf("bind API key: %v", err)
+	}
+	configureKeeperTestCPA(t, app, cpa.URL, func(cfg *AppConfig) {
+		cfg.AuthPoolProxyTargets = []AuthPoolProxyTargetConfig{{
+			ID: "test", Name: "Test", CPAURL: cpa.URL, APIKey: forwardingKey, Enabled: true,
+		}}
+	})
+
+	result, err := app.testCurrentUserModelRequest(ctx, &AuthUser{ID: userID, Username: "member"}, modelRequestTestPayload{
+		APIKeyHash: apiKeyHash,
+		Model:      "gpt-test",
+		Message:    "ping",
+	})
+	if err != nil {
+		t.Fatalf("testCurrentUserModelRequest: %v", err)
+	}
+	if result.Reply != "pong" || result.StatusCode != http.StatusOK || helperRequestID == "" {
+		t.Fatalf("model test result = %#v, helper request ID %q", result, helperRequestID)
+	}
+
+	var attributedHash, model, endpoint string
+	var statusCode int
+	if err := app.db.QueryRow(`
+		SELECT api_key_hash, model, endpoint, status_code
+		FROM model_proxy_request_attributions
+		WHERE request_id = ?
+	`, responseRequestID).Scan(&attributedHash, &model, &endpoint, &statusCode); err != nil {
+		t.Fatalf("query response attribution: %v", err)
+	}
+	if attributedHash != apiKeyHash || model != "gpt-test" || endpoint != "POST /v1/chat/completions" || statusCode != http.StatusOK {
+		t.Fatalf("attribution = hash %q model %q endpoint %q status %d", attributedHash, model, endpoint, statusCode)
+	}
+
+	raw := `{"api_key":"` + forwardingKey + `","provider":"codex","model":"gpt-test medium","endpoint":"POST /v1/chat/completions","request_id":"` + responseRequestID + `","input_tokens":10,"output_tokens":2}`
+	record, created, err := app.saveUsageMessage(ctx, []byte(raw))
+	if err != nil || !created {
+		t.Fatalf("save attributed usage created=%v err=%v", created, err)
 	}
 	if record.UsageUsername == nil || *record.UsageUsername != "member" {
 		t.Fatalf("usage_username = %#v, want member", record.UsageUsername)

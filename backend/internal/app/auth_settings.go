@@ -568,10 +568,33 @@ func (a *App) testCurrentUserModelRequest(ctx context.Context, user *AuthUser, p
 		headers.Set(authPoolProxyAPIKeyHashHeader, apiKey.APIKeyHash)
 	}
 	requestBody := modelRequestEndpointBody(endpoint, model, message)
+	requestID := newModelProxyRequestID()
+	headers.Set("X-Request-Id", requestID)
+	headers.Set("X-CPA-Helper-Request-Id", requestID)
+	startedAt := time.Now()
+	attributionMeta := modelProxyRequestAttributionMetadata{
+		Model:     model,
+		Endpoint:  "POST /v1" + modelRequestEndpointPath(endpoint),
+		StartedAt: startedAt,
+	}
+	// Register before sending so a fast CPA usage event can be attributed even
+	// when the collector processes it before this test request returns.
+	if err := a.recordModelProxyRequestAttributionsWithMetadata(ctx, apiKey.APIKeyHash, attributionMeta, requestID); err != nil {
+		return modelRequestTestResponse{}, err
+	}
 
-	start := time.Now()
 	response, responseBody, err := doJSON(ctx, httpClient(modelRequestTestTimeout), http.MethodPost, target, headers, requestBody)
-	durationMS := time.Since(start).Milliseconds()
+	completedAt := time.Now()
+	durationMS := completedAt.Sub(startedAt).Milliseconds()
+	if response != nil {
+		statusCode := response.StatusCode
+		attributionMeta.CompletedAt = &completedAt
+		attributionMeta.StatusCode = &statusCode
+	}
+	responseRequestID := modelProxyRequestIDFromResponse(response, responseBody)
+	if err := a.recordModelProxyRequestAttributionsWithMetadata(ctx, apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {
+		return modelRequestTestResponse{}, err
+	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return modelRequestTestResponse{}, validationError("模型请求超时，请检查模型请求地址或稍后重试")
