@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSpace, NSwitch, NTag, useMessage } from 'naive-ui'
 import { getAuthPoolProxyConfig, updateAuthPoolProxyConfig } from '@/features/auth-pools/api/authPoolsApi'
 import type { AuthPoolProxyConfig, AuthPoolProxyTargetPayload } from '@/shared/types/api'
@@ -31,6 +31,9 @@ const concurrencyTiers = [
 
 const targets = reactive<AuthPoolProxyTargetForm[]>([])
 const concurrencyLimits = reactive<Record<string, number | null>>({})
+const activeConcurrencySlots = computed(() => [...(config.value?.concurrency_slots || [])]
+  .sort((left, right) => left.tier.localeCompare(right.tier) || left.auth_id.localeCompare(right.auth_id)))
+const hasPerAccountConcurrency = computed(() => config.value?.concurrency_scope === 'per_account')
 
 function emptyTarget(index: number): AuthPoolProxyTargetForm {
   return {
@@ -111,6 +114,14 @@ function concurrencyCount(tier: string) {
   return config.value?.concurrency?.counts?.[tier] || 0
 }
 
+function concurrencyTierLabel(tier: string) {
+  return concurrencyTiers.find((item) => item.id === tier)?.label || tier || t('默认', 'Default')
+}
+
+function concurrencySlotLimit(tier: string) {
+  return Number(config.value?.concurrency?.limits?.[tier] || config.value?.concurrency?.limits?.default || 0)
+}
+
 function concurrencyLimitPayload() {
   const payload: Record<string, number> = {}
   for (const tier of concurrencyTiers) {
@@ -177,7 +188,12 @@ onMounted(refresh)
 
     <NAlert v-if="config?.plugin_installed" type="success" class="panel-alert" :show-icon="true">
       <template #header>{{ t('插件已连接', 'Plugin connected') }}</template>
-      {{ t('已检测到 cpa-auth-pool 插件，CPA-Helper 会通过插件管理号池、转发 Key 和并发限制。', 'cpa-auth-pool is detected. CPA-Helper can manage auth pools, forwarding keys, and concurrency limits through the plugin.') }}
+      {{ t(`已检测到 cpa-auth-pool${config.plugin_version ? ` v${config.plugin_version}` : ''}，CPA-Helper 会通过插件管理号池、转发 Key 和并发限制。`, `cpa-auth-pool${config.plugin_version ? ` v${config.plugin_version}` : ''} is detected. CPA-Helper can manage auth pools, forwarding keys, and concurrency limits through the plugin.`) }}
+    </NAlert>
+
+    <NAlert v-if="config?.plugin_installed && !hasPerAccountConcurrency" type="warning" class="panel-alert" :show-icon="true">
+      <template #header>{{ t('并发插件版本需要更新', 'Concurrency plugin update required') }}</template>
+      {{ t('当前插件未声明单账号原子并发调度能力，无法确认旧插件是否正确按账号分流。请更新 cpa-auth-pool 后再验证高并发分流。', 'The current plugin does not declare atomic per-account concurrency scheduling, so its account-level routing semantics cannot be confirmed. Update cpa-auth-pool before validating concurrent routing.') }}
     </NAlert>
 
     <NAlert v-if="config && !config.plugin_installed" type="warning" class="panel-alert">
@@ -262,6 +278,21 @@ onMounted(refresh)
           </div>
         </div>
       </div>
+
+      <div class="slot-section">
+        <div class="slot-heading">
+          <strong>{{ t('账号实时占用', 'Live account occupancy') }}</strong>
+          <span>{{ t('并发选择采用最低在途数优先，负载相同时轮询。', 'Concurrent selection prefers the least-loaded account and round-robins load ties.') }}</span>
+        </div>
+        <div v-if="activeConcurrencySlots.length" class="slot-table">
+          <div v-for="slot in activeConcurrencySlots" :key="slot.auth_id" class="slot-row">
+            <span class="slot-auth">{{ slot.auth_id }}</span>
+            <NTag size="small">{{ concurrencyTierLabel(slot.tier) }}</NTag>
+            <strong>{{ slot.count }} / {{ concurrencySlotLimit(slot.tier) || '∞' }}</strong>
+          </div>
+        </div>
+        <div v-else class="slot-empty">{{ t('当前没有正在占用的账号槽位', 'No account slots are currently occupied') }}</div>
+      </div>
     </NCard>
   </section>
 </template>
@@ -284,5 +315,13 @@ onMounted(refresh)
 .tier-description { margin-top: 2px; color: var(--cpa-text-muted); font-size: 12px; }
 .tier-controls { display: flex; align-items: center; gap: 8px; }
 .tier-input { width: 104px; }
+.slot-section { margin-top: 16px; border-top: 1px solid rgba(148, 163, 184, .22); padding-top: 14px; }
+.slot-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.slot-heading span, .slot-empty { color: var(--cpa-text-muted); font-size: 12px; }
+.slot-table { display: grid; margin-top: 10px; border-top: 1px solid rgba(148, 163, 184, .18); }
+.slot-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 72px; align-items: center; gap: 12px; min-height: 42px; border-bottom: 1px solid rgba(148, 163, 184, .18); }
+.slot-auth { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.slot-row strong { text-align: right; }
+.slot-empty { padding-top: 12px; }
 @media (max-width: 860px) { .form-grid, .tier-grid { grid-template-columns: 1fr; } .card-header { flex-direction: column; } .tier-row { align-items: flex-start; flex-direction: column; } }
 </style>

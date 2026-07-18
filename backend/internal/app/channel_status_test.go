@@ -115,6 +115,32 @@ func TestBuildChannelStatusItemsWeightsRemainingByPoolSize(t *testing.T) {
 	}
 }
 
+func TestBuildChannelStatusItemsUsesAntigravityGeminiQuota(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	accountType := "antigravity"
+	items := buildChannelStatusItems([]authPool{{
+		ID: "antigravity-gemini", Name: "Gemini", Enabled: true, AuthIDs: []string{"antigravity.json"},
+	}}, []keeperAccount{{
+		Name: "antigravity.json", AccountType: &accountType,
+		AntigravityQuota: &keeperAntigravityQuota{Groups: []keeperAntigravityQuotaGroup{{
+			ID: "gemini-models", Label: "Gemini models", Buckets: []keeperAntigravityQuotaBucket{
+				{ID: "five-hour", Label: "5 hour limit", Window: "5h", RemainingFraction: 0.8},
+				{ID: "weekly", Label: "Weekly limit", Window: "weekly", RemainingFraction: 0.65},
+			},
+		}}},
+	}}, nil, nil, now)
+	item := findChannelStatusItem(t, items, "antigravity-gemini")
+	if item.PrimaryRemainingPercent == nil || *item.PrimaryRemainingPercent != 80 {
+		t.Fatalf("primary remaining = %v, want 80", item.PrimaryRemainingPercent)
+	}
+	if item.SecondaryRemainingPercent == nil || *item.SecondaryRemainingPercent != 65 {
+		t.Fatalf("secondary remaining = %v, want 65", item.SecondaryRemainingPercent)
+	}
+	if !item.Available || item.Status != "normal" {
+		t.Fatalf("antigravity status = %q available=%v, want normal", item.Status, item.Available)
+	}
+}
+
 func TestBuildChannelStatusItemsCountsOverlappingRecordOncePerPool(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, appTimeLocation)
 	authA := "auth-a.json"

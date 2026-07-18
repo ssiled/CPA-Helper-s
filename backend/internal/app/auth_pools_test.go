@@ -470,6 +470,98 @@ func TestListAuthPoolAccountsIncludesRemoteGeminiAndGrok(t *testing.T) {
 	}
 }
 
+func TestListAuthPoolAccountsIncludesCPAProviderChannels(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	providerCalls := 0
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/management/openai-compatibility" {
+			providerCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"openai-compatibility": []map[string]any{{
+				"name": "Mimo", "models": []map[string]any{{"name": "mimo-v2", "alias": "mimo"}},
+				"api-key-entries": []map[string]any{{"auth-id": "openai-compat-mimo-1"}, {"auth-id": "openai-compat-mimo-2", "disabled": true}},
+			}}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cpa.Close()
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	accounts, err := app.listAuthPoolAccounts(t.Context())
+	if err != nil {
+		t.Fatalf("listAuthPoolAccounts failed: %v", err)
+	}
+	byName := map[string]keeperAccount{}
+	for _, account := range accounts {
+		byName[account.Name] = account
+	}
+	first, ok := byName["openai-compat-mimo-1"]
+	if !ok || stringPtrValue(first.Provider) != "openai-compatible-mimo" || stringPtrValue(first.Source) != "ai_provider" || !reflect.DeepEqual(first.Models, []string{"mimo", "mimo-v2"}) {
+		t.Fatalf("provider channel = %#v", first)
+	}
+	if second, ok := byName["openai-compat-mimo-2"]; !ok || !second.Disabled {
+		t.Fatalf("disabled provider channel = %#v", second)
+	}
+	if _, err := app.listAuthPoolAccounts(t.Context()); err != nil {
+		t.Fatalf("cached listAuthPoolAccounts failed: %v", err)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider endpoint calls = %d, want 1 within cache TTL", providerCalls)
+	}
+}
+
+func TestUpsertAuthPoolPersistsProviderAndUsesConfiguredModels(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var savedPool authPool
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/openai-compatibility":
+			_ = json.NewEncoder(w).Encode(map[string]any{"openai-compatibility": []map[string]any{{
+				"name": "Mimo", "models": []map[string]any{{"name": "mimo-v2", "alias": "mimo"}},
+				"api-key-entries": []map[string]any{{"auth-id": "openai-compat-mimo-1"}},
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/pools":
+			if err := json.NewDecoder(r.Body).Decode(&savedPool); err != nil {
+				t.Fatalf("decode pool: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"pool": savedPool})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []authPool{savedPool}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"synced": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{ID: "mimo", Name: "Mimo", AuthIDs: []string{"openai-compat-mimo-1"}})
+	if err != nil {
+		t.Fatalf("upsertAuthPool failed: %v", err)
+	}
+	if !reflect.DeepEqual(savedPool.Providers, []string{"openai-compatible-mimo"}) || !reflect.DeepEqual(savedPool.Models, []string{"mimo", "mimo-v2"}) {
+		t.Fatalf("plugin pool = %#v", savedPool)
+	}
+	if !reflect.DeepEqual(pool.Providers, savedPool.Providers) {
+		t.Fatalf("response providers = %#v", pool.Providers)
+	}
+	stored, err := app.localAuthPools(t.Context())
+	if err != nil || len(stored) != 1 || !reflect.DeepEqual(stored[0].Providers, []string{"openai-compatible-mimo"}) {
+		t.Fatalf("stored pools = %#v, err=%v", stored, err)
+	}
+}
+
 func TestUpsertAuthPoolSendsResolvedDynamicAuthIDs(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	var savedPool authPool
@@ -539,9 +631,15 @@ func TestUpdateAuthPoolProxyConfigWritesCodexConcurrencyLimits(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"scheduler_priorities": true}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"pools":       []any{},
-				"bindings":    []any{},
-				"concurrency": map[string]any{"counts": map[string]int{}, "limits": map[string]int{"plus": 2, "default": 1}},
+				"plugin_version":       "0.1.27",
+				"concurrency_scope":    "per_account",
+				"concurrency_strategy": "least_loaded_round_robin",
+				"pools":                []any{},
+				"bindings":             []any{},
+				"concurrency":          map[string]any{"counts": map[string]int{"plus": 1}, "limits": map[string]int{"plus": 2, "default": 1}},
+				"concurrency_slots": []map[string]any{{
+					"auth_id": "plus-a.json", "tier": "plus", "count": 1, "remaining_seconds": 300,
+				}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -575,6 +673,12 @@ func TestUpdateAuthPoolProxyConfigWritesCodexConcurrencyLimits(t *testing.T) {
 	}
 	if config.CodexConcurrencyLimits["plus"] != 2 || config.CodexConcurrencyLimits["default"] != 1 {
 		t.Fatalf("response limits = %#v", config.CodexConcurrencyLimits)
+	}
+	if config.PluginVersion != "0.1.27" || config.ConcurrencyScope != "per_account" || config.ConcurrencyStrategy != "least_loaded_round_robin" {
+		t.Fatalf("response plugin concurrency capability = %#v", config)
+	}
+	if len(config.ConcurrencySlots) != 1 || config.ConcurrencySlots[0].AuthID != "plus-a.json" || config.ConcurrencySlots[0].Count != 1 {
+		t.Fatalf("response concurrency slots = %#v", config.ConcurrencySlots)
 	}
 }
 

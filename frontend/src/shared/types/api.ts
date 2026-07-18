@@ -268,6 +268,7 @@ export interface AuthPool {
   auth_ids: string[]
   resolved_auth_ids?: string[]
   account_types?: string[]
+  providers?: string[]
   models?: string[]
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
@@ -284,8 +285,12 @@ export interface AuthPoolBinding {
 export interface AuthPoolStatus {
   pools: AuthPool[]
   bindings: AuthPoolBinding[]
+  plugin_version?: string
+  concurrency_scope?: string
+  concurrency_strategy?: string
   codex_concurrency_limits?: Record<string, number>
   concurrency?: AuthPoolConcurrency
+  concurrency_slots?: AuthPoolConcurrencySlot[]
   plugin_installed?: boolean
   plugin_error?: string
 }
@@ -293,6 +298,15 @@ export interface AuthPoolStatus {
 export interface AuthPoolConcurrency {
   counts: Record<string, number>
   limits: Record<string, number>
+}
+
+export interface AuthPoolConcurrencySlot {
+  auth_id: string
+  tier: string
+  count: number
+  started_at?: string
+  expires_at?: string
+  remaining_seconds?: number
 }
 
 export interface AuthPoolPluginEventCandidate {
@@ -369,9 +383,13 @@ export interface AuthPoolProxyConfig {
   mode: 'legacy' | 'proxy' | string
   plugin_installed: boolean
   plugin_error?: string
+  plugin_version?: string
+  concurrency_scope?: string
+  concurrency_strategy?: string
   targets: AuthPoolProxyTarget[]
   codex_concurrency_limits?: Record<string, number>
   concurrency?: AuthPoolConcurrency
+  concurrency_slots?: AuthPoolConcurrencySlot[]
 }
 
 export interface AuthPoolProxyTargetPayload {
@@ -399,6 +417,7 @@ export interface AuthPoolPayload {
   description: string
   auth_ids: string[]
   account_types: string[]
+  providers?: string[]
   models?: string[]
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
@@ -411,8 +430,12 @@ export interface AuthPoolBindingPayload {
 
 export interface CodexKeeperAccount {
   name: string
+  display_name?: string | null
   email: string | null
   account_type: string | null
+  provider?: string | null
+  source?: string | null
+  models?: string[]
   disabled: boolean
   priority: number | null
   primary_used_percent: number | null

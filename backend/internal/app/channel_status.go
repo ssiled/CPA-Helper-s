@@ -958,8 +958,9 @@ func applyChannelAccountStats(item *channelStatusItem, accounts []keeperAccount)
 			code := *account.LastStatusCode
 			item.StatusCode = &code
 		}
-		primaryRemaining.add(account.PrimaryUsedPercent)
-		secondaryRemaining.add(account.SecondaryUsedPercent)
+		primaryUsed, secondaryUsed := channelAccountUsedPercents(account)
+		primaryRemaining.add(primaryUsed)
+		secondaryRemaining.add(secondaryUsed)
 		lastChecked = maxTimePtr(lastChecked, account.LastCheckedAt)
 		lastHealthy = maxTimePtr(lastHealthy, account.LastHealthyAt)
 	}
@@ -1022,10 +1023,25 @@ func channelAccountStatus(account keeperAccount) (string, bool) {
 	if account.LastStatusCode != nil && *account.LastStatusCode >= 400 {
 		return "error", false
 	}
-	if isQuotaExhaustedPercent(account.PrimaryUsedPercent) || isQuotaExhaustedPercent(account.SecondaryUsedPercent) {
+	primaryUsed, secondaryUsed := channelAccountUsedPercents(account)
+	if isQuotaExhaustedPercent(primaryUsed) || isQuotaExhaustedPercent(secondaryUsed) {
 		return "quota_exhausted", false
 	}
 	return "normal", true
+}
+
+func channelAccountUsedPercents(account keeperAccount) (*int, *int) {
+	primary := account.PrimaryUsedPercent
+	secondary := account.SecondaryUsedPercent
+	if keeperAntigravityAccount(account) {
+		if value := keeperAntigravityQuotaUsedPercent(account, true); value != nil {
+			primary = value
+		}
+		if value := keeperAntigravityQuotaUsedPercent(account, false); value != nil {
+			secondary = value
+		}
+	}
+	return primary, secondary
 }
 
 func channelPoolAccounts(pool authPool, accounts []keeperAccount) []keeperAccount {

@@ -22,6 +22,7 @@ const (
 	authPoolModelSyncBackoffMax  = 5 * time.Minute
 	authPoolResolvedSyncTimeout  = 15 * time.Second
 	authPoolResolvedSyncInterval = 30 * time.Second
+	authPoolProviderCacheTTL     = 15 * time.Second
 
 	authPoolVisibilityAdminsOnly = "admins_only"
 	authPoolVisibilityAllUsers   = "all_users"
@@ -35,6 +36,7 @@ type authPool struct {
 	AuthIDs         []string `json:"auth_ids"`
 	ResolvedAuthIDs []string `json:"resolved_auth_ids,omitempty"`
 	AccountTypes    []string `json:"account_types,omitempty"`
+	Providers       []string `json:"providers,omitempty"`
 	Models          []string `json:"models,omitempty"`
 	Visibility      string   `json:"visibility,omitempty"`
 	AllowedUserIDs  []int    `json:"allowed_user_ids"`
@@ -50,21 +52,34 @@ type authPoolBinding struct {
 }
 
 type authPoolStatus struct {
-	SchedulerPriorities    bool                 `json:"scheduler_priorities,omitempty"`
-	Pools                  []authPool           `json:"pools"`
-	Bindings               []authPoolBinding    `json:"bindings"`
-	AuthTypes              map[string]string    `json:"auth_types,omitempty"`
-	TypePriorities         map[string]int       `json:"type_priorities,omitempty"`
-	AuthPriorityOverrides  map[string]int       `json:"auth_priority_overrides,omitempty"`
-	CodexConcurrencyLimits map[string]int       `json:"codex_concurrency_limits,omitempty"`
-	Concurrency            *authPoolConcurrency `json:"concurrency,omitempty"`
-	PluginInstalled        bool                 `json:"plugin_installed"`
-	PluginError            string               `json:"plugin_error,omitempty"`
+	PluginVersion          string                    `json:"plugin_version,omitempty"`
+	ConcurrencyScope       string                    `json:"concurrency_scope,omitempty"`
+	ConcurrencyStrategy    string                    `json:"concurrency_strategy,omitempty"`
+	SchedulerPriorities    bool                      `json:"scheduler_priorities,omitempty"`
+	Pools                  []authPool                `json:"pools"`
+	Bindings               []authPoolBinding         `json:"bindings"`
+	AuthTypes              map[string]string         `json:"auth_types,omitempty"`
+	TypePriorities         map[string]int            `json:"type_priorities,omitempty"`
+	AuthPriorityOverrides  map[string]int            `json:"auth_priority_overrides,omitempty"`
+	CodexConcurrencyLimits map[string]int            `json:"codex_concurrency_limits,omitempty"`
+	Concurrency            *authPoolConcurrency      `json:"concurrency,omitempty"`
+	ConcurrencySlots       []authPoolConcurrencySlot `json:"concurrency_slots,omitempty"`
+	PluginInstalled        bool                      `json:"plugin_installed"`
+	PluginError            string                    `json:"plugin_error,omitempty"`
 }
 
 type authPoolConcurrency struct {
 	Counts map[string]int `json:"counts"`
 	Limits map[string]int `json:"limits"`
+}
+
+type authPoolConcurrencySlot struct {
+	AuthID           string `json:"auth_id"`
+	Tier             string `json:"tier"`
+	Count            int    `json:"count"`
+	StartedAt        string `json:"started_at,omitempty"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	RemainingSeconds int64  `json:"remaining_seconds,omitempty"`
 }
 
 type authPoolAccountsResponse struct {
@@ -78,9 +93,13 @@ type authPoolProxyConfigResponse struct {
 	Mode                   string                    `json:"mode"`
 	PluginInstalled        bool                      `json:"plugin_installed"`
 	PluginError            string                    `json:"plugin_error,omitempty"`
+	PluginVersion          string                    `json:"plugin_version,omitempty"`
+	ConcurrencyScope       string                    `json:"concurrency_scope,omitempty"`
+	ConcurrencyStrategy    string                    `json:"concurrency_strategy,omitempty"`
 	Targets                []authPoolProxyTargetView `json:"targets"`
 	CodexConcurrencyLimits map[string]int            `json:"codex_concurrency_limits,omitempty"`
 	Concurrency            *authPoolConcurrency      `json:"concurrency,omitempty"`
+	ConcurrencySlots       []authPoolConcurrencySlot `json:"concurrency_slots,omitempty"`
 }
 
 type authPoolProxyConfigPayload struct {
@@ -111,6 +130,7 @@ type authPoolPayload struct {
 	Description    string   `json:"description"`
 	AuthIDs        []string `json:"auth_ids"`
 	AccountTypes   []string `json:"account_types"`
+	Providers      []string `json:"providers,omitempty"`
 	Models         []string `json:"models,omitempty"`
 	Visibility     string   `json:"visibility"`
 	AllowedUserIDs []int    `json:"allowed_user_ids"`
@@ -819,12 +839,12 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if visibility != authPoolVisibilitySelected {
 		allowedUserIDs = []int{}
 	}
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Models: payload.Models, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
+	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Providers: payload.Providers, Models: payload.Models, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}
 	var accounts []keeperAccount
-	if len(pool.AccountTypes) > 0 || len(pool.Models) == 0 {
+	if len(pool.AuthIDs) > 0 || len(pool.AccountTypes) > 0 || len(pool.Models) == 0 {
 		var err error
 		accounts, err = a.listAuthPoolAccounts(ctx)
 		if err != nil {
@@ -832,6 +852,7 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 		}
 		pool.ResolvedAuthIDs = authIDsForPoolModelSync(pool, accounts)
 	}
+	pool.Providers = authPoolProvidersForSync(pool, accounts)
 	if len(pool.Models) == 0 && (len(pool.AuthIDs) > 0 || len(pool.AccountTypes) > 0) {
 		models, err := a.resolveAuthPoolModelsFromAccounts(ctx, pool, accounts)
 		if err != nil {
@@ -847,6 +868,7 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	}
 	response.Pool.Visibility = pool.Visibility
 	response.Pool.AllowedUserIDs = pool.AllowedUserIDs
+	response.Pool.Providers = append([]string(nil), pool.Providers...)
 	if err := a.saveLocalAuthPool(ctx, response.Pool); err != nil {
 		return authPool{}, err
 	}
@@ -923,27 +945,32 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	if err != nil {
 		return err
 	}
+	providersJSON, err := marshalStringList(pool.Providers)
+	if err != nil {
+		return err
+	}
 	now := dbTime(time.Now())
 	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, visibility, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, visibility, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
 			auth_ids_json = excluded.auth_ids_json,
 			resolved_auth_ids_json = excluded.resolved_auth_ids_json,
 			account_types_json = excluded.account_types_json,
+			providers_json = excluded.providers_json,
 			models_json = excluded.models_json,
 			visibility = excluded.visibility,
 			enabled = excluded.enabled,
 			updated_at = excluded.updated_at
-	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON, pool.Visibility, pool.Enabled, now, now)
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON, pool.Visibility, pool.Enabled, now, now)
 	return err
 }
 
 func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, models_json, visibility, enabled
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, visibility, enabled
 		FROM auth_pools
 		ORDER BY id
 	`)
@@ -954,13 +981,14 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	pools := []authPool{}
 	for rows.Next() {
 		var pool authPool
-		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, modelsJSON string
-		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &modelsJSON, &pool.Visibility, &pool.Enabled); err != nil {
+		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON string
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &providersJSON, &modelsJSON, &pool.Visibility, &pool.Enabled); err != nil {
 			return nil, err
 		}
 		pool.AuthIDs = unmarshalStringList(authIDsJSON)
 		pool.ResolvedAuthIDs = unmarshalStringList(resolvedAuthIDsJSON)
 		pool.AccountTypes = unmarshalStringList(accountTypesJSON)
+		pool.Providers = unmarshalStringList(providersJSON)
 		pool.Models = unmarshalStringList(modelsJSON)
 		pools = append(pools, pool)
 	}
@@ -1296,8 +1324,12 @@ func (a *App) authPoolProxyConfig(ctx context.Context) (authPoolProxyConfigRespo
 		response.PluginError = err.Error()
 	} else {
 		response.PluginInstalled = true
+		response.PluginVersion = status.PluginVersion
+		response.ConcurrencyScope = status.ConcurrencyScope
+		response.ConcurrencyStrategy = status.ConcurrencyStrategy
 		response.CodexConcurrencyLimits = authPoolConcurrencyLimitsFromStatus(status)
 		response.Concurrency = status.Concurrency
+		response.ConcurrencySlots = status.ConcurrencySlots
 	}
 	return response, nil
 }
@@ -1971,7 +2003,7 @@ func (a *App) syncAuthPoolModels(ctx context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs)
+	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs, accounts)
 	if err != nil {
 		return err
 	}
@@ -1988,7 +2020,7 @@ func (a *App) resolveAuthPoolModelsFromAccounts(ctx context.Context, pool authPo
 	if len(authIDs) == 0 {
 		return nil, validationError("auth pool has no eligible accounts")
 	}
-	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs)
+	authModels, err := a.fetchAuthPoolModelSnapshot(ctx, authIDs, accounts)
 	if err != nil {
 		return nil, err
 	}
@@ -2011,7 +2043,7 @@ func authPoolResolvedAuthIDsForSync(pools []authPool, accounts []keeperAccount) 
 	return resolved
 }
 
-func (a *App) fetchAuthPoolModelSnapshot(ctx context.Context, authIDs []string) (map[string][]string, error) {
+func (a *App) fetchAuthPoolModelSnapshot(ctx context.Context, authIDs []string, accounts []keeperAccount) (map[string][]string, error) {
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -2019,7 +2051,19 @@ func (a *App) fetchAuthPoolModelSnapshot(ctx context.Context, authIDs []string) 
 	authModels := make(map[string][]string, len(authIDs))
 	failures := make([]string, 0)
 	totalModels := 0
+	modelsByAuthID := make(map[string][]string, len(accounts))
+	for _, account := range accounts {
+		if len(account.Models) == 0 {
+			continue
+		}
+		modelsByAuthID[strings.ToLower(strings.TrimSpace(account.Name))] = append([]string(nil), account.Models...)
+	}
 	for _, authID := range authIDs {
+		if models := modelsByAuthID[strings.ToLower(strings.TrimSpace(authID))]; len(models) > 0 {
+			authModels[authID] = models
+			totalModels += len(models)
+			continue
+		}
 		models, fetchErr := a.fetchAuthFileModels(ctx, cfg, authID)
 		if fetchErr != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", authID, fetchErr))
@@ -2064,13 +2108,7 @@ func (a *App) listAuthPoolAccounts(ctx context.Context) ([]keeperAccount, error)
 	if err != nil {
 		return nil, err
 	}
-	remoteAccounts, err := a.listKeeperRemoteAuthFiles(ctx, cfg)
-	if err != nil {
-		if len(localAccounts) > 0 {
-			return localAccounts, nil
-		}
-		return nil, err
-	}
+	remoteAccounts, remoteErr := a.listKeeperRemoteAuthFiles(ctx, cfg)
 	for _, item := range remoteAccounts {
 		remote := authPoolAccountFromRemoteAuthFile(item)
 		name := strings.TrimSpace(remote.Name)
@@ -2082,6 +2120,23 @@ func (a *App) listAuthPoolAccounts(ctx context.Context) ([]keeperAccount, error)
 			continue
 		}
 		byName[name] = remote
+	}
+	providerAccounts, providerErr := a.listCPAProviderChannelsCached(ctx)
+	for _, account := range providerAccounts {
+		name := strings.TrimSpace(account.Name)
+		if name == "" {
+			continue
+		}
+		byName[name] = account
+	}
+	if remoteErr != nil && len(byName) == 0 {
+		if providerErr != nil {
+			return nil, remoteErr
+		}
+		return providerAccounts, nil
+	}
+	if providerErr != nil {
+		log.Printf("list CPA provider channels failed: %v", providerErr)
 	}
 	accounts := make([]keeperAccount, 0, len(byName))
 	for _, account := range byName {
@@ -2096,6 +2151,156 @@ func (a *App) listAuthPoolAccounts(ctx context.Context) ([]keeperAccount, error)
 		return leftType < rightType
 	})
 	return accounts, nil
+}
+
+type cpaOpenAICompatibilityResponse struct {
+	Channels []cpaOpenAICompatibilityChannel `json:"openai-compatibility"`
+}
+
+type cpaOpenAICompatibilityChannel struct {
+	Name          string                         `json:"name"`
+	Disabled      bool                           `json:"disabled"`
+	Prefix        string                         `json:"prefix"`
+	Models        []cpaOpenAICompatibilityModel  `json:"models"`
+	AuthID        string                         `json:"auth-id"`
+	APIKeyEntries []cpaOpenAICompatibilityAPIKey `json:"api-key-entries"`
+}
+
+type cpaOpenAICompatibilityAPIKey struct {
+	AuthID   string `json:"auth-id"`
+	Disabled bool   `json:"disabled"`
+}
+
+type cpaOpenAICompatibilityModel struct {
+	Name        string `json:"name"`
+	Alias       string `json:"alias"`
+	DisplayName string `json:"display-name"`
+}
+
+func (a *App) listCPAProviderChannels(ctx context.Context) ([]keeperAccount, error) {
+	var response cpaOpenAICompatibilityResponse
+	if err := a.cpaManagementJSON(ctx, http.MethodGet, "/v0/management/openai-compatibility", nil, &response); err != nil {
+		return nil, err
+	}
+	accounts := make([]keeperAccount, 0)
+	for _, channel := range response.Channels {
+		name := strings.TrimSpace(channel.Name)
+		if name == "" {
+			continue
+		}
+		provider := openAICompatibilityProviderKey(name)
+		models := cpaOpenAICompatibilityModels(channel.Models)
+		add := func(authID string, disabled bool) {
+			authID = strings.TrimSpace(authID)
+			if authID == "" {
+				return
+			}
+			display := "CPA AI 提供商 · " + name
+			accountType := "openai-compatible"
+			providerValue := provider
+			source := "ai_provider"
+			nameValue := display
+			accounts = append(accounts, keeperAccount{
+				Name:        authID,
+				DisplayName: &nameValue,
+				AccountType: &accountType,
+				Provider:    &providerValue,
+				Source:      &source,
+				Models:      append([]string(nil), models...),
+				Disabled:    disabled || channel.Disabled,
+			})
+		}
+		if len(channel.APIKeyEntries) == 0 {
+			add(channel.AuthID, channel.Disabled)
+			continue
+		}
+		for _, entry := range channel.APIKeyEntries {
+			add(entry.AuthID, entry.Disabled)
+		}
+	}
+	return accounts, nil
+}
+
+func (a *App) listCPAProviderChannelsCached(ctx context.Context) ([]keeperAccount, error) {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	target, ok := primaryCPAManagementTarget(cfg)
+	if !ok {
+		return nil, validationError("CPA URL and management key are required")
+	}
+	cacheKey := strings.TrimRight(strings.TrimSpace(target.CPAURL), "/")
+	now := time.Now()
+	a.authPoolProviderCacheMu.Lock()
+	defer a.authPoolProviderCacheMu.Unlock()
+	if a.authPoolProviderCacheKey == cacheKey && now.Sub(a.authPoolProviderCacheAt) < authPoolProviderCacheTTL {
+		return cloneKeeperAccounts(a.authPoolProviderCache), nil
+	}
+	accounts, err := a.listCPAProviderChannels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.authPoolProviderCacheKey = cacheKey
+	a.authPoolProviderCacheAt = now
+	a.authPoolProviderCache = cloneKeeperAccounts(accounts)
+	return cloneKeeperAccounts(accounts), nil
+}
+
+func cloneKeeperAccounts(accounts []keeperAccount) []keeperAccount {
+	result := make([]keeperAccount, len(accounts))
+	for index, account := range accounts {
+		result[index] = account
+		result[index].Models = append([]string(nil), account.Models...)
+	}
+	return result
+}
+
+func cpaOpenAICompatibilityModels(models []cpaOpenAICompatibilityModel) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(models)*2)
+	for _, model := range models {
+		for _, value := range []string{model.Alias, model.Name} {
+			value = strings.TrimSpace(value)
+			if value != "" && !seen[value] {
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+	}
+	sortStringsCaseInsensitive(result)
+	return result
+}
+
+func openAICompatibilityProviderKey(name string) string {
+	// Keep this identical to CLIProxyAPI's OpenAICompatibleProviderKey; names are not sanitized there.
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "openai-compatibility" || strings.HasPrefix(name, "openai-compatible-") {
+		if name == "" {
+			return "openai-compatibility"
+		}
+		return name
+	}
+	return "openai-compatible-" + name
+}
+
+func authPoolProvidersForSync(pool authPool, accounts []keeperAccount) []string {
+	manualIDs := normalizedLookup(pool.AuthIDs)
+	typeIDs := normalizedLookup(pool.AccountTypes)
+	seen := map[string]bool{}
+	providers := make([]string, 0)
+	for _, account := range accounts {
+		if !channelAccountMatchesPool(account, manualIDs, typeIDs) || account.Provider == nil {
+			continue
+		}
+		provider := strings.TrimSpace(*account.Provider)
+		if provider != "" && !seen[strings.ToLower(provider)] {
+			seen[strings.ToLower(provider)] = true
+			providers = append(providers, provider)
+		}
+	}
+	sortStringsCaseInsensitive(providers)
+	return providers
 }
 
 func authPoolAccountFromRemoteAuthFile(item map[string]any) keeperAccount {
@@ -2122,6 +2327,18 @@ func mergeAuthPoolAccount(local keeperAccount, remote keeperAccount) keeperAccou
 	}
 	if local.AccountType == nil || stringPtrValue(local.AccountType) == "unknown" {
 		local.AccountType = remote.AccountType
+	}
+	if local.DisplayName == nil {
+		local.DisplayName = remote.DisplayName
+	}
+	if local.Provider == nil {
+		local.Provider = remote.Provider
+	}
+	if local.Source == nil {
+		local.Source = remote.Source
+	}
+	if len(local.Models) == 0 {
+		local.Models = append([]string(nil), remote.Models...)
 	}
 	if local.Priority == nil {
 		local.Priority = remote.Priority

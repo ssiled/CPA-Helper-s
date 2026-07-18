@@ -114,7 +114,8 @@ function visibilityLabel(pool: AuthPool): string {
 
 function accountLabel(account: CodexKeeperAccount): string {
   const status = account.disabled ? t('已禁用', 'Disabled') : account.last_status_code && account.last_status_code >= 400 ? t('异常', 'Error') : t('正常', 'Normal')
-  return [account.name, account.email, account.account_type, status].filter((item) => item && item.trim()).join(' · ')
+  const source = account.source === 'ai_provider' ? t('CPA AI 提供商', 'CPA AI provider') : account.source
+  return [account.display_name || account.name, account.provider, account.account_type, source, status].filter((item) => item && item.trim()).join(' · ')
 }
 
 function dynamicTypeAccountCount(types: string[], manualAuthIDs: string[]): number {

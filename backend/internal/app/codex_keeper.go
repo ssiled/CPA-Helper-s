@@ -113,9 +113,13 @@ type keeperPriorityUpdateRequest struct {
 
 type keeperAccount struct {
 	Name                   string                  `json:"name"`
+	DisplayName            *string                 `json:"display_name,omitempty"`
 	Email                  *string                 `json:"email"`
 	AuthIndex              *string                 `json:"auth_index"`
 	AccountType            *string                 `json:"account_type"`
+	Provider               *string                 `json:"provider,omitempty"`
+	Source                 *string                 `json:"source,omitempty"`
+	Models                 []string                `json:"models,omitempty"`
 	Disabled               bool                    `json:"disabled"`
 	Priority               *int                    `json:"priority"`
 	LegacyRestorePriority  *int                    `json:"-"`
@@ -139,8 +143,12 @@ type keeperAccount struct {
 
 type keeperAccountResponse struct {
 	Name                   string                          `json:"name"`
+	DisplayName            *string                         `json:"display_name,omitempty"`
 	Email                  *string                         `json:"email"`
 	AccountType            *string                         `json:"account_type"`
+	Provider               *string                         `json:"provider,omitempty"`
+	Source                 *string                         `json:"source,omitempty"`
+	Models                 []string                        `json:"models,omitempty"`
 	Disabled               bool                            `json:"disabled"`
 	Priority               *int                            `json:"priority"`
 	PrimaryUsedPercent     *int                            `json:"primary_used_percent"`
@@ -1088,8 +1096,12 @@ func keeperAccountResponses(accounts []keeperAccount, windowUsages map[string]ke
 		usage := windowUsages[account.Name]
 		responses = append(responses, keeperAccountResponse{
 			Name:                   account.Name,
+			DisplayName:            account.DisplayName,
 			Email:                  account.Email,
 			AccountType:            account.AccountType,
+			Provider:               account.Provider,
+			Source:                 account.Source,
+			Models:                 append([]string(nil), account.Models...),
 			Disabled:               account.Disabled,
 			Priority:               keeperDisplayPriority(account.Priority),
 			PrimaryUsedPercent:     account.PrimaryUsedPercent,
@@ -1351,6 +1363,34 @@ func keeperAntigravityQuotaWindowForAccount(account keeperAccount, primary bool,
 				Stale:         !now.Before(windowEnd),
 				WindowSource:  "antigravity",
 			}
+		}
+	}
+	return nil
+}
+
+func keeperAntigravityQuotaUsedPercent(account keeperAccount, primary bool) *int {
+	quota := account.AntigravityQuota
+	if quota == nil {
+		return nil
+	}
+	for _, group := range quota.Groups {
+		if !strings.EqualFold(strings.Join(strings.Fields(group.Label), " "), "Gemini models") {
+			continue
+		}
+		for _, bucket := range group.Buckets {
+			_, isPrimary, ok := keeperAntigravityBucketWindow(bucket)
+			if !ok || isPrimary != primary {
+				continue
+			}
+			remaining := bucket.RemainingFraction
+			if remaining < 0 {
+				remaining = 0
+			}
+			if remaining > 1 {
+				remaining = 1
+			}
+			used := 100 - int(remaining*100+0.5)
+			return &used
 		}
 	}
 	return nil
