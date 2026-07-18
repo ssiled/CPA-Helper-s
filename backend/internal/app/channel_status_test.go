@@ -115,6 +115,77 @@ func TestBuildChannelStatusItemsCountsOverlappingRecordOncePerPool(t *testing.T)
 	}
 }
 
+func TestBuildChannelStatusItemsBuildsRecentTimeBuckets(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, appTimeLocation)
+	authID := "recent-auth.json"
+	items := buildChannelStatusItems([]authPool{
+		{ID: "recent-pool", Name: "Recent pool", AuthIDs: []string{authID}, Enabled: true},
+	}, []keeperAccount{{Name: authID}}, []UsageRecord{
+		{Timestamp: now.Add(-50 * time.Minute), AuthIndex: chStringPtr(authID), RawJSON: `{}`},
+		{Timestamp: now.Add(-50 * time.Minute), AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+		{Timestamp: now.Add(-time.Minute), AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+		{Timestamp: now.Add(-2 * time.Hour), AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+	}, nil, now)
+
+	item := findChannelStatusItem(t, items, "recent-pool")
+	if len(item.RecentBuckets) != channelStatusRecentBucketCount {
+		t.Fatalf("recent buckets = %d, want %d", len(item.RecentBuckets), channelStatusRecentBucketCount)
+	}
+	successes, failures, mixedBuckets := 0, 0, 0
+	for _, bucket := range item.RecentBuckets {
+		successes += bucket.SuccessRecords
+		failures += bucket.FailedRecords
+		if bucket.SuccessRecords > 0 && bucket.FailedRecords > 0 {
+			mixedBuckets++
+		}
+	}
+	if successes != 1 || failures != 2 || mixedBuckets != 1 {
+		t.Fatalf("recent bucket totals = success %d failed %d mixed %d, want 1/2/1", successes, failures, mixedBuckets)
+	}
+	if item.WindowRecords != 4 || item.WindowFailedRecords != 3 {
+		t.Fatalf("7-day totals = records %d failed %d, want 4/3", item.WindowRecords, item.WindowFailedRecords)
+	}
+}
+
+func TestChannelStatusSnapshotRoundTripsRecentBuckets(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions failed: %v", err)
+	}
+	defer app.Close()
+
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, appTimeLocation)
+	buckets := make([]channelStatusRecentBucket, channelStatusRecentBucketCount)
+	buckets[3] = channelStatusRecentBucket{SuccessRecords: 2, FailedRecords: 1}
+	item := channelStatusItem{
+		ID:                  "roundtrip-pool",
+		Name:                "Roundtrip pool",
+		Enabled:             true,
+		Status:              "degraded",
+		Available:           true,
+		WindowStartAt:       dbTime(now.Add(-channelStatusWindowDuration)),
+		WindowEndAt:         dbTime(now),
+		RecentWindowStartAt: dbTime(now.Add(-channelStatusRecentWindowDuration)),
+		RecentWindowEndAt:   dbTime(now),
+		RecentBuckets:       buckets,
+		RefreshedAt:         dbTime(now),
+	}
+	if err := app.replaceChannelStatusSnapshots(context.Background(), []channelStatusItem{item}); err != nil {
+		t.Fatalf("replaceChannelStatusSnapshots failed: %v", err)
+	}
+	stored, _, err := app.listChannelStatusSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("listChannelStatusSnapshots failed: %v", err)
+	}
+	if len(stored) != 1 || len(stored[0].RecentBuckets) != channelStatusRecentBucketCount {
+		t.Fatalf("stored snapshots = %+v", stored)
+	}
+	if stored[0].RecentBuckets[3].SuccessRecords != 2 || stored[0].RecentBuckets[3].FailedRecords != 1 {
+		t.Fatalf("stored recent bucket = %+v", stored[0].RecentBuckets[3])
+	}
+}
+
 func TestBuildChannelStatusItemsContextStopsWhenCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -172,6 +243,9 @@ func TestChannelStatusWindowRecordsReadsOnlyRequiredFields(t *testing.T) {
 		t.Fatalf("records = %d, want 1", len(records))
 	}
 	record := records[0]
+	if record.Timestamp.IsZero() {
+		t.Fatal("record timestamp was not loaded")
+	}
 	if stringPtrValue(record.Provider) != "openai" || stringPtrValue(record.Model) != "gpt-test" || stringPtrValue(record.Auth) != "auth-label" || stringPtrValue(record.AuthIndex) != "auth.json" {
 		t.Fatalf("record identity fields = %+v", record)
 	}

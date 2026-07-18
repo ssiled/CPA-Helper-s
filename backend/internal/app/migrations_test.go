@@ -96,6 +96,11 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testTableExists(t, app.db, "auth_pool_entitlements") {
 		t.Fatal("auth_pool_entitlements was not created")
 	}
+	for _, column := range []string{"recent_window_start_at", "recent_window_end_at", "recent_buckets_json"} {
+		if !testColumnExists(t, app.db, "channel_status_snapshots", column) {
+			t.Fatalf("channel_status_snapshots.%s was not created", column)
+		}
+	}
 	if !testColumnExists(t, app.db, "user_quota_charges", "lifetime_deducted_usd") {
 		t.Fatal("user_quota_charges.lifetime_deducted_usd was not created")
 	}

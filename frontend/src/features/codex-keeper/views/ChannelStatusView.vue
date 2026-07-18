@@ -4,7 +4,7 @@ import { NButton, NEmpty, NSpin, NTag, useMessage } from 'naive-ui'
 import { CheckCircle2, Clock3, FolderKanban, RadioTower, WalletCards } from 'lucide-vue-next'
 
 import { getChannelStatus } from '@/features/codex-keeper/api/codexKeeperApi'
-import type { ChannelStatusItem } from '@/shared/types/api'
+import type { ChannelStatusItem, ChannelStatusRecentBucket } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 import { formatDateTime, formatInteger, formatUsd } from '@/shared/utils/format'
 
@@ -74,23 +74,47 @@ function successRate(item: ChannelStatusItem): number {
   return Math.round((item.window_success_records / item.window_records) * 10000) / 100
 }
 
-function sparkPoints(item: ChannelStatusItem): Array<'ok' | 'fail'> {
-  const records = Math.max(item.window_records, 0)
-  const segmentCount = Math.min(Math.max(records, 24), 36)
-  if (!records) return Array.from({ length: segmentCount }, () => 'ok')
+type SparkPoint = 'idle' | 'ok' | 'mixed' | 'fail'
 
-  const failedRecords = Math.min(Math.max(item.window_failed_records, 0), records)
-  const failedSegments = failedRecords
-    ? Math.min(segmentCount, Math.max(1, Math.round((failedRecords / records) * segmentCount)))
-    : 0
-  const successSegments = segmentCount - failedSegments
-  return Array.from({ length: segmentCount }, (_, index) => (index < successSegments ? 'ok' : 'fail'))
+function recentBuckets(item: ChannelStatusItem): ChannelStatusRecentBucket[] {
+  const buckets = Array.isArray(item.recent_buckets) ? item.recent_buckets.slice(0, 36) : []
+  while (buckets.length < 36) buckets.push({ success_records: 0, failed_records: 0 })
+  return buckets
+}
+
+function sparkPoints(item: ChannelStatusItem): SparkPoint[] {
+  return recentBuckets(item).map((bucket) => {
+    const success = Math.max(bucket.success_records, 0)
+    const failed = Math.max(bucket.failed_records, 0)
+    if (!success && !failed) return 'idle'
+    if (success && failed) return 'mixed'
+    return failed ? 'fail' : 'ok'
+  })
+}
+
+function recentRequestTotals(item: ChannelStatusItem): { success: number; failed: number } {
+  return recentBuckets(item).reduce(
+    (totals, bucket) => ({
+      success: totals.success + Math.max(bucket.success_records, 0),
+      failed: totals.failed + Math.max(bucket.failed_records, 0),
+    }),
+    { success: 0, failed: 0 },
+  )
 }
 
 function windowDistributionLabel(item: ChannelStatusItem): string {
+  const totals = recentRequestTotals(item)
   return t(
-    `近 7 天成功 ${formatInteger(item.window_success_records)}，失败 ${formatInteger(item.window_failed_records)}`,
-    `${formatInteger(item.window_success_records)} succeeded and ${formatInteger(item.window_failed_records)} failed in the last 7 days`,
+    `最近 1 小时成功 ${formatInteger(totals.success)}，失败 ${formatInteger(totals.failed)}`,
+    `${formatInteger(totals.success)} succeeded and ${formatInteger(totals.failed)} failed in the last hour`,
+  )
+}
+
+function recentBucketLabel(item: ChannelStatusItem, index: number): string {
+  const bucket = recentBuckets(item)[index] ?? { success_records: 0, failed_records: 0 }
+  return t(
+    `时间段 ${index + 1}/36：成功 ${formatInteger(bucket.success_records)}，失败 ${formatInteger(bucket.failed_records)}`,
+    `Time slot ${index + 1}/36: ${formatInteger(bucket.success_records)} succeeded, ${formatInteger(bucket.failed_records)} failed`,
   )
 }
 
@@ -111,7 +135,7 @@ onMounted(refresh)
       <div>
         <h1 class="page-title">{{ t('渠道状态', 'Channel Status') }}</h1>
         <p class="page-subtitle">
-          {{ t('按号池展示 CPA 渠道健康状态；页面读取数据库快照，后台每 5 分钟更新，统计窗口为最近 7 天。', 'Pool-based CPA channel health from stored snapshots, refreshed every 5 minutes with a 7-day window.') }}
+          {{ t('按号池展示 CPA 渠道健康状态；七天汇总保留请求与费用，条形图展示最近 1 小时真实请求时间段，后台每 5 分钟更新。', 'Pool-based CPA channel health from stored snapshots. Seven-day totals retain requests and cost, while the bars show real request time slots from the last hour. Refreshed every 5 minutes.') }}
         </p>
       </div>
       <NButton secondary :loading="isLoading" @click="refresh">{{ t('刷新页面', 'Refresh page') }}</NButton>
@@ -193,8 +217,8 @@ onMounted(refresh)
           <section class="channel-panel__bars">
             <div class="channel-panel__bars-head">
               <span>
-                {{ t('窗口记录分布', 'Window record distribution') }}
-                · {{ t('失败', 'Failed') }} {{ formatInteger(channel.window_failed_records) }}
+                {{ t('最近 1 小时请求', 'Requests in the last hour') }}
+                · {{ t('失败', 'Failed') }} {{ formatInteger(recentRequestTotals(channel).failed) }}
               </span>
               <span>{{ formatDateTime(channel.refreshed_at) }}</span>
             </div>
@@ -206,7 +230,8 @@ onMounted(refresh)
               <i
                 v-for="(point, index) in sparkPoints(channel)"
                 :key="`${channel.id}-${index}`"
-                :class="point === 'ok' ? 'is-ok' : 'is-fail'"
+                :class="`is-${point}`"
+                :title="recentBucketLabel(channel, index)"
               />
             </div>
           </section>
@@ -434,7 +459,15 @@ onMounted(refresh)
   display: block;
   height: 24px;
   border-radius: 999px;
+  background: linear-gradient(180deg, #cbd5e1, #94a3b8);
+}
+
+.channel-panel__sparkline i.is-ok {
   background: linear-gradient(180deg, #57c38a, #4cae7d);
+}
+
+.channel-panel__sparkline i.is-mixed {
+  background: linear-gradient(180deg, #facc15, #e18b19);
 }
 
 .channel-panel__sparkline i.is-fail {
