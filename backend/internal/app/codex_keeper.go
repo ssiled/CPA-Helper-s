@@ -740,12 +740,16 @@ func (a *App) keeperLogDir() string {
 
 func (a *App) appendKeeperLogFile(timestamp time.Time, line string) error {
 	dir := a.keeperLogDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, keeperLogFilePrefix+timestamp.In(appTimeLocation).Format("2006-01-02")+".log")
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
 		return err
 	}
 	_, writeErr := file.WriteString(line + "\n")
@@ -916,6 +920,7 @@ func (a *App) handleCodexKeeper(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
+		a.applyAuthPoolLogicalPriorities(accounts)
 		writeJSON(w, http.StatusOK, map[string]any{"items": keeperAccountResponses(accounts, windowUsages)})
 		return nil
 	case len(parts) == 1 && parts[0] == "run-once":
@@ -1537,10 +1542,6 @@ func (a *App) updateKeeperSettings(w http.ResponseWriter, r *http.Request) error
 	return nil
 }
 
-func (a *App) executeKeeperRun(ctx context.Context, mode string, logFn func(string)) (keeperStats, string, error) {
-	return a.executeKeeperRunForAccounts(ctx, mode, nil, logFn)
-}
-
 type keeperRunOptions struct {
 	Mode            string
 	AuthNames       []string
@@ -1610,6 +1611,14 @@ func (a *App) executeKeeperRunWithOptions(ctx context.Context, options keeperRun
 			_ = a.finishKeeperRun(ctx, runID, "failed", err.Error(), stats)
 		}
 		return stats, "", err
+	}
+	priorityAccounts := make([]keeperAccount, 0, len(authFiles))
+	for _, item := range authFiles {
+		provider := keeperAuthProvider(item)
+		priorityAccounts = append(priorityAccounts, keeperAccountFromRemoteAuthFile(item, provider))
+	}
+	if err := a.syncAuthPoolSchedulerPriorities(ctx, priorityAccounts); err != nil {
+		logFn("同步号池插件优先级失败：" + err.Error())
 	}
 	filtered := make([]map[string]any, 0, len(authFiles))
 	remoteKnownNames := map[string]bool{}
@@ -2741,6 +2750,10 @@ func (a *App) applyKeeperPriorityPolicy(ctx context.Context, cfg AppConfig, name
 		(usage.SecondaryUsedPercent != nil && *usage.SecondaryUsedPercent >= cfg.CodexKeeper.QuotaThreshold)
 	currentPriority := keeperEffectivePriority(priority)
 	next := keeperPriorityForType(accountType, cfg.CodexKeeperPriorityRule)
+	if a.authPoolPriorityModeEnabled() {
+		zero := 0
+		next = &zero
+	}
 	if quotaReached {
 		if currentPriority <= -1 {
 			return nil
@@ -3569,14 +3582,39 @@ func (a *App) updateKeeperAccountPriority(ctx context.Context, authName string, 
 	if err := validateKeeperPriority(priority, state.AccountType, cfg.CodexKeeperPriorityRule); err != nil {
 		return err
 	}
-	if err := a.setKeeperRemotePriority(ctx, cfg, authName, &priority); err != nil {
+	pluginMode := a.authPoolPriorityModeEnabled()
+	if !pluginMode {
+		if accounts, listErr := a.listAuthPoolAccounts(ctx); listErr == nil {
+			pluginMode = a.syncAuthPoolSchedulerPriorities(ctx, accounts) == nil
+		}
+	}
+	hostPriority := priority
+	if pluginMode {
+		switch {
+		case priority > 20:
+			if err := a.updateAuthPoolPriorityOverride(ctx, authName, &priority); err != nil {
+				return err
+			}
+			hostPriority = 0
+		case priority >= 0:
+			if err := a.updateAuthPoolPriorityOverride(ctx, authName, nil); err != nil {
+				return err
+			}
+			hostPriority = 0
+		case priority < -1:
+			if err := a.updateAuthPoolPriorityOverride(ctx, authName, nil); err != nil {
+				return err
+			}
+		}
+	}
+	if err := a.setKeeperRemotePriority(ctx, cfg, authName, &hostPriority); err != nil {
 		return err
 	}
 	_, err = a.db.ExecContext(ctx, `
 		UPDATE codex_keeper_auth_states
 		SET priority = ?, restore_priority = NULL, latest_action = NULL, last_error = NULL, updated_at = ?
 		WHERE auth_name = ?
-	`, priority, dbTime(time.Now()), authName)
+	`, hostPriority, dbTime(time.Now()), authName)
 	return err
 }
 
@@ -4289,20 +4327,4 @@ func cloneStringPtr(value *string) *string {
 	}
 	copy := *value
 	return &copy
-}
-
-func cloneTimePtr(value *time.Time) *time.Time {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
-}
-
-func sortKeeperAccounts(accounts []keeperAccount) {
-	sort.Slice(accounts, func(i, j int) bool {
-		left := valueOr(accounts[i].Email, "") + accounts[i].Name
-		right := valueOr(accounts[j].Email, "") + accounts[j].Name
-		return left < right
-	})
 }

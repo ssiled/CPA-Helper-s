@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,6 +35,127 @@ func TestAuthPoolPathParts(t *testing.T) {
 				t.Fatalf("authPoolPathParts(%q) = %#v, want %#v", test.path, got, test.want)
 			}
 		})
+	}
+}
+
+func TestAuthPoolModelSyncAsyncCoalescesAndBacksOff(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/plugins/cpa-auth-pool/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer cpa.Close()
+
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions failed: %v", err)
+	}
+	defer app.Close()
+	cfg, err := app.loadConfig(context.Background())
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	cfg.Collector.CLIProxyURL = cpa.URL
+	cfg.Collector.ManagementKey = "secret"
+	if err := app.saveConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("saveConfig failed: %v", err)
+	}
+
+	app.syncAuthPoolModelsAsync()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model sync did not start")
+	}
+	app.syncAuthPoolModelsAsync()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent model sync calls = %d, want 1", got)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.authPoolSyncMu.Lock()
+		running := app.authPoolSyncRun
+		next := app.authPoolSyncNext
+		app.authPoolSyncMu.Unlock()
+		if !running {
+			if next.IsZero() || !next.After(time.Now()) {
+				t.Fatalf("failed sync did not set backoff: %v", next)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("model sync did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	app.syncAuthPoolModelsAsync()
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("model sync retried during backoff: calls=%d", got)
+	}
+}
+
+func TestAuthPoolResolvedSyncAsyncUsesSuccessInterval(t *testing.T) {
+	var calls atomic.Int32
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" {
+			calls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cpa.Close()
+
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions failed: %v", err)
+	}
+	defer app.Close()
+	cfg, err := app.loadConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Collector.CLIProxyURL = cpa.URL
+	cfg.Collector.ManagementKey = "secret"
+	if err := app.saveConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	app.syncAuthPoolResolvedAuthIDsAsync()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.authPoolResolvedSyncMu.Lock()
+		running := app.authPoolResolvedSyncRun
+		next := app.authPoolResolvedNext
+		app.authPoolResolvedSyncMu.Unlock()
+		if !running {
+			if next.IsZero() || !next.After(time.Now()) {
+				t.Fatalf("successful resolved sync did not set a refresh interval: %v", next)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("resolved sync did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	app.syncAuthPoolResolvedAuthIDsAsync()
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("resolved sync repeated inside success interval: calls=%d", got)
 	}
 }
 
@@ -508,6 +630,8 @@ func TestAuthPoolsNeedModelSyncForUnresolvedDynamicPool(t *testing.T) {
 func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	var membershipPayload map[string]any
+	var priorityPayload map[string]any
+	var patchedPriority *int
 	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -518,12 +642,31 @@ func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
 			}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
 			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{
-				"name": "new.json", "type": "codex", "account_type": "team", "disabled": false,
+				"name": "new.json", "type": "codex", "account_type": "team", "priority": 50, "disabled": false,
 			}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-models":
 			if err := json.NewDecoder(r.Body).Decode(&membershipPayload); err != nil {
 				t.Fatalf("decode membership payload: %v", err)
 			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-priorities":
+			if err := json.NewDecoder(r.Body).Decode(&priorityPayload); err != nil {
+				t.Fatalf("decode priority payload: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{
+				"scheduler_priorities":    true,
+				"auth_types":              priorityPayload["auth_types"],
+				"type_priorities":         priorityPayload["type_priorities"],
+				"auth_priority_overrides": priorityPayload["auth_priority_overrides"],
+			}})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/fields":
+			var payload struct {
+				Priority *int `json:"priority"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode priority patch: %v", err)
+			}
+			patchedPriority = payload.Priority
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
@@ -548,6 +691,55 @@ func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
 	ids, ok := resolved["002"].([]any)
 	if !ok || len(ids) != 1 || ids[0] != "new.json" {
 		t.Fatalf("resolved IDs = %#v, want new.json", resolved["002"])
+	}
+	overrides, ok := priorityPayload["auth_priority_overrides"].(map[string]any)
+	if !ok || overrides["new.json"] != float64(50) {
+		t.Fatalf("priority overrides = %#v, want new.json=50", priorityPayload["auth_priority_overrides"])
+	}
+	if replace, _ := priorityPayload["replace_overrides"].(bool); !replace {
+		t.Fatalf("replace_overrides = %#v, want true", priorityPayload["replace_overrides"])
+	}
+	if patchedPriority == nil || *patchedPriority != 0 {
+		t.Fatalf("patched host priority = %v, want 0", patchedPriority)
+	}
+}
+
+func TestApplyAuthPoolLogicalPrioritiesUsesOverrideThenType(t *testing.T) {
+	app := &App{}
+	app.cacheAuthPoolPriorities(
+		map[string]string{"manual.json": "k12", "typed.json": "plus", "degraded.json": "free"},
+		map[string]int{"k12": 5, "plus": 12, "free": 1},
+		map[string]int{"manual.json": 50},
+		true,
+	)
+	zero := 0
+	degraded := -1
+	accounts := []keeperAccount{
+		{Name: "manual.json", AccountType: stringPtr("k12"), Priority: &zero},
+		{Name: "typed.json", AccountType: stringPtr("plus"), Priority: &zero},
+		{Name: "degraded.json", AccountType: stringPtr("free"), Priority: &degraded},
+	}
+	app.applyAuthPoolLogicalPriorities(accounts)
+	if accounts[0].Priority == nil || *accounts[0].Priority != 50 {
+		t.Fatalf("manual priority = %v, want 50", accounts[0].Priority)
+	}
+	if accounts[1].Priority == nil || *accounts[1].Priority != 12 {
+		t.Fatalf("type priority = %v, want 12", accounts[1].Priority)
+	}
+	if accounts[2].Priority == nil || *accounts[2].Priority != -1 {
+		t.Fatalf("degraded priority = %v, want -1", accounts[2].Priority)
+	}
+}
+
+func TestCacheAuthPoolPrioritiesReplacesRemovedOverrides(t *testing.T) {
+	app := &App{}
+	app.cacheAuthPoolPriorities(nil, nil, map[string]int{"removed.json": 50}, true)
+	app.cacheAuthPoolPriorities(map[string]string{}, map[string]int{}, nil, true)
+	app.authPoolPriorityMu.RLock()
+	_, exists := app.authPoolAuthOverrides["removed.json"]
+	app.authPoolPriorityMu.RUnlock()
+	if exists {
+		t.Fatal("stale auth priority override remained after a full status refresh")
 	}
 }
 

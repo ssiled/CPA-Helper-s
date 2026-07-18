@@ -782,7 +782,7 @@ onBeforeUnmount(() => {
             <NButton size="small" secondary @click="addRule">{{ t('新增规则', 'Add Rule') }}</NButton>
           </div>
           <p class="section-hint">
-            {{ t('账号当前优先级超过 20 时视为手动优先，巡检不会覆盖；0 ~ 20 会按这里的账号类型规则维护。', 'Current account priorities above 20 are treated as manual priority and will not be overwritten. Priorities from 0 to 20 are maintained using the account type rules here.') }}
+            {{ t('号池插件启用时，这些值用于插件内部排序，数值越高越优先；CPA 中的活跃账号统一保持 priority 0。账号手动优先级超过 20 时作为插件账号覆盖保存。', 'When the auth-pool plugin is enabled, these values control plugin-internal ordering; higher values win. Active CPA accounts stay at priority 0. Manual account priorities above 20 are stored as plugin overrides.') }}
           </p>
           <NDataTable
             class="priority-table"

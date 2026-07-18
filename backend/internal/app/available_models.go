@@ -264,14 +264,6 @@ func appendPricedAvailableModels(response *AvailableModelsResponse, prices map[[
 	})
 }
 
-func availableModelPluginSource() AvailableModelSource {
-	return AvailableModelSource{
-		APIKeyHash:    "plugin-cpa-key",
-		APIKeyPreview: "已配置",
-		Description:   "CPA 插件 Key",
-	}
-}
-
 func safeAvailableModelError(err error) string {
 	if err == nil {
 		return "CPA model list request failed"
@@ -296,14 +288,6 @@ func fetchAvailableModelItemsForAPIKey(ctx context.Context, cfg AppConfig, apiKe
 		return nil, err
 	}
 	return fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, upstreamAPIKey, apiKey.APIKeyHash, includeHelperHash)
-}
-
-func fetchAvailableModelItems(ctx context.Context, cfg AppConfig, apiKey string) ([]any, error) {
-	target, upstreamAPIKey, _, err := modelProxyTarget(cfg, apiKey)
-	if err != nil {
-		return nil, err
-	}
-	return fetchAvailableModelItemsFromTarget(ctx, target.CPAURL, upstreamAPIKey, "", false)
 }
 
 func fetchAvailableModelItemsFromTarget(ctx context.Context, cpaURL string, apiKey string, apiKeyHash string, includeHelperHash bool) ([]any, error) {

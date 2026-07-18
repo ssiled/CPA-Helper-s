@@ -36,6 +36,11 @@ type collectorPatch struct {
 
 type respError string
 
+const (
+	maxRESPBulkBytes  = 8 << 20
+	maxRESPArrayItems = 10_000
+)
+
 func (e respError) Error() string {
 	return string(e)
 }
@@ -431,6 +436,9 @@ func readResp(reader *bufio.Reader) (any, error) {
 		if length == -1 {
 			return nil, nil
 		}
+		if length < 0 || length > maxRESPBulkBytes {
+			return nil, fmt.Errorf("RESP bulk length out of range: %d", length)
+		}
 		payload := make([]byte, length+2)
 		if _, err := io.ReadFull(reader, payload); err != nil {
 			return nil, err
@@ -447,6 +455,9 @@ func readResp(reader *bufio.Reader) (any, error) {
 		}
 		if length == -1 {
 			return nil, nil
+		}
+		if length < 0 || length > maxRESPArrayItems {
+			return nil, fmt.Errorf("RESP array length out of range: %d", length)
 		}
 		items := make([]any, 0, length)
 		for i := 0; i < length; i++ {

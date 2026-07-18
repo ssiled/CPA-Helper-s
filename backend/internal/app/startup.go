@@ -123,7 +123,7 @@ func openRuntimeDB(paths RuntimePaths, readOnly bool) (*sql.DB, error) {
 			}
 			return nil, err
 		}
-	} else if err := os.MkdirAll(paths.DBDir, 0o755); err != nil {
+	} else if err := os.MkdirAll(paths.DBDir, 0o700); err != nil {
 		return nil, err
 	}
 

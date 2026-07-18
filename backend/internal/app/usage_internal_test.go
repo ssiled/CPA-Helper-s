@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +36,30 @@ func TestSaveUsageMessageStoresReasoningEffortAndTTFT(t *testing.T) {
 	}
 	if !reasoningEffort.Valid || reasoningEffort.String != "xhigh" || !ttftMS.Valid || ttftMS.Float64 != 710 {
 		t.Fatalf("stored reasoning/ttft = %#v/%#v, want xhigh/710", reasoningEffort, ttftMS)
+	}
+}
+
+func TestSaveUsageMessageRedactsSecretsBeforePersistence(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	const secret = "sk-super-secret-value"
+	raw := `{"api_key":"` + secret + `","auth_type":"apikey","source":"` + secret + `","response_headers":{"Set-Cookie":"session=secret-cookie","Authorization":"Bearer secret-token"},"request_id":"usage-redaction"}`
+	record, created, err := app.saveUsageMessage(context.Background(), []byte(raw))
+	if err != nil || !created {
+		t.Fatalf("saveUsageMessage created=%v err=%v", created, err)
+	}
+	for _, leaked := range []string{secret, "secret-cookie", "secret-token"} {
+		if strings.Contains(record.RawJSON, leaked) {
+			t.Fatalf("stored raw_json leaked %q: %s", leaked, record.RawJSON)
+		}
+	}
+	if record.Source == nil || *record.Source == secret || !strings.Contains(*record.Source, "...") {
+		t.Fatalf("stored source = %v, want masked API key source", record.Source)
 	}
 }
 

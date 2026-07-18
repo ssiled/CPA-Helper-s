@@ -76,6 +76,10 @@ func MaskSecret(value *string) string {
 }
 
 func SetSessionCookie(w http.ResponseWriter, userID int, secret string) error {
+	return SetSessionCookieSecure(w, userID, secret, false)
+}
+
+func SetSessionCookieSecure(w http.ResponseWriter, userID int, secret string, secure bool) error {
 	token, err := createSessionToken(userID, secret)
 	if err != nil {
 		return err
@@ -86,18 +90,24 @@ func SetSessionCookie(w http.ResponseWriter, userID int, secret string) error {
 		Path:     "/",
 		MaxAge:   sessionMaxAgeSeconds,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
 }
 
 func ClearSessionCookie(w http.ResponseWriter) {
+	ClearSessionCookieSecure(w, false)
+}
+
+func ClearSessionCookieSecure(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

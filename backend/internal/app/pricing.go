@@ -746,16 +746,6 @@ func mathRound(value float64, places int) float64 {
 	return float64(int64(value*factor-0.5)) / factor
 }
 
-func pricesEqual(item ModelPrice, payload modelPricePayload) bool {
-	return item.Provider == payload.Provider &&
-		item.Model == payload.Model &&
-		item.InputUSDPerMillion == payload.InputUSDPerMillion &&
-		item.OutputUSDPerMillion == payload.OutputUSDPerMillion &&
-		item.CacheReadUSDPerMillion == payload.CacheReadUSDPerMillion &&
-		item.CacheCreationUSDPerMillion == payload.CacheCreationUSDPerMillion &&
-		floatPtrEqual(item.RequestUSD, payload.RequestUSD)
-}
-
 func priceKey(provider, model string) [2]string {
 	return [2]string{strings.ToLower(strings.TrimSpace(provider)), strings.ToLower(strings.TrimSpace(model))}
 }
@@ -829,14 +819,13 @@ func liteLLMHTTPClient(timeout time.Duration, proxyCfg LiteLLMProxyConfig) (*htt
 	if err != nil {
 		return nil, validationError("代理地址必须是有效的 http://、https:// 或 socks5:// 地址")
 	}
-	transport, ok := http.DefaultTransport.(*http.Transport)
+	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
-		return nil, fmt.Errorf("default HTTP transport has unexpected type")
+		return nil, fmt.Errorf("shared HTTP transport has unexpected type")
 	}
 	cloned := transport.Clone()
 	cloned.Proxy = http.ProxyURL(proxyURL)
-	client.Transport = cloned
-	return client, nil
+	return &http.Client{Transport: cloned, Timeout: timeout}, nil
 }
 
 func normalizeLiteLLMProxyConfig(input LiteLLMProxyConfig) (LiteLLMProxyConfig, error) {
@@ -922,13 +911,6 @@ func nullableFloatArg(value *float64) any {
 		return nil
 	}
 	return *value
-}
-
-func floatPtrEqual(left, right *float64) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }
 
 func billingUnitForModel(model string) string {

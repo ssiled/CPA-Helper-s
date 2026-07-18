@@ -30,6 +30,8 @@ func Run(ctx context.Context, cfg Config) error {
 		Addr:              addr,
 		Handler:           cfg.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	errCh := make(chan error, 1)

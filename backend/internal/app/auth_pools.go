@@ -19,6 +19,7 @@ const (
 	authPoolModelSyncBackoffBase = 5 * time.Second
 	authPoolModelSyncBackoffMax  = 5 * time.Minute
 	authPoolResolvedSyncTimeout  = 15 * time.Second
+	authPoolResolvedSyncInterval = 30 * time.Second
 )
 
 type authPool struct {
@@ -42,8 +43,12 @@ type authPoolBinding struct {
 }
 
 type authPoolStatus struct {
+	SchedulerPriorities    bool                 `json:"scheduler_priorities,omitempty"`
 	Pools                  []authPool           `json:"pools"`
 	Bindings               []authPoolBinding    `json:"bindings"`
+	AuthTypes              map[string]string    `json:"auth_types,omitempty"`
+	TypePriorities         map[string]int       `json:"type_priorities,omitempty"`
+	AuthPriorityOverrides  map[string]int       `json:"auth_priority_overrides,omitempty"`
 	CodexConcurrencyLimits map[string]int       `json:"codex_concurrency_limits,omitempty"`
 	Concurrency            *authPoolConcurrency `json:"concurrency,omitempty"`
 	PluginInstalled        bool                 `json:"plugin_installed"`
@@ -279,6 +284,9 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 		return status, nil
 	}
 	status.PluginInstalled = true
+	if status.SchedulerPriorities {
+		a.cacheAuthPoolPriorities(status.AuthTypes, status.TypePriorities, status.AuthPriorityOverrides, true)
+	}
 	localBindings, err := a.localAuthPoolBindings(ctx, nil)
 	if err != nil {
 		return authPoolStatus{}, err
@@ -311,6 +319,9 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 		if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &restored); err == nil {
 			status = restored
 			status.PluginInstalled = true
+			if status.SchedulerPriorities {
+				a.cacheAuthPoolPriorities(status.AuthTypes, status.TypePriorities, status.AuthPriorityOverrides, true)
+			}
 		} else if status.PluginError == "" {
 			status.Pools = localPools
 			status.Bindings = localBindings
@@ -380,22 +391,29 @@ func (a *App) syncAuthPoolModelsAsync() {
 }
 
 func (a *App) syncAuthPoolResolvedAuthIDsAsync() {
+	now := time.Now()
 	a.authPoolResolvedSyncMu.Lock()
-	if a.authPoolResolvedSyncRun {
+	if a.authPoolResolvedSyncRun || now.Before(a.authPoolResolvedNext) {
 		a.authPoolResolvedSyncMu.Unlock()
 		return
 	}
 	a.authPoolResolvedSyncRun = true
 	a.authPoolResolvedSyncMu.Unlock()
 	started := a.startBackgroundTask(func(parent context.Context) {
-		defer func() {
-			a.authPoolResolvedSyncMu.Lock()
-			a.authPoolResolvedSyncRun = false
-			a.authPoolResolvedSyncMu.Unlock()
-		}()
 		ctx, cancel := context.WithTimeout(parent, authPoolResolvedSyncTimeout)
 		defer cancel()
-		if err := a.syncAuthPoolResolvedAuthIDs(ctx); err != nil && parent.Err() == nil {
+		err := a.syncAuthPoolResolvedAuthIDs(ctx)
+		a.authPoolResolvedSyncMu.Lock()
+		a.authPoolResolvedSyncRun = false
+		if err == nil {
+			a.authPoolResolvedFail = 0
+			a.authPoolResolvedNext = time.Now().Add(authPoolResolvedSyncInterval)
+		} else {
+			a.authPoolResolvedFail++
+			a.authPoolResolvedNext = time.Now().Add(authPoolModelSyncBackoff(a.authPoolResolvedFail))
+		}
+		a.authPoolResolvedSyncMu.Unlock()
+		if err != nil && parent.Err() == nil {
 			log.Printf("sync auth pool memberships failed: %v", err)
 		}
 	})
@@ -427,18 +445,170 @@ func (a *App) syncAuthPoolResolvedAuthIDs(ctx context.Context) error {
 			break
 		}
 	}
-	if !changed {
-		return nil
+	if changed {
+		if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{
+			"pool_resolved_auth_ids": desired,
+		}, nil); err != nil {
+			return err
+		}
+		for index := range status.Pools {
+			status.Pools[index].ResolvedAuthIDs = append([]string(nil), desired[status.Pools[index].ID]...)
+		}
+		if err := a.saveLocalAuthPools(ctx, status.Pools); err != nil {
+			return err
+		}
 	}
-	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{
-		"pool_resolved_auth_ids": desired,
-	}, nil); err != nil {
+	return a.syncAuthPoolSchedulerPriorities(ctx, accounts)
+}
+
+func (a *App) syncAuthPoolSchedulerPriorities(ctx context.Context, accounts []keeperAccount) error {
+	cfg, err := a.loadConfig(ctx)
+	if err != nil {
 		return err
 	}
-	for index := range status.Pools {
-		status.Pools[index].ResolvedAuthIDs = append([]string(nil), desired[status.Pools[index].ID]...)
+	typePriorities := normalizePriorityRules(cfg.CodexKeeperPriorityRule)
+	authTypes := make(map[string]string, len(accounts))
+	manualOverrides := map[string]int{}
+	tracked := make([]keeperAccount, 0, len(accounts))
+	for _, account := range accounts {
+		authID := strings.TrimSpace(account.Name)
+		accountType := strings.ToLower(strings.TrimSpace(stringPtrValue(account.AccountType)))
+		if authID == "" || accountType == "" {
+			continue
+		}
+		if _, ok := typePriorities[accountType]; !ok {
+			continue
+		}
+		authTypes[authID] = accountType
+		tracked = append(tracked, account)
+		if account.Priority != nil && *account.Priority > 20 {
+			manualOverrides[authID] = *account.Priority
+		}
 	}
-	return a.saveLocalAuthPools(ctx, status.Pools)
+	payload := map[string]any{
+		"auth_types":              authTypes,
+		"type_priorities":         typePriorities,
+		"replace_overrides":       true,
+		"auth_priority_overrides": manualOverrides,
+	}
+	var response struct {
+		Status authPoolStatus `json:"status"`
+	}
+	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-priorities", payload, &response); err != nil {
+		return err
+	}
+	responseTypes := response.Status.AuthTypes
+	if responseTypes == nil {
+		responseTypes = authTypes
+	}
+	responseTypePriorities := response.Status.TypePriorities
+	if responseTypePriorities == nil {
+		responseTypePriorities = typePriorities
+	}
+	responseOverrides := response.Status.AuthPriorityOverrides
+	if responseOverrides == nil {
+		responseOverrides = manualOverrides
+	}
+	a.cacheAuthPoolPriorities(responseTypes, responseTypePriorities, responseOverrides, true)
+	for _, account := range tracked {
+		if account.Disabled || account.Priority == nil || *account.Priority < 0 || *account.Priority == 0 {
+			continue
+		}
+		zero := 0
+		if err := a.setKeeperRemotePriority(ctx, cfg, account.Name, &zero); err != nil {
+			return err
+		}
+		if _, err := a.db.ExecContext(ctx, `
+			UPDATE codex_keeper_auth_states
+			SET priority = 0, updated_at = ?
+			WHERE auth_name = ?
+		`, dbTime(time.Now()), account.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) cacheAuthPoolPriorities(authTypes map[string]string, typePriorities, overrides map[string]int, enabled bool) {
+	a.authPoolPriorityMu.Lock()
+	defer a.authPoolPriorityMu.Unlock()
+	a.authPoolPriorityMode = enabled
+	a.authPoolAuthTypes = cloneStringMapValues(authTypes)
+	a.authPoolTypePriorities = cloneIntMapValues(typePriorities)
+	a.authPoolAuthOverrides = cloneIntMapValues(overrides)
+}
+
+func (a *App) authPoolPriorityModeEnabled() bool {
+	a.authPoolPriorityMu.RLock()
+	defer a.authPoolPriorityMu.RUnlock()
+	return a.authPoolPriorityMode
+}
+
+func (a *App) applyAuthPoolLogicalPriorities(accounts []keeperAccount) {
+	a.authPoolPriorityMu.RLock()
+	defer a.authPoolPriorityMu.RUnlock()
+	if !a.authPoolPriorityMode {
+		return
+	}
+	for index := range accounts {
+		if accounts[index].Priority != nil && *accounts[index].Priority < 0 {
+			continue
+		}
+		authID := strings.TrimSpace(accounts[index].Name)
+		if priority, ok := a.authPoolAuthOverrides[authID]; ok {
+			value := priority
+			accounts[index].Priority = &value
+			continue
+		}
+		accountType := strings.ToLower(strings.TrimSpace(stringPtrValue(accounts[index].AccountType)))
+		if priority, ok := a.authPoolTypePriorities[accountType]; ok {
+			value := priority
+			accounts[index].Priority = &value
+		}
+	}
+}
+
+func (a *App) updateAuthPoolPriorityOverride(ctx context.Context, authID string, priority *int) error {
+	payload := map[string]any{}
+	if priority == nil {
+		payload["remove_overrides"] = []string{authID}
+	} else {
+		payload["auth_priority_overrides"] = map[string]int{authID: *priority}
+	}
+	var response struct {
+		Status authPoolStatus `json:"status"`
+	}
+	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-priorities", payload, &response); err != nil {
+		return err
+	}
+	a.authPoolPriorityMu.Lock()
+	if a.authPoolAuthOverrides == nil {
+		a.authPoolAuthOverrides = map[string]int{}
+	}
+	if priority == nil {
+		delete(a.authPoolAuthOverrides, authID)
+	} else {
+		a.authPoolAuthOverrides[authID] = *priority
+	}
+	a.authPoolPriorityMode = true
+	a.authPoolPriorityMu.Unlock()
+	return nil
+}
+
+func cloneStringMapValues(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneIntMapValues(values map[string]int) map[string]int {
+	cloned := make(map[string]int, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func sameNormalizedStringList(left, right []string) bool {
@@ -1544,14 +1714,6 @@ func (a *App) syncAuthPoolModels(ctx context.Context) error {
 		"pool_models":            poolModels,
 		"pool_resolved_auth_ids": poolResolvedAuthIDs,
 	}, nil)
-}
-
-func (a *App) resolveAuthPoolModels(ctx context.Context, pool authPool) ([]string, error) {
-	accounts, err := a.listAuthPoolAccounts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return a.resolveAuthPoolModelsFromAccounts(ctx, pool, accounts)
 }
 
 func (a *App) resolveAuthPoolModelsFromAccounts(ctx context.Context, pool authPool, accounts []keeperAccount) ([]string, error) {

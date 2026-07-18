@@ -572,7 +572,7 @@ const priorityDialogHint = computed(() => {
     return t('手动低优先级必须小于 -1，巡检永远不会自动调整。', 'Manual low priority must be less than -1. Inspection will never adjust it automatically.')
   }
   if (priorityDialog.mode === 'high') {
-    return t('手动优先必须大于 20，额度耗尽时会临时降为 -1，恢复后回到该值。', 'Manual priority must be greater than 20. When quota is exhausted it is temporarily lowered to -1 and restored to this value after recovery.')
+    return t('手动优先必须大于 20；号池插件会保存该账号覆盖，CPA 宿主 priority 仍保持 0。额度耗尽时宿主临时降为 -1，恢复后回到 0。', 'Manual priority must be greater than 20. The auth-pool plugin stores the account override while CPA host priority stays at 0. Quota exhaustion temporarily lowers the host to -1 and recovery returns it to 0.')
   }
   const account = priorityDialog.account
   const value = account ? defaultPriority(account) : null

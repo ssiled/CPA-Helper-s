@@ -4,15 +4,55 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
+const (
+	maxResponseBodyBytes = 8 << 20
+	maxCachedClients     = 32
+)
+
+var (
+	sharedTransport = &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   32,
+		MaxConnsPerHost:       128,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	clientMu    sync.RWMutex
+	clientCache = map[time.Duration]*http.Client{}
+)
+
 func Client(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout}
+	clientMu.RLock()
+	client := clientCache[timeout]
+	clientMu.RUnlock()
+	if client != nil {
+		return client
+	}
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	if client = clientCache[timeout]; client != nil {
+		return client
+	}
+	client = &http.Client{Transport: sharedTransport, Timeout: timeout}
+	if len(clientCache) < maxCachedClients {
+		clientCache[timeout] = client
+	}
+	return client
 }
 
 func ManagementHeaders(key string) http.Header {
@@ -57,9 +97,12 @@ func DoJSON(ctx context.Context, client *http.Client, method, target string, hea
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
 	if err != nil {
 		return resp, nil, err
+	}
+	if len(payload) > maxResponseBodyBytes {
+		return resp, nil, ErrResponseTooLarge
 	}
 	return resp, payload, nil
 }
@@ -82,3 +125,5 @@ func (invalidURLError) Error() string {
 }
 
 var errInvalidURL error = invalidURLError{}
+
+var ErrResponseTooLarge = errors.New("response body exceeds limit")

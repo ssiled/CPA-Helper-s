@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,42 @@ func TestBuildChannelStatusItemsPadsMissingRecentRequestsOnLeft(t *testing.T) {
 	}
 }
 
+func TestBuildIncrementalChannelStatusMatchesFullRebuild(t *testing.T) {
+	baseNow := time.Date(2026, 7, 18, 12, 0, 0, 0, appTimeLocation)
+	nextNow := baseNow.Add(2 * time.Minute)
+	authID := "incremental-auth.json"
+	pools := []authPool{{ID: "incremental-pool", Name: "Incremental", AuthIDs: []string{authID}, Enabled: true}}
+	accounts := []keeperAccount{{Name: authID}}
+	provider := "openai"
+	model := "gpt-incremental"
+	initial := []UsageRecord{
+		{ID: 1, Timestamp: baseNow.Add(-channelStatusWindowDuration).Add(30 * time.Second), Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), RawJSON: `{}`},
+		{ID: 2, Timestamp: baseNow.Add(-channelStatusWindowDuration).Add(90 * time.Second), Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+		{ID: 3, Timestamp: baseNow.Add(-time.Hour), Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), RawJSON: `{}`},
+		{ID: 4, Timestamp: baseNow.Add(-30 * time.Minute), Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+	}
+	added := []UsageRecord{
+		{ID: 5, Timestamp: baseNow.Add(time.Minute), Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), RawJSON: `{}`},
+		{ID: 6, Timestamp: nextNow, Provider: &provider, Model: &model, InputTokens: 1_000_000, AuthIndex: chStringPtr(authID), Failed: true, RawJSON: `{}`},
+	}
+	prices := map[[2]string]ModelPrice{priceKey(provider, model): {Provider: provider, Model: model, InputUSDPerMillion: 1}}
+	initialItems := buildChannelStatusItems(pools, accounts, initial, prices, baseNow)
+	cache := newChannelStatusUsageCache(initialItems, "members", "prices", baseNow.Add(-channelStatusWindowDuration), 4)
+	incrementalItems, _, err := buildIncrementalChannelStatusItemsContext(t.Context(), pools, accounts, initial[:2], added, prices, nextNow, cache)
+	if err != nil {
+		t.Fatalf("incremental build failed: %v", err)
+	}
+	expectedItems := buildChannelStatusItems(pools, accounts, append(append([]UsageRecord(nil), initial[2:]...), added...), prices, nextNow)
+	incremental := findChannelStatusItem(t, incrementalItems, "incremental-pool")
+	expected := findChannelStatusItem(t, expectedItems, "incremental-pool")
+	if incremental.WindowRecords != expected.WindowRecords || incremental.WindowSuccessRecords != expected.WindowSuccessRecords || incremental.WindowFailedRecords != expected.WindowFailedRecords || incremental.WindowCostUSD != expected.WindowCostUSD {
+		t.Fatalf("incremental aggregate = %+v, expected %+v", incremental, expected)
+	}
+	if !reflect.DeepEqual(nonEmptyChannelStatusRequests(incremental.RecentRequests), nonEmptyChannelStatusRequests(expected.RecentRequests)) {
+		t.Fatalf("incremental recent requests = %+v, expected %+v", nonEmptyChannelStatusRequests(incremental.RecentRequests), nonEmptyChannelStatusRequests(expected.RecentRequests))
+	}
+}
+
 func TestChannelStatusSnapshotRoundTripsRecentRequests(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
@@ -291,6 +328,39 @@ func TestChannelStatusWindowRecordsReadsOnlyRequiredFields(t *testing.T) {
 	}
 }
 
+func TestChannelStatusWindowRecordsRangeExcludesRowsAfterCacheHighWaterMark(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := NewWithOptions(context.Background(), NewOptions{Migrate: true})
+	if err != nil {
+		t.Fatalf("NewWithOptions failed: %v", err)
+	}
+	defer app.Close()
+
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, appTimeLocation)
+	start := now.Add(-channelStatusWindowDuration)
+	insert := func(timestamp time.Time, dedupe string) int {
+		result, err := app.db.Exec(`
+			INSERT INTO usage_records (created_at, timestamp, failed, input_tokens, output_tokens, cached_tokens,
+				cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_tokens, dedupe_key, raw_json)
+			VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, '{}')
+		`, dbTime(now), dbTime(timestamp), dedupe)
+		if err != nil {
+			t.Fatalf("insert usage record: %v", err)
+		}
+		id, _ := result.LastInsertId()
+		return int(id)
+	}
+	firstID := insert(start.Add(30*time.Second), "range-first")
+	_ = insert(start.Add(time.Minute), "range-late")
+	records, err := app.channelStatusWindowRecordsRange(context.Background(), start, start.Add(2*time.Minute), firstID)
+	if err != nil {
+		t.Fatalf("channelStatusWindowRecordsRange failed: %v", err)
+	}
+	if len(records) != 1 || records[0].ID != firstID {
+		t.Fatalf("range records = %+v, want only id %d", records, firstID)
+	}
+}
+
 func TestChannelPoolStatusUnavailableStates(t *testing.T) {
 	exhausted := channelStatusItem{Enabled: true, AccountCount: 2, QuotaExhaustedAccounts: 2}
 	if status, available := channelPoolStatus(&exhausted); status != "quota_exhausted" || available {
@@ -336,6 +406,16 @@ func findChannelStatusItem(t *testing.T, items []channelStatusItem, id string) c
 	}
 	t.Fatalf("missing item %s in %+v", id, items)
 	return channelStatusItem{}
+}
+
+func nonEmptyChannelStatusRequests(requests []channelStatusRecentRequest) []channelStatusRecentRequest {
+	result := make([]channelStatusRecentRequest, 0, len(requests))
+	for _, request := range requests {
+		if request.Timestamp != "" {
+			result = append(result, request)
+		}
+	}
+	return result
 }
 
 func chStringPtr(value string) *string {

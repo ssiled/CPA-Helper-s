@@ -204,9 +204,22 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 		StatusCode:  &statusCode,
 	}
 	if shouldBufferModelProxyResponse(response) {
-		payload, err := io.ReadAll(response.Body)
+		payload, err := io.ReadAll(io.LimitReader(response.Body, modelProxyBodyLimit+1))
 		if err != nil {
 			return err
+		}
+		if len(payload) > modelProxyBodyLimit {
+			responseRequestID := modelProxyRequestIDFromResponse(response, nil)
+			if err := a.recordModelProxyRequestAttributionsWithMetadata(r.Context(), apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {
+				return err
+			}
+			copyProxyHeaders(w.Header(), response.Header)
+			w.WriteHeader(response.StatusCode)
+			if _, err := w.Write(payload); err != nil {
+				return nil
+			}
+			_, _ = io.Copy(w, response.Body)
+			return nil
 		}
 		responseRequestID := modelProxyRequestIDFromResponse(response, payload)
 		if err := a.recordModelProxyRequestAttributionsWithMetadata(r.Context(), apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {

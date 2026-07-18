@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,19 @@ type changeCredentialsRequest struct {
 	Password        string  `json:"password"`
 	CurrentPassword *string `json:"current_password"`
 }
+
+type loginAttemptState struct {
+	Failures     int
+	LastAttempt  time.Time
+	BlockedUntil time.Time
+}
+
+const (
+	loginAttemptCapacity = 4096
+	loginAttemptWindow   = 15 * time.Minute
+	loginBlockBase       = 30 * time.Second
+	loginBlockMax        = 15 * time.Minute
+)
 
 var apiKeySyncTimeout = 8 * time.Second
 var modelRequestTestTimeout = 45 * time.Second
@@ -74,7 +88,7 @@ func (a *App) handleAuth(w http.ResponseWriter, r *http.Request) error {
 		if err := requireMethod(r, http.MethodPost); err != nil {
 			return err
 		}
-		clearSessionCookie(w)
+		clearSessionCookie(w, r)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return nil
 	default:
@@ -91,6 +105,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) error {
 	if username == "" || strings.TrimSpace(payload.Password) == "" {
 		return validationError("账号和密码不能为空")
 	}
+	attemptKey := loginAttemptKey(r, username)
+	if !a.loginAttemptAllowed(attemptKey, time.Now()) {
+		return rateLimitError("登录尝试过于频繁，请稍后重试")
+	}
 	count, err := a.userCount(r.Context())
 	if err != nil {
 		return err
@@ -101,22 +119,101 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) error {
 	user, hash, salt, disabled, err := a.userCredentialsByUsername(r.Context(), username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			a.recordLoginFailure(attemptKey, time.Now())
 			return authenticationError("用户名或密码不正确")
 		}
 		return err
 	}
 	if disabled || hash == nil || salt == nil || !verifyPassword(payload.Password, *salt, *hash) {
+		a.recordLoginFailure(attemptKey, time.Now())
 		return authenticationError("用户名或密码不正确")
 	}
+	a.clearLoginFailures(attemptKey)
 	cfg, err := a.loadConfig(r.Context())
 	if err != nil {
 		return err
 	}
-	if err := setSessionCookie(w, user.ID, cfg.SessionSecret); err != nil {
+	if err := setSessionCookie(w, r, user.ID, cfg.SessionSecret); err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusOK, user)
 	return nil
+}
+
+func loginAttemptKey(r *http.Request, username string) string {
+	remote := "unknown"
+	if r != nil {
+		remote = strings.TrimSpace(r.RemoteAddr)
+		if host, _, err := net.SplitHostPort(remote); err == nil && strings.TrimSpace(host) != "" {
+			remote = host
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(username)) + "\x00" + remote
+}
+
+func (a *App) loginAttemptAllowed(key string, now time.Time) bool {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	state, ok := a.loginAttempts[key]
+	if !ok {
+		return true
+	}
+	if !state.BlockedUntil.IsZero() && now.Before(state.BlockedUntil) {
+		return false
+	}
+	if now.Sub(state.LastAttempt) > loginAttemptWindow || now.Before(state.LastAttempt) {
+		delete(a.loginAttempts, key)
+	}
+	return true
+}
+
+func (a *App) recordLoginFailure(key string, now time.Time) {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	if a.loginAttempts == nil {
+		a.loginAttempts = make(map[string]loginAttemptState)
+	}
+	state := a.loginAttempts[key]
+	if state.LastAttempt.IsZero() || now.Sub(state.LastAttempt) > loginAttemptWindow || now.Before(state.LastAttempt) {
+		state = loginAttemptState{}
+	}
+	state.Failures++
+	state.LastAttempt = now
+	if state.Failures >= 5 {
+		delay := loginBlockBase
+		for failure := 5; failure < state.Failures && delay < loginBlockMax; failure++ {
+			delay *= 2
+			if delay >= loginBlockMax {
+				delay = loginBlockMax
+				break
+			}
+		}
+		state.BlockedUntil = now.Add(delay)
+	}
+	a.loginAttempts[key] = state
+	if len(a.loginAttempts) > loginAttemptCapacity {
+		a.evictOldestLoginAttemptLocked()
+	}
+}
+
+func (a *App) evictOldestLoginAttemptLocked() {
+	oldestKey := ""
+	var oldest time.Time
+	for key, state := range a.loginAttempts {
+		if oldestKey == "" || state.LastAttempt.Before(oldest) {
+			oldestKey = key
+			oldest = state.LastAttempt
+		}
+	}
+	if oldestKey != "" {
+		delete(a.loginAttempts, oldestKey)
+	}
+}
+
+func (a *App) clearLoginFailures(key string) {
+	a.loginMu.Lock()
+	delete(a.loginAttempts, key)
+	a.loginMu.Unlock()
 }
 
 func (a *App) handleSetupState(w http.ResponseWriter, r *http.Request) error {
@@ -141,19 +238,24 @@ func (a *App) handleSetupFirstAdmin(w http.ResponseWriter, r *http.Request) erro
 	if len(payload.Password) < 8 {
 		return validationError("密码长度不能少于 8 位")
 	}
-	count, err := a.userCount(r.Context())
+	salt, err := createSalt()
 	if err != nil {
+		return err
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var count int
+	if err := tx.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
 		return conflictError("第一个管理员账号已存在")
 	}
-	salt, err := createSalt()
-	if err != nil {
-		return err
-	}
 	now := dbTime(time.Now())
-	result, err := a.db.ExecContext(r.Context(), `
+	result, err := tx.ExecContext(r.Context(), `
 		INSERT INTO users (username, password_hash, password_salt, is_admin, nickname, created_at, updated_at)
 		VALUES (?, ?, ?, 1, ?, ?, ?)
 	`, username, hashPassword(payload.Password, salt), salt, nickname, now, now)
@@ -161,11 +263,14 @@ func (a *App) handleSetupFirstAdmin(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	id, _ := result.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	cfg, err := a.loadConfig(r.Context())
 	if err != nil {
 		return err
 	}
-	if err := setSessionCookie(w, int(id), cfg.SessionSecret); err != nil {
+	if err := setSessionCookie(w, r, int(id), cfg.SessionSecret); err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusOK, AuthUser{ID: int(id), Username: username, IsAdmin: true})
@@ -210,7 +315,7 @@ func (a *App) handleChangeCredentials(w http.ResponseWriter, r *http.Request) er
 	if err != nil {
 		return err
 	}
-	if err := setSessionCookie(w, current.ID, cfg.SessionSecret); err != nil {
+	if err := setSessionCookie(w, r, current.ID, cfg.SessionSecret); err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusOK, current)

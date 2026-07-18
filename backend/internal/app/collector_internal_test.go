@@ -1,13 +1,28 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReadRespRejectsOversizedFrames(t *testing.T) {
+	tests := []string{
+		"$8388609\r\n",
+		"*10001\r\n",
+		"$-2\r\n",
+	}
+	for _, input := range tests {
+		if _, err := readResp(bufio.NewReader(strings.NewReader(input))); err == nil {
+			t.Fatalf("readResp accepted oversized or invalid frame %q", input)
+		}
+	}
+}
 
 func TestConsumeRespQueueUsesHTTPManagementUsageQueue(t *testing.T) {
 	requested := false

@@ -1282,10 +1282,36 @@ func (a *App) saveUsageMessage(ctx context.Context, raw []byte) (UsageRecord, bo
 		}
 		return UsageRecord{}, false, err
 	}
-	id, _ := result.LastInsertId()
-	record, err := a.getUsageRecord(ctx, int(id))
+	id, err := result.LastInsertId()
 	if err != nil {
 		return UsageRecord{}, false, err
+	}
+	record := UsageRecord{
+		ID:                  int(id),
+		Timestamp:           normalized.Timestamp,
+		UsageUsername:       usageUsername,
+		APIKeyDescription:   description,
+		Provider:            normalized.Provider,
+		Model:               normalized.Model,
+		ReasoningEffort:     normalized.ReasoningEffort,
+		Endpoint:            normalized.Endpoint,
+		Source:              normalized.Source,
+		SourceAccount:       normalized.SourceAccount,
+		RequestID:           normalized.RequestID,
+		Auth:                normalized.Auth,
+		AuthIndex:           normalized.AuthIndex,
+		LatencyMS:           normalized.LatencyMS,
+		TTFTMS:              normalized.TTFTMS,
+		Failed:              normalized.Failed,
+		InputTokens:         normalized.InputTokens,
+		OutputTokens:        normalized.OutputTokens,
+		CachedTokens:        normalized.CachedTokens,
+		CacheReadTokens:     normalized.CacheReadTokens,
+		CacheCreationTokens: normalized.CacheCreationTokens,
+		ReasoningTokens:     normalized.ReasoningTokens,
+		TotalTokens:         normalized.TotalTokens,
+		DedupeKey:           normalized.DedupeKey,
+		RawJSON:             normalized.RawJSON,
 	}
 	if err := a.applyQuotaCharge(ctx, record); err != nil {
 		return UsageRecord{}, false, err
@@ -1366,16 +1392,26 @@ func normalizeUsage(raw []byte) (normalizedUsage, error) {
 	}
 	source := toString(findFirst(parsed, "source", "origin"))
 	sum := sha256.Sum256(canonical)
+	auth := authLabel(parsed)
+	storedSource := source
+	if isAPIKeyAuth(auth) && source != nil {
+		masked := maskSecret(source)
+		storedSource = &masked
+	}
+	storedPayload, err := json.Marshal(redactJSON(parsed, auth, usageRedactionOptions{}))
+	if err != nil {
+		return normalizedUsage{}, err
+	}
 	return normalizedUsage{
 		Timestamp:           parseUsageTimestamp(findFirst(parsed, "timestamp", "time", "created_at", "createdAt", "request_time")),
 		APIKeyHash:          hashAPIKey(*apiKey),
 		Provider:            toString(findFirst(parsed, "provider", "provider_name")),
 		Model:               toString(findFirst(parsed, "model", "model_name")),
 		Endpoint:            toString(findFirst(parsed, "endpoint", "path", "route")),
-		Source:              source,
-		SourceAccount:       sourceAccountFromUsageSource(source),
+		Source:              storedSource,
+		SourceAccount:       sourceAccountFromUsageSource(storedSource),
 		RequestID:           toString(findFirst(parsed, "request_id", "requestId", "id")),
-		Auth:                authLabel(parsed),
+		Auth:                auth,
 		AuthIndex:           authIndexFromUsagePayload(parsed),
 		LatencyMS:           toFloat(findFirst(parsed, "latency_ms", "latency", "duration_ms", "duration")),
 		ReasoningEffort:     toString(findFirst(parsed, "reasoning_effort", "reasoningEffort")),
@@ -1389,29 +1425,25 @@ func normalizeUsage(raw []byte) (normalizedUsage, error) {
 		ReasoningTokens:     reasoning,
 		TotalTokens:         total,
 		DedupeKey:           "raw:" + hex.EncodeToString(sum[:]),
-		RawJSON:             string(canonical),
+		RawJSON:             string(storedPayload),
 	}, nil
 }
 
 func (a *App) usageOwnerSnapshot(ctx context.Context, apiKeyHash string) (*string, *string, error) {
-	var userID int
-	var description sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT user_id, description FROM user_api_keys WHERE api_key_hash = ?`, apiKeyHash).Scan(&userID, &description)
+	var username, description sql.NullString
+	err := a.db.QueryRowContext(ctx, `
+		SELECT users.username, user_api_keys.description
+		FROM user_api_keys
+		LEFT JOIN users ON users.id = user_api_keys.user_id
+		WHERE user_api_keys.api_key_hash = ?
+	`, apiKeyHash).Scan(&username, &description)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	var username string
-	err = a.db.QueryRowContext(ctx, `SELECT username FROM users WHERE id = ?`, userID).Scan(&username)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nullableString(description), nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	return &username, nullableString(description), nil
+	return nullableString(username), nullableString(description), nil
 }
 
 func findFirst(value any, keys ...string) any {

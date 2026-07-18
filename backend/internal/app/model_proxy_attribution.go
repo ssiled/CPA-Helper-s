@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ import (
 
 const modelProxyRequestAttributionTTL = 7 * 24 * time.Hour
 const modelProxyRequestAttributionWindow = 30 * time.Minute
+const modelProxyRequestAttributionCleanupInterval = time.Hour
+const modelProxyRequestAttributionCleanupTimeout = 30 * time.Second
 
 var modelProxyRequestIDHeaders = []string{
 	"x-cpa-request-id",
@@ -87,12 +90,29 @@ func (a *App) recordModelProxyRequestAttributionsWithMetadata(ctx context.Contex
 		statusValue = *meta.StatusCode
 	}
 	now := dbTime(time.Now())
+	uniqueRequestIDs := make([]string, 0, len(requestIDs))
+	seenRequestIDs := make(map[string]struct{}, len(requestIDs))
 	for _, requestID := range requestIDs {
 		requestID = strings.TrimSpace(requestID)
 		if requestID == "" {
 			continue
 		}
-		if _, err := a.db.ExecContext(ctx, `
+		if _, seen := seenRequestIDs[requestID]; seen {
+			continue
+		}
+		seenRequestIDs[requestID] = struct{}{}
+		uniqueRequestIDs = append(uniqueRequestIDs, requestID)
+	}
+	if len(uniqueRequestIDs) == 0 {
+		return nil
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, requestID := range uniqueRequestIDs {
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO model_proxy_request_attributions (
 				request_id, api_key_hash, model, endpoint, started_at, completed_at, status_code, created_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -108,8 +128,29 @@ func (a *App) recordModelProxyRequestAttributionsWithMetadata(ctx context.Contex
 			return err
 		}
 	}
-	_, err := a.db.ExecContext(ctx, `DELETE FROM model_proxy_request_attributions WHERE created_at < ?`, dbTime(time.Now().Add(-modelProxyRequestAttributionTTL)))
-	return err
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	a.scheduleModelProxyAttributionCleanup()
+	return nil
+}
+
+func (a *App) scheduleModelProxyAttributionCleanup() {
+	now := time.Now()
+	a.attributionMu.Lock()
+	if now.Before(a.attributionNext) {
+		a.attributionMu.Unlock()
+		return
+	}
+	a.attributionNext = now.Add(modelProxyRequestAttributionCleanupInterval)
+	a.attributionMu.Unlock()
+	a.startBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, modelProxyRequestAttributionCleanupTimeout)
+		defer cancel()
+		if _, err := a.db.ExecContext(ctx, `DELETE FROM model_proxy_request_attributions WHERE created_at < ?`, dbTime(time.Now().Add(-modelProxyRequestAttributionTTL))); err != nil && parent.Err() == nil {
+			log.Printf("cleanup model proxy request attributions failed: %v", err)
+		}
+	})
 }
 
 func nullableTrimmedString(value string) any {

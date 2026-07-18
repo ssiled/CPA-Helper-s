@@ -76,8 +76,17 @@ type App struct {
 	authPoolSyncNext        time.Time
 	authPoolResolvedSyncMu  sync.Mutex
 	authPoolResolvedSyncRun bool
+	authPoolResolvedFail    int
+	authPoolResolvedNext    time.Time
+	authPoolPriorityMu      sync.RWMutex
+	authPoolPriorityMode    bool
+	authPoolAuthTypes       map[string]string
+	authPoolTypePriorities  map[string]int
+	authPoolAuthOverrides   map[string]int
 	attributionMu           sync.Mutex
 	attributionNext         time.Time
+	loginMu                 sync.Mutex
+	loginAttempts           map[string]loginAttemptState
 }
 
 type AppError struct {
@@ -112,6 +121,10 @@ func conflictError(message string) *AppError {
 
 func validationError(message string) *AppError {
 	return appError("validation_error", http.StatusUnprocessableEntity, message)
+}
+
+func rateLimitError(message string) *AppError {
+	return appError("rate_limited", http.StatusTooManyRequests, message)
 }
 
 func New() (*App, error) {
@@ -353,7 +366,7 @@ func (a *App) wrap(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				log.Printf("panic handling %s %s: %v", r.Method, r.URL.Path, recovered)
+				log.Printf("panic handling %s %s (type %T)", r.Method, r.URL.Path, recovered)
 				writeAppError(w, appError("app_error", http.StatusInternalServerError, "服务器内部错误"))
 			}
 		}()
@@ -413,8 +426,21 @@ func writeAppError(w http.ResponseWriter, err *AppError) {
 
 func decodeJSON(r *http.Request, target any) error {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 4<<20))
+	const maxJSONBodyBytes = 4 << 20
+	limited := &io.LimitedReader{R: r.Body, N: maxJSONBodyBytes + 1}
+	decoder := json.NewDecoder(limited)
 	if err := decoder.Decode(target); err != nil {
+		if limited.N <= 0 {
+			return validationError("请求体过大")
+		}
+		return validationError("请求体不是有效 JSON")
+	}
+	var trailing any
+	err := decoder.Decode(&trailing)
+	if limited.N <= 0 {
+		return validationError("请求体过大")
+	}
+	if err != io.EOF {
 		return validationError("请求体不是有效 JSON")
 	}
 	return nil
@@ -1172,12 +1198,22 @@ func (a *App) adminUser(ctx context.Context, r *http.Request) (*AuthUser, error)
 	return user, nil
 }
 
-func setSessionCookie(w http.ResponseWriter, userID int, secret string) error {
-	return security.SetSessionCookie(w, userID, secret)
+func setSessionCookie(w http.ResponseWriter, r *http.Request, userID int, secret string) error {
+	return security.SetSessionCookieSecure(w, userID, secret, requestUsesHTTPS(r))
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
-	security.ClearSessionCookie(w)
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	security.ClearSessionCookieSecure(w, requestUsesHTTPS(r))
+}
+
+func requestUsesHTTPS(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
 func nonBlank(value, fallback string) string {
