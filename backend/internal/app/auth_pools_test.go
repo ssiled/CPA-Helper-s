@@ -273,6 +273,7 @@ func TestListAuthPoolAccountsIncludesRemoteGeminiAndGrok(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
+	app.invalidateConfigCache()
 	accounts, err := app.listAuthPoolAccounts(t.Context())
 	if err != nil {
 		t.Fatalf("listAuthPoolAccounts failed: %v", err)
@@ -504,6 +505,52 @@ func TestAuthPoolsNeedModelSyncForUnresolvedDynamicPool(t *testing.T) {
 	}
 }
 
+func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var membershipPayload map[string]any
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{
+				"id": "002", "name": "plus/team", "account_types": []string{"k12", "team", "plus"},
+				"resolved_auth_ids": []string{"old.json"}, "models": []string{"gpt-5.5"}, "enabled": true,
+			}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{{
+				"name": "new.json", "type": "codex", "account_type": "team", "disabled": false,
+			}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-models":
+			if err := json.NewDecoder(r.Body).Decode(&membershipPayload); err != nil {
+				t.Fatalf("decode membership payload: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+
+	if err := app.syncAuthPoolResolvedAuthIDs(t.Context()); err != nil {
+		t.Fatalf("syncAuthPoolResolvedAuthIDs failed: %v", err)
+	}
+	resolved, ok := membershipPayload["pool_resolved_auth_ids"].(map[string]any)
+	if !ok {
+		t.Fatalf("membership payload = %#v, want pool_resolved_auth_ids", membershipPayload)
+	}
+	ids, ok := resolved["002"].([]any)
+	if !ok || len(ids) != 1 || ids[0] != "new.json" {
+		t.Fatalf("resolved IDs = %#v, want new.json", resolved["002"])
+	}
+}
+
 func TestAddAuthPoolAPIKeyAccountWritesCPAConfig(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	var putPayload map[string]any
@@ -534,6 +581,7 @@ func TestAddAuthPoolAPIKeyAccountWritesCPAConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
+	app.invalidateConfigCache()
 	priority := 7
 	websockets := true
 	result, err := app.addAuthPoolAPIKeyAccount(t.Context(), authPoolAPIKeyAccountPayload{

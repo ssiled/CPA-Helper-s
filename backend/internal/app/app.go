@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cpa-helper/backend/internal/app/web"
@@ -52,16 +53,31 @@ var keeperProviderOrder = []string{"codex", "antigravity", "gemini", "grok", "cl
 var defaultKeeperEnabledProviders = []string{"codex"}
 
 type App struct {
-	db               *sql.DB
-	repoRoot         string
-	dataDir          string
-	frontendDist     string
-	frontendFS       fs.FS
-	frontendEnv      bool
-	collector        *CollectorRunner
-	keeper           *KeeperRunner
-	channelStatus    *ChannelStatusRunner
-	keeperUsageCache keeperWindowUsageCache
+	db                      *sql.DB
+	repoRoot                string
+	dataDir                 string
+	frontendDist            string
+	frontendFS              fs.FS
+	frontendEnv             bool
+	collector               *CollectorRunner
+	keeper                  *KeeperRunner
+	channelStatus           *ChannelStatusRunner
+	keeperUsageCache        keeperWindowUsageCache
+	configMu                sync.RWMutex
+	configCache             *AppConfig
+	backgroundMu            sync.Mutex
+	backgroundCtx           context.Context
+	backgroundCancel        context.CancelFunc
+	backgroundWG            sync.WaitGroup
+	backgroundClosed        bool
+	authPoolSyncMu          sync.Mutex
+	authPoolSyncRun         bool
+	authPoolSyncFail        int
+	authPoolSyncNext        time.Time
+	authPoolResolvedSyncMu  sync.Mutex
+	authPoolResolvedSyncRun bool
+	attributionMu           sync.Mutex
+	attributionNext         time.Time
 }
 
 type AppError struct {
@@ -125,27 +141,33 @@ func NewWithOptions(ctx context.Context, options NewOptions) (*App, error) {
 
 	frontendDist, frontendEnv := frontendDistDir(paths.RepoRoot)
 	frontendFS, _ := web.DistFS()
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	app := &App{
-		db:           db,
-		repoRoot:     paths.RepoRoot,
-		dataDir:      paths.DataDir,
-		frontendDist: frontendDist,
-		frontendFS:   frontendFS,
-		frontendEnv:  frontendEnv,
+		db:               db,
+		repoRoot:         paths.RepoRoot,
+		dataDir:          paths.DataDir,
+		frontendDist:     frontendDist,
+		frontendFS:       frontendFS,
+		frontendEnv:      frontendEnv,
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
 	}
 	if options.Migrate {
 		if err := app.runMigrations(ctx); err != nil {
+			backgroundCancel()
 			db.Close()
 			return nil, err
 		}
 	}
 	if options.RequireReady {
 		if _, err := checkDatabaseReady(ctx, db, paths.DBPath); err != nil {
+			backgroundCancel()
 			db.Close()
 			return nil, err
 		}
 	}
 	if _, err := app.loadConfig(ctx); err != nil {
+		backgroundCancel()
 		db.Close()
 		return nil, err
 	}
@@ -166,6 +188,14 @@ func (a *App) startBackground(ctx context.Context) {
 }
 
 func (a *App) Close() {
+	a.backgroundMu.Lock()
+	if !a.backgroundClosed {
+		a.backgroundClosed = true
+		if a.backgroundCancel != nil {
+			a.backgroundCancel()
+		}
+	}
+	a.backgroundMu.Unlock()
 	if a.collector != nil {
 		a.collector.Stop()
 	}
@@ -175,9 +205,29 @@ func (a *App) Close() {
 	if a.channelStatus != nil {
 		a.channelStatus.Stop()
 	}
+	a.backgroundWG.Wait()
 	if a.db != nil {
 		a.db.Close()
 	}
+}
+
+func (a *App) startBackgroundTask(run func(context.Context)) bool {
+	if run == nil {
+		return false
+	}
+	a.backgroundMu.Lock()
+	if a.backgroundClosed || a.backgroundCtx == nil || a.backgroundCtx.Err() != nil {
+		a.backgroundMu.Unlock()
+		return false
+	}
+	ctx := a.backgroundCtx
+	a.backgroundWG.Add(1)
+	a.backgroundMu.Unlock()
+	go func() {
+		defer a.backgroundWG.Done()
+		run(ctx)
+	}()
+	return true
 }
 
 func detectRepoRoot() (string, error) {
@@ -520,9 +570,17 @@ type AppConfig struct {
 }
 
 func defaultConfig() (AppConfig, error) {
-	secret, err := createSecret()
-	if err != nil {
-		return AppConfig{}, err
+	return defaultConfigWithSessionSecret("")
+}
+
+func defaultConfigWithSessionSecret(secret string) (AppConfig, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		var err error
+		secret, err = createSecret()
+		if err != nil {
+			return AppConfig{}, err
+		}
 	}
 	return AppConfig{
 		Collector: CollectorConfig{
@@ -571,6 +629,19 @@ func clonePriorityRules(input map[string]int) map[string]int {
 }
 
 func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
+	a.configMu.RLock()
+	if a.configCache != nil {
+		cfg := cloneAppConfig(*a.configCache)
+		a.configMu.RUnlock()
+		return cfg, nil
+	}
+	a.configMu.RUnlock()
+
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	if a.configCache != nil {
+		return cloneAppConfig(*a.configCache), nil
+	}
 	row := a.db.QueryRowContext(ctx, `
 		SELECT collector_enabled, cliaproxy_url, management_key, queue_name, batch_size,
 		       poll_interval_seconds, retry_interval_seconds, codex_keeper_settings,
@@ -589,7 +660,7 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 		}
 		return AppConfig{}, err
 	}
-	cfg, err := defaultConfig()
+	cfg, err := defaultConfigWithSessionSecret(sessionSecret)
 	if err != nil {
 		return AppConfig{}, err
 	}
@@ -612,9 +683,6 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 			cfg.CodexKeeperPriorityRule = normalizePriorityRules(rules)
 		}
 	}
-	if strings.TrimSpace(sessionSecret) != "" {
-		cfg.SessionSecret = sessionSecret
-	}
 	cfg.LiteLLMProxy = LiteLLMProxyConfig{
 		Enabled:  litellmProxyEnabled,
 		ProxyURL: strings.TrimSpace(litellmProxyURL),
@@ -622,7 +690,22 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 	cfg.ModelRequestURL = nonBlank(strings.TrimRight(strings.TrimSpace(modelRequestURL), "/"), cfg.Collector.CLIProxyURL)
 	cfg.AuthPoolProxyAPIKey = strings.TrimSpace(authPoolProxyAPIKey)
 	cfg.AuthPoolProxyTargets = decodeAuthPoolProxyTargetsJSON(authPoolProxyTargetsJSON)
-	return cfg, nil
+	cached := cloneAppConfig(cfg)
+	a.configCache = &cached
+	return cloneAppConfig(cfg), nil
+}
+
+func cloneAppConfig(cfg AppConfig) AppConfig {
+	cfg.CodexKeeper.EnabledProviders = cloneStringSlice(cfg.CodexKeeper.EnabledProviders)
+	cfg.CodexKeeperPriorityRule = clonePriorityRules(cfg.CodexKeeperPriorityRule)
+	cfg.AuthPoolProxyTargets = append([]AuthPoolProxyTargetConfig(nil), cfg.AuthPoolProxyTargets...)
+	return cfg
+}
+
+func (a *App) invalidateConfigCache() {
+	a.configMu.Lock()
+	a.configCache = nil
+	a.configMu.Unlock()
 }
 
 func normalizeKeeperConfig(cfg KeeperConfig) KeeperConfig {
@@ -742,6 +825,9 @@ func (a *App) saveConfig(ctx context.Context, cfg AppConfig) error {
 		    session_secret = ?, updated_at = ?
 		WHERE id = 1
 	`, cfg.Collector.Enabled, strings.TrimRight(strings.TrimSpace(cfg.Collector.CLIProxyURL), "/"), strings.TrimSpace(cfg.Collector.ManagementKey), strings.TrimSpace(cfg.Collector.QueueName), cfg.Collector.BatchSize, cfg.Collector.PollIntervalSeconds, cfg.Collector.RetryIntervalSeconds, string(keeperBytes), string(rulesBytes), cfg.LiteLLMProxy.Enabled, strings.TrimSpace(cfg.LiteLLMProxy.ProxyURL), strings.TrimRight(strings.TrimSpace(cfg.ModelRequestURL), "/"), strings.TrimSpace(cfg.AuthPoolProxyAPIKey), encodeAuthPoolProxyTargetsJSON(cfg.AuthPoolProxyTargets), cfg.SessionSecret, dbTime(time.Now()))
+	if err == nil {
+		a.invalidateConfigCache()
+	}
 	return err
 }
 

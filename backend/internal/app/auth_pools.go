@@ -7,12 +7,19 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 )
 
-const authPoolPluginID = "cpa-auth-pool"
+const (
+	authPoolPluginID             = "cpa-auth-pool"
+	authPoolModelSyncTimeout     = 30 * time.Second
+	authPoolModelSyncBackoffBase = 5 * time.Second
+	authPoolModelSyncBackoffMax  = 5 * time.Minute
+	authPoolResolvedSyncTimeout  = 15 * time.Second
+)
 
 type authPool struct {
 	ID              string   `json:"id"`
@@ -317,13 +324,13 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 		_ = a.saveLocalAuthPoolBindings(ctx, status.Bindings)
 	}
 	if authPoolsNeedModelSync(status.Pools) {
-		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := a.syncAuthPoolModels(syncCtx); err != nil {
-				log.Printf("sync auth pool models failed: %v", err)
-			}
-		}()
+		a.syncAuthPoolModelsAsync()
+	}
+	// Account files can be added directly in CPA after a pool was created. Keep
+	// the plugin's resolved dynamic membership fresh without waiting for a model
+	// catalog refresh or an admin to edit the pool.
+	if len(status.Pools) > 0 {
+		a.syncAuthPoolResolvedAuthIDsAsync()
 	}
 	localBindings, err = a.localAuthPoolBindings(ctx, user)
 	if err != nil {
@@ -334,6 +341,122 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 	}
 	status.Pools = authPoolsVisibleToUser(status.Pools, localPools, user)
 	return status, nil
+}
+
+func (a *App) syncAuthPoolModelsAsync() {
+	now := time.Now()
+	a.authPoolSyncMu.Lock()
+	if a.authPoolSyncRun || now.Before(a.authPoolSyncNext) {
+		a.authPoolSyncMu.Unlock()
+		return
+	}
+	a.authPoolSyncRun = true
+	a.authPoolSyncMu.Unlock()
+
+	started := a.startBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, authPoolModelSyncTimeout)
+		defer cancel()
+		err := a.syncAuthPoolModels(ctx)
+		a.authPoolSyncMu.Lock()
+		a.authPoolSyncRun = false
+		if err == nil {
+			a.authPoolSyncFail = 0
+			a.authPoolSyncNext = time.Time{}
+		} else {
+			a.authPoolSyncFail++
+			a.authPoolSyncNext = time.Now().Add(authPoolModelSyncBackoff(a.authPoolSyncFail))
+		}
+		a.authPoolSyncMu.Unlock()
+		if err != nil && parent.Err() == nil {
+			log.Printf("sync auth pool models failed: %v", err)
+		}
+	})
+	if started {
+		return
+	}
+	a.authPoolSyncMu.Lock()
+	a.authPoolSyncRun = false
+	a.authPoolSyncMu.Unlock()
+}
+
+func (a *App) syncAuthPoolResolvedAuthIDsAsync() {
+	a.authPoolResolvedSyncMu.Lock()
+	if a.authPoolResolvedSyncRun {
+		a.authPoolResolvedSyncMu.Unlock()
+		return
+	}
+	a.authPoolResolvedSyncRun = true
+	a.authPoolResolvedSyncMu.Unlock()
+	started := a.startBackgroundTask(func(parent context.Context) {
+		defer func() {
+			a.authPoolResolvedSyncMu.Lock()
+			a.authPoolResolvedSyncRun = false
+			a.authPoolResolvedSyncMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(parent, authPoolResolvedSyncTimeout)
+		defer cancel()
+		if err := a.syncAuthPoolResolvedAuthIDs(ctx); err != nil && parent.Err() == nil {
+			log.Printf("sync auth pool memberships failed: %v", err)
+		}
+	})
+	if started {
+		return
+	}
+	a.authPoolResolvedSyncMu.Lock()
+	a.authPoolResolvedSyncRun = false
+	a.authPoolResolvedSyncMu.Unlock()
+}
+
+func (a *App) syncAuthPoolResolvedAuthIDs(ctx context.Context) error {
+	var status authPoolStatus
+	if err := a.authPoolPluginRequest(ctx, http.MethodGet, "/status", nil, &status); err != nil {
+		return err
+	}
+	if len(status.Pools) == 0 {
+		return nil
+	}
+	accounts, err := a.listAuthPoolAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	desired := authPoolResolvedAuthIDsForSync(status.Pools, accounts)
+	changed := false
+	for _, pool := range status.Pools {
+		if !sameNormalizedStringList(pool.ResolvedAuthIDs, desired[pool.ID]) {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/auth-models", map[string]any{
+		"pool_resolved_auth_ids": desired,
+	}, nil); err != nil {
+		return err
+	}
+	for index := range status.Pools {
+		status.Pools[index].ResolvedAuthIDs = append([]string(nil), desired[status.Pools[index].ID]...)
+	}
+	return a.saveLocalAuthPools(ctx, status.Pools)
+}
+
+func sameNormalizedStringList(left, right []string) bool {
+	return reflect.DeepEqual(normalizedStringList(left), normalizedStringList(right))
+}
+
+func authPoolModelSyncBackoff(failures int) time.Duration {
+	if failures <= 1 {
+		return authPoolModelSyncBackoffBase
+	}
+	delay := authPoolModelSyncBackoffBase
+	for attempt := 1; attempt < failures && delay < authPoolModelSyncBackoffMax; attempt++ {
+		delay *= 2
+		if delay >= authPoolModelSyncBackoffMax {
+			return authPoolModelSyncBackoffMax
+		}
+	}
+	return delay
 }
 
 func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (authPool, error) {

@@ -217,6 +217,9 @@ func (a *App) refreshChannelStatusSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Reconcile dynamic pool membership during the periodic status refresh so
+	// accounts added directly to CPA become eligible without a UI action.
+	a.syncAuthPoolResolvedAuthIDsAsync()
 	records, err := a.channelStatusWindowRecords(ctx, time.Now().In(appTimeLocation).Add(-channelStatusWindowDuration))
 	if err != nil {
 		return err

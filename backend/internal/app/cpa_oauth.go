@@ -99,6 +99,9 @@ func (a *App) handleCPAOAuthStatus(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
+	// OAuth completion may create a new auth file outside CPA-Helper. Reconcile
+	// dynamic pool membership as soon as the UI checks the flow status.
+	a.syncAuthPoolResolvedAuthIDsAsync()
 	writeJSON(w, http.StatusOK, result)
 	return nil
 }
@@ -123,6 +126,7 @@ func (a *App) handleCPAOAuthCallback(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return err
 	}
+	a.syncAuthPoolResolvedAuthIDsAsync()
 	writeJSON(w, http.StatusOK, result)
 	return nil
 }
