@@ -513,6 +513,13 @@ func TestListAuthPoolAccountsIncludesCPAProviderChannels(t *testing.T) {
 	if providerCalls != 1 {
 		t.Fatalf("provider endpoint calls = %d, want 1 within cache TTL", providerCalls)
 	}
+	app.invalidateAuthPoolProviderCache()
+	if _, err := app.listAuthPoolAccounts(t.Context()); err != nil {
+		t.Fatalf("refreshed listAuthPoolAccounts failed: %v", err)
+	}
+	if providerCalls != 2 {
+		t.Fatalf("provider endpoint calls = %d, want 2 after cache invalidation", providerCalls)
+	}
 }
 
 func TestUpsertAuthPoolPersistsProviderAndUsesConfiguredModels(t *testing.T) {

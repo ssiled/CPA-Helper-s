@@ -25,8 +25,8 @@ export function addAuthPoolAPIKeyAccount(payload: AuthPoolAPIKeyAccountPayload):
   return apiClient.post<AuthPoolAPIKeyAccountResponse>('/auth-pools/accounts/api-key', payload)
 }
 
-export function listAuthPoolAccounts(): Promise<AuthPoolAccountsResponse> {
-  return apiClient.get<AuthPoolAccountsResponse>('/auth-pools/accounts')
+export function listAuthPoolAccounts(refresh = false): Promise<AuthPoolAccountsResponse> {
+  return apiClient.get<AuthPoolAccountsResponse>('/auth-pools/accounts', refresh ? { refresh: 1 } : undefined)
 }
 
 export function saveAuthPool(payload: AuthPoolPayload): Promise<AuthPool> {

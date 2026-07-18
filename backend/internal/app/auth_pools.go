@@ -211,6 +211,9 @@ func (a *App) handleAuthPools(w http.ResponseWriter, r *http.Request) error {
 		if !user.IsAdmin {
 			return forbiddenError("admin required")
 		}
+		if refresh := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh"))); refresh == "1" || refresh == "true" {
+			a.invalidateAuthPoolProviderCache()
+		}
 		accounts, err := a.listAuthPoolAccounts(r.Context())
 		if err != nil {
 			return err
@@ -2245,6 +2248,14 @@ func (a *App) listCPAProviderChannelsCached(ctx context.Context) ([]keeperAccoun
 	a.authPoolProviderCacheAt = now
 	a.authPoolProviderCache = cloneKeeperAccounts(accounts)
 	return cloneKeeperAccounts(accounts), nil
+}
+
+func (a *App) invalidateAuthPoolProviderCache() {
+	a.authPoolProviderCacheMu.Lock()
+	a.authPoolProviderCacheAt = time.Time{}
+	a.authPoolProviderCacheKey = ""
+	a.authPoolProviderCache = nil
+	a.authPoolProviderCacheMu.Unlock()
 }
 
 func cloneKeeperAccounts(accounts []keeperAccount) []keeperAccount {

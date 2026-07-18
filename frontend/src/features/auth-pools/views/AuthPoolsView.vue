@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
-import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns, type SelectOption } from 'naive-ui'
 import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, listAuthPoolAccounts, saveAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listUsers } from '@/features/users/api/usersApi'
 import type { AuthPool, AuthPoolVisibility, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
@@ -22,6 +22,7 @@ const poolName = ref('')
 const poolDescription = ref('')
 const selectedAuthIDs = ref<string[]>([])
 const selectedBatchType = ref<string | null>(null)
+const selectedProviderChannel = ref<string | null>(null)
 const selectedAccountTypes = ref<string[]>([])
 const poolVisibility = ref<AuthPoolVisibility>('admins_only')
 const selectedAllowedUserIDs = ref<number[]>([])
@@ -42,7 +43,59 @@ const apiKeyProviderOptions = [
 const accountOptions = computed(() => accounts.value.map((account) => ({
   label: accountLabel(account),
   value: account.name,
+  disabled: account.disabled,
 })))
+
+interface ProviderChannelOption extends SelectOption {
+  label: string
+  value: string
+  authIDs: string[]
+  active: number
+  total: number
+  models: number
+  disabled: boolean
+  channelName: string
+}
+
+const providerChannelOptions = computed<ProviderChannelOption[]>(() => {
+  const channels = new Map<string, { channelName: string; authIDs: string[]; total: number; models: Set<string> }>()
+  for (const account of accounts.value) {
+    if (account.source !== 'ai_provider' || !account.provider) continue
+    const current = channels.get(account.provider) ?? {
+      channelName: providerChannelName(account),
+      authIDs: [],
+      total: 0,
+      models: new Set<string>(),
+    }
+    current.total += 1
+    if (!account.disabled && (!account.last_status_code || account.last_status_code < 400)) current.authIDs.push(account.name)
+    for (const model of account.models ?? []) current.models.add(model)
+    channels.set(account.provider, current)
+  }
+  return Array.from(channels.entries())
+    .map(([provider, channel]) => {
+      const active = channel.authIDs.length
+      const models = channel.models.size
+      return {
+        value: provider,
+        label: `${channel.channelName} · ${active}/${channel.total} ${t('活跃密钥', 'active keys')} · ${models} ${t('模型', 'models')}`,
+        authIDs: channel.authIDs,
+        active,
+        total: channel.total,
+        models,
+        disabled: active === 0,
+        channelName: channel.channelName,
+      }
+    })
+    .sort((left, right) => left.channelName.localeCompare(right.channelName))
+})
+
+const selectedProviderChannelTags = computed(() => {
+  const selected = new Set(selectedAuthIDs.value)
+  return providerChannelOptions.value
+    .map((channel) => ({ ...channel, selected: channel.authIDs.filter((authID) => selected.has(authID)).length }))
+    .filter((channel) => channel.selected > 0)
+})
 
 const accountTypeOptions = computed(() => Array.from(new Set([
   ...defaultAccountTypes,
@@ -85,7 +138,7 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
 ])
 
 function hTag(id: string, status: string) {
-  return h(NTag, { size: 'small', type: status === '\u6b63\u5e38' ? 'success' : status === '\u7981\u7528' ? 'warning' : 'default', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${id} · ${status}` })
+  return h(NTag, { size: 'small', type: status === '\u6b63\u5e38' ? 'success' : status === '\u7981\u7528' ? 'warning' : 'default', style: 'margin-right: 6px; margin-bottom: 4px;' }, { default: () => `${accountTagLabel(id)} · ${status}` })
 }
 
 function hTypeTag(type: string) {
@@ -118,6 +171,17 @@ function accountLabel(account: CodexKeeperAccount): string {
   return [account.display_name || account.name, account.provider, account.account_type, source, status].filter((item) => item && item.trim()).join(' · ')
 }
 
+function providerChannelName(account: CodexKeeperAccount): string {
+  const displayName = account.display_name?.trim()
+  const prefix = 'CPA AI 提供商 · '
+  return displayName?.startsWith(prefix) ? displayName.slice(prefix.length).trim() : displayName || account.provider || account.name
+}
+
+function accountTagLabel(id: string): string {
+  const account = accounts.value.find((item) => item.name === id)
+  return account?.source === 'ai_provider' ? providerChannelName(account) : id
+}
+
 function dynamicTypeAccountCount(types: string[], manualAuthIDs: string[]): number {
   const normalizedTypes = new Set(types.map((type) => type.trim().toLowerCase()).filter(Boolean))
   if (normalizedTypes.size === 0) return 0
@@ -143,15 +207,31 @@ function selectAccountsByType() {
   selectedAccountTypes.value = Array.from(new Set([...selectedAccountTypes.value, accountType]))
 }
 
+function selectProviderChannel() {
+  if (!selectedProviderChannel.value) return
+  const channel = providerChannelOptions.value.find((item) => item.value === selectedProviderChannel.value)
+  if (!channel || channel.authIDs.length === 0) return
+  mergeSelectedAuthIDs(channel.authIDs)
+  message.success(t(`已加入 ${channel.channelName} 的 ${channel.active} 个活跃密钥`, `Added ${channel.active} active keys from ${channel.channelName}`))
+}
+
+function removeProviderChannel(provider: string) {
+  const channel = providerChannelOptions.value.find((item) => item.value === provider)
+  if (!channel) return
+  const channelIDs = new Set(channel.authIDs)
+  selectedAuthIDs.value = selectedAuthIDs.value.filter((authID) => !channelIDs.has(authID))
+}
+
 function clearSelectedAccounts() {
   selectedAuthIDs.value = []
   selectedAccountTypes.value = []
+  selectedProviderChannel.value = null
 }
 
 async function refresh() {
   isLoading.value = true
   try {
-    const [status, accountResponse, userResponse] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts(), listUsers()])
+    const [status, accountResponse, userResponse] = await Promise.all([getAuthPoolStatus(), listAuthPoolAccounts(true), listUsers()])
     pools.value = status.pools
     accounts.value = accountResponse.items
     users.value = userResponse
@@ -168,6 +248,7 @@ function openCreate() {
   poolDescription.value = ''
   selectedAuthIDs.value = []
   selectedBatchType.value = null
+  selectedProviderChannel.value = null
   selectedAccountTypes.value = []
   poolVisibility.value = 'admins_only'
   selectedAllowedUserIDs.value = []
@@ -201,6 +282,7 @@ function editPool(pool: AuthPool) {
   poolDescription.value = pool.description ?? ''
   selectedAuthIDs.value = [...pool.auth_ids]
   selectedBatchType.value = null
+  selectedProviderChannel.value = null
   selectedAccountTypes.value = [...(pool.account_types ?? [])]
   poolVisibility.value = pool.visibility || ((pool.allowed_user_ids?.length ?? 0) > 0 ? 'selected_users' : 'admins_only')
   selectedAllowedUserIDs.value = [...(pool.allowed_user_ids ?? [])]
@@ -307,6 +389,22 @@ onMounted(refresh)
         <NFormItem :label="t('\u63cf\u8ff0', 'Description')">
           <NInput v-model:value="poolDescription" :disabled="isSaving" />
         </NFormItem>
+        <NFormItem :label="t('CPA AI 提供商渠道', 'CPA AI provider channels')">
+          <div class="provider-channel-section">
+            <div class="provider-channel-picker">
+              <NSelect v-model:value="selectedProviderChannel" clearable filterable :options="providerChannelOptions" :disabled="isSaving || providerChannelOptions.length === 0" :placeholder="providerChannelOptions.length ? t('选择 OpenAI 兼容渠道', 'Select an OpenAI-compatible channel') : t('CPA 中没有可加入的 AI 提供商渠道', 'No CPA AI provider channels available')" />
+              <NButton secondary :disabled="isSaving || !selectedProviderChannel" @click="selectProviderChannel">
+                {{ t('加入渠道', 'Add channel') }}
+              </NButton>
+            </div>
+            <p class="form-help">{{ t('按渠道加入其全部活跃密钥；已停用渠道仅显示，不参与号池调度。', 'Adds every active key from the channel; disabled channels remain visible and are not scheduled.') }}</p>
+            <div v-if="selectedProviderChannelTags.length" class="selected-type-rules">
+              <NTag v-for="channel in selectedProviderChannelTags" :key="channel.value" size="small" closable type="success" @close="removeProviderChannel(channel.value)">
+                {{ channel.channelName }} · {{ channel.selected }}/{{ channel.active }} {{ t('已选择', 'selected') }}
+              </NTag>
+            </div>
+          </div>
+        </NFormItem>
         <NFormItem :label="t('\u9009\u62e9\u8d26\u53f7', 'Select accounts')">
           <div class="account-picker">
             <NSelect v-model:value="selectedAuthIDs" multiple filterable :options="accountOptions" :disabled="isSaving" :placeholder="t('\u9009\u62e9\u8981\u52a0\u5165\u8be5\u53f7\u6c60\u7684 CPA \u8d26\u53f7', 'Select CPA accounts for this pool')" />
@@ -382,10 +480,13 @@ onMounted(refresh)
 <style scoped>
 .auth-pool-page { display: grid; gap: 16px; }
 .account-picker { display: grid; gap: 10px; width: 100%; }
+.provider-channel-section { display: grid; gap: 8px; width: 100%; }
+.provider-channel-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .batch-type-select { min-width: 200px; max-width: 280px; }
 .selected-type-rules { display: flex; flex-wrap: wrap; gap: 6px; }
 .visibility-options { display: flex; flex-wrap: wrap; }
 .form-help { margin: 0 0 16px; color: var(--cpa-text-muted); font-size: 12px; line-height: 1.6; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 640px) { .provider-channel-picker { grid-template-columns: 1fr; } }
 </style>
