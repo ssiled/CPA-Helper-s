@@ -1,18 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NInput, NSpin, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NInput, NModal, NSpin, NTag, useMessage } from 'naive-ui'
 import {
   CheckCircle2,
-  Clipboard,
   ExternalLink,
   KeyRound,
-  Link2,
   Loader2,
+  LogIn,
   RefreshCw,
-  RotateCcw,
   ShieldCheck,
-  Sparkles,
-  TerminalSquare,
 } from 'lucide-vue-next'
 
 import {
@@ -32,8 +28,9 @@ interface ProviderView {
   description: string
   iconText: string
   tone: 'blue' | 'orange' | 'green' | 'purple' | 'dark' | 'teal'
-  helper: string
 }
+
+type FlowStage = 'waiting' | 'validating' | 'success' | 'error'
 
 const message = useMessage()
 const { errorText, t } = useI18n()
@@ -51,173 +48,117 @@ const providerMeta: Record<string, Omit<ProviderView, 'id' | 'label'>> = {
   codex: {
     shortName: 'Codex',
     tag: 'OpenAI',
-    description: '\u4e3a Codex CLI / OpenAI \u8d26\u53f7\u751f\u6210\u6388\u6743\u94fe\u63a5\uff0c\u5b8c\u6210\u540e CPA \u4f1a\u4fdd\u5b58\u8ba4\u8bc1\u6587\u4ef6\u3002',
+    description: 'Codex CLI / OpenAI OAuth',
     iconText: 'C',
     tone: 'blue',
-    helper: '\u6d4f\u89c8\u5668\u6388\u6743\u540e\uff0c\u901a\u5e38\u4f1a\u8df3\u8f6c\u5230 localhost \u56de\u8c03\u5730\u5740\u3002',
   },
   anthropic: {
     shortName: 'Claude',
     tag: 'Anthropic',
-    description: '\u767b\u5f55 Anthropic Claude \u670d\u52a1\uff0c\u9002\u5408 Claude Code / Claude CLI \u8ba4\u8bc1\u3002',
+    description: 'Claude Code / Claude CLI OAuth',
     iconText: '\u2726',
     tone: 'orange',
-    helper: '\u5b8c\u6210\u6388\u6743\u540e\u590d\u5236\u5b8c\u6574\u56de\u8c03 URL \u63d0\u4ea4\u5230 CPA\u3002',
   },
   gemini: {
     shortName: 'Gemini',
     tag: 'Google',
-    description: '\u901a\u8fc7 Google OAuth \u4e3a Gemini CLI \u83b7\u53d6\u51ed\u636e\uff0c\u53ef\u6309\u9700\u586b\u5199 GCP Project ID\u3002',
+    description: 'Gemini CLI OAuth',
     iconText: 'G',
     tone: 'green',
-    helper: '\u5982\u679c\u6709\u6307\u5b9a\u9879\u76ee\uff0c\u8bf7\u5148\u586b\u5199 Project ID \u518d\u53d1\u8d77\u3002',
   },
   antigravity: {
     shortName: 'Antigravity',
     tag: 'Google',
-    description: '\u4e3a Antigravity \u83b7\u53d6 Google \u6388\u6743\uff0c\u81ea\u52a8\u4ea4\u7531 CPA \u7ba1\u7406\u8ba4\u8bc1\u72b6\u6001\u3002',
+    description: 'Antigravity OAuth',
     iconText: 'A',
     tone: 'purple',
-    helper: '\u6388\u6743\u6d41\u7a0b\u4e0e Google \u8d26\u53f7\u7ed1\u5b9a\uff0c\u6ce8\u610f\u9009\u62e9\u6b63\u786e\u8d26\u53f7\u3002',
   },
   xai: {
     shortName: 'Grok',
     tag: 'xAI',
-    description: '\u4f7f\u7528 xAI \u8bbe\u5907\u6388\u6743\u6d41\u7a0b\u767b\u5f55 Grok\uff0c\u5b8c\u6210\u540e CPA \u4f1a\u4fdd\u5b58\u5bf9\u5e94\u8d26\u53f7\u51ed\u636e\u3002',
+    description: 'Grok / xAI device authorization',
     iconText: 'X',
     tone: 'dark',
-    helper: 'CPA \u8fd4\u56de\u8bbe\u5907\u6388\u6743\u94fe\u63a5\u548c\u72b6\u6001\uff0c\u6309\u9875\u9762\u63d0\u793a\u5b8c\u6210\u786e\u8ba4\u5373\u53ef\u3002',
   },
   kimi: {
     shortName: 'Kimi',
     tag: 'Moonshot',
-    description: '\u4f7f\u7528\u8bbe\u5907\u6388\u6743\u6d41\u7a0b\u767b\u5f55 Kimi \u670d\u52a1\uff0c\u6309 CPA \u8fd4\u56de\u7684\u63d0\u793a\u5b8c\u6210\u786e\u8ba4\u3002',
+    description: 'Kimi device authorization',
     iconText: 'K',
-    tone: 'dark',
-    helper: 'Kimi \u53ef\u80fd\u8fd4\u56de\u8bbe\u5907\u7801\u6216\u9875\u9762\u63d0\u793a\uff0c\u800c\u4e0d\u4e00\u5b9a\u662f\u666e\u901a URL\u3002',
+    tone: 'teal',
   },
 }
 
 const providers = ref<CPAOAuthProvider[]>(defaultProviders)
 const selectedProvider = ref('codex')
-const projectID = ref('')
 const redirectURL = ref('')
 const isLoadingProviders = ref(false)
-const isStarting = ref(false)
+const startingProvider = ref<string | null>(null)
 const isChecking = ref(false)
 const isSubmittingCallback = ref(false)
-const errorMessage = ref<string | null>(null)
+const pageError = ref<string | null>(null)
+const flowError = ref<string | null>(null)
 const authURLResponse = ref<CPAOAuthAuthURLResponse | null>(null)
 const statusResponse = ref<CPAOAuthStatusResponse | null>(null)
-const callbackSuccessMessage = ref<string | null>(null)
+const flowModalVisible = ref(false)
+const flowStage = ref<FlowStage>('waiting')
+const callbackAccepted = ref(false)
 
 const providerCards = computed(() => providers.value.map(toProviderView))
 const activeProvider = computed(() => {
-  return providerCards.value.find((provider) => provider.id === selectedProvider.value) ?? toProviderView({ id: selectedProvider.value, label: selectedProvider.value })
+  return providerCards.value.find((provider) => provider.id === selectedProvider.value)
+    ?? toProviderView({ id: selectedProvider.value, label: selectedProvider.value })
 })
-const authURL = computed(() => getFirstString(authURLResponse.value, ['url', 'auth_url', 'authUrl', 'authorization_url', 'authorizationUrl', 'login_url', 'loginUrl']))
+const authURL = computed(() => getFirstString(authURLResponse.value, [
+  'url',
+  'auth_url',
+  'authUrl',
+  'authorization_url',
+  'authorizationUrl',
+  'login_url',
+  'loginUrl',
+]))
 const authState = computed(() => getFirstString(authURLResponse.value, ['state', 'oauth_state', 'oauthState']))
-const responseStatus = computed(() => getFirstString(authURLResponse.value, ['status', 'message', 'detail']))
-const statusValue = computed(() => {
-  const status = statusResponse.value?.status
-  return typeof status === 'string' ? status : ''
+const deviceCode = computed(() => getFirstString(authURLResponse.value, ['user_code', 'userCode', 'device_code', 'deviceCode']))
+const isDeviceFlow = computed(() => {
+  return getFirstString(authURLResponse.value, ['flow']).toLowerCase() === 'device' || Boolean(deviceCode.value)
 })
-const statusText = computed(() => (statusResponse.value ? JSON.stringify(statusResponse.value, null, 2) : ''))
-const responseText = computed(() => (authURLResponse.value ? JSON.stringify(authURLResponse.value, null, 2) : ''))
-const needsProjectID = computed(() => selectedProvider.value === 'gemini')
-const hasActiveFlow = computed(() => Boolean(authURLResponse.value))
-const startButtonText = computed(() => t('开始授权', 'Start authorization'))
-const phaseText = computed(() => {
-  if (callbackSuccessMessage.value) {
-    return t('Callback submitted', 'Callback submitted')
-  }
-  if (statusResponse.value) {
-    return statusValue.value || t('Status returned', 'Status returned')
-  }
-  if (authURLResponse.value) {
-    return authURL.value ? t('Waiting for browser authorization', 'Waiting for browser authorization') : t('Waiting for next step', 'Waiting for next step')
-  }
-  return t('Not started', 'Not started')
-})
-const phaseType = computed<'default' | 'info' | 'success' | 'warning'>(() => {
-  const normalized = statusValue.value.toLowerCase()
-  if (callbackSuccessMessage.value) return 'success'
-  if (normalized.includes('success') || normalized.includes('complete') || normalized.includes('ok')) return 'success'
-  if (authURLResponse.value) return 'warning'
-  return 'default'
-})
+const canSubmitCallback = computed(() => redirectURL.value.trim().length > 0 && !isSubmittingCallback.value)
 
-onMounted(async () => {
+onMounted(loadProviders)
+
+async function loadProviders() {
   isLoadingProviders.value = true
+  pageError.value = null
   try {
     const response = await listCPAOAuthProviders()
-    if (response.providers.length) {
-      providers.value = response.providers
-      if (!response.providers.some((provider) => provider.id === selectedProvider.value)) {
-        selectedProvider.value = response.providers[0]?.id ?? 'codex'
-      }
-    }
+    if (response.providers.length) providers.value = response.providers
   } catch (error) {
-    errorMessage.value = errorText(error, '加载 CPA OAuth 提供商失败', 'Failed to load CPA OAuth providers')
+    pageError.value = errorText(error, '加载登录服务失败', 'Failed to load sign-in services')
   } finally {
     isLoadingProviders.value = false
   }
-})
-
+}
 
 function getFirstString(source: Record<string, unknown> | null | undefined, keys: string[]) {
   if (!source) return ''
   for (const key of keys) {
     const value = source[key]
-    if (typeof value === 'string' && value.trim()) return value
+    if (typeof value === 'string' && value.trim()) return value.trim()
   }
   return ''
 }
 
-function openPendingOAuthWindow(providerLabel: string) {
-  const popup = window.open('about:blank', '_blank')
-  if (!popup) return null
-
-  try {
-    popup.opener = null
-  } catch {
-    // Ignore browsers that restrict opener changes.
-  }
-
-  try {
-    popup.document.title = 'CPA OAuth'
-    popup.document.body.style.margin = '0'
-    popup.document.body.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
-    popup.document.body.innerHTML = `
-      <main style="min-height:100vh;display:grid;place-items:center;background:#f6f8fb;color:#1f2937">
-        <section style="max-width:420px;padding:28px;border:1px solid #d8dee9;border-radius:18px;background:white;box-shadow:0 18px 45px rgba(15,23,42,.10);text-align:center">
-          <h1 id="oauth-pending-title" style="margin:0 0 10px;font-size:20px"></h1>
-          <p style="margin:0;color:#64748b;line-height:1.6">CPA-Helper is creating the OAuth URL. This window will redirect automatically.</p>
-        </section>
-      </main>
-    `
-    const title = popup.document.getElementById('oauth-pending-title')
-    if (title) title.textContent = `Creating ${providerLabel} authorization link...`
-  } catch {
-    // Ignore browsers that disallow writing to the placeholder window.
-  }
-
-  return popup
+function responseStatus(source: Record<string, unknown> | null | undefined) {
+  return getFirstString(source, ['status']).toLowerCase()
 }
 
-function navigateOAuthWindow(popup: Window | null, url: string) {
-  if (popup && !popup.closed) {
-    popup.location.href = url
-    return true
-  }
-  const opened = window.open(url, '_blank', 'noopener')
-  return Boolean(opened)
+function isSuccessfulResponse(source: Record<string, unknown> | null | undefined) {
+  return ['ok', 'success', 'complete', 'completed'].includes(responseStatus(source))
 }
 
-function closeOAuthWindow(popup: Window | null) {
-  if (popup && !popup.closed) {
-    popup.close()
-  }
+function responseError(source: Record<string, unknown> | null | undefined) {
+  return getFirstString(source, ['error', 'message', 'detail'])
 }
 
 function toProviderView(provider: CPAOAuthProvider): ProviderView {
@@ -227,1028 +168,612 @@ function toProviderView(provider: CPAOAuthProvider): ProviderView {
     label: provider.label,
     shortName: meta?.shortName ?? provider.label,
     tag: meta?.tag ?? 'OAuth',
-    description: meta?.description ?? `通过 CPA 发起 ${provider.label} OAuth 登录并保存认证。`,
+    description: meta?.description ?? `${provider.label} OAuth`,
     iconText: meta?.iconText ?? provider.label.slice(0, 1).toUpperCase(),
     tone: meta?.tone ?? 'teal',
-    helper: meta?.helper ?? '发起授权后按 CPA 返回的页面提示继续。',
   }
 }
 
-function selectProvider(providerID: string) {
-  selectedProvider.value = providerID
-  errorMessage.value = null
-  callbackSuccessMessage.value = null
+function openPendingOAuthWindow(providerLabel: string) {
+  const popup = window.open('about:blank', '_blank')
+  if (!popup) return null
+
+  try {
+    popup.opener = null
+    popup.document.title = 'CPA OAuth'
+    popup.document.body.style.margin = '0'
+    popup.document.body.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif'
+    popup.document.body.innerHTML = `
+      <main style="min-height:100vh;display:grid;place-items:center;background:#f7f8fa;color:#1f2937">
+        <section style="max-width:420px;padding:28px;text-align:center">
+          <h1 id="oauth-pending-title" style="margin:0 0 10px;font-size:20px"></h1>
+          <p style="margin:0;color:#64748b;line-height:1.6">CPA-Helper is creating the OAuth URL.</p>
+        </section>
+      </main>
+    `
+    const title = popup.document.getElementById('oauth-pending-title')
+    if (title) title.textContent = `Opening ${providerLabel}...`
+  } catch {
+    // The placeholder is optional; some browsers restrict writing to it.
+  }
+  return popup
+}
+
+function closeOAuthWindow(popup: Window | null) {
+  if (popup && !popup.closed) popup.close()
+}
+
+function navigateOAuthWindow(popup: Window | null, url: string) {
+  if (popup && !popup.closed) {
+    popup.location.href = url
+    return true
+  }
+  return Boolean(window.open(url, '_blank', 'noopener'))
 }
 
 function resetFlow() {
+  redirectURL.value = ''
   authURLResponse.value = null
   statusResponse.value = null
-  redirectURL.value = ''
-  errorMessage.value = null
-  callbackSuccessMessage.value = null
+  flowError.value = null
+  flowStage.value = 'waiting'
+  callbackAccepted.value = false
 }
 
-async function startOAuth(providerID = selectedProvider.value) {
+function continueAddingAccount() {
+  flowModalVisible.value = false
+  resetFlow()
+}
+
+async function startOAuth(providerID: string) {
+  if (startingProvider.value) return
+
   selectedProvider.value = providerID
-  const providerLabel = activeProvider.value.shortName || selectedProvider.value
-  const pendingWindow = openPendingOAuthWindow(providerLabel)
-  isStarting.value = true
-  errorMessage.value = null
-  statusResponse.value = null
-  callbackSuccessMessage.value = null
+  resetFlow()
+  const provider = providerCards.value.find((item) => item.id === providerID) ?? activeProvider.value
+  const pendingWindow = openPendingOAuthWindow(provider.shortName)
+  startingProvider.value = providerID
   try {
-    const payload: { provider: string; project_id?: string } = { provider: selectedProvider.value }
-    if (needsProjectID.value && projectID.value.trim()) {
-      payload.project_id = projectID.value.trim()
-    }
-    const response = await createCPAOAuthURL(payload)
+    const response = await createCPAOAuthURL({ provider: providerID })
     authURLResponse.value = response
-    const nextURL = authURL.value
-    if (nextURL) {
-      const opened = navigateOAuthWindow(pendingWindow, nextURL)
-      if (opened) {
-        message.success(t('CPA OAuth sign-in page opened', 'CPA OAuth sign-in page opened'))
-      } else {
-        message.warning(t('The browser blocked the popup. Click Reopen below.', 'The browser blocked the popup. Click Reopen below.'))
-      }
-    } else {
-      closeOAuthWindow(pendingWindow)
-      message.info(t('CPA returned sign-in information. Continue with the details below.', 'CPA returned sign-in information. Continue with the details below.'))
+    if (!isSuccessfulResponse(response)) {
+      throw new Error(responseError(response) || t('CPA 创建登录会话失败', 'CPA failed to create the sign-in session'))
+    }
+    if (!authURL.value) {
+      throw new Error(t('CPA 没有返回登录地址', 'CPA did not return a sign-in URL'))
+    }
+
+    const opened = navigateOAuthWindow(pendingWindow, authURL.value)
+    flowModalVisible.value = true
+    if (!opened) {
+      message.warning(t('浏览器拦截了登录页，请在弹窗中重新打开', 'The browser blocked the sign-in page; reopen it from the dialog'))
     }
   } catch (error) {
     closeOAuthWindow(pendingWindow)
-    errorMessage.value = errorText(error, 'Failed to create CPA OAuth sign-in URL', 'Failed to create CPA OAuth sign-in URL')
+    flowStage.value = 'error'
+    flowError.value = errorText(error, '打开 CPA 登录页失败', 'Failed to open the CPA sign-in page')
+    flowModalVisible.value = true
   } finally {
-    isStarting.value = false
+    startingProvider.value = null
   }
 }
 
-async function checkStatus() {
-  if (!authState.value) {
-    message.warning(t('当前没有可查询的 OAuth state', 'No OAuth state to query'))
-    return
+function reopenAuthURL() {
+  if (!authURL.value || !window.open(authURL.value, '_blank', 'noopener')) {
+    message.warning(t('浏览器拦截了登录页', 'The browser blocked the sign-in page'))
   }
-  isChecking.value = true
-  errorMessage.value = null
-  callbackSuccessMessage.value = null
+}
+
+function validateCallbackURL(value: string) {
+  let parsed: URL
   try {
-    statusResponse.value = await getCPAOAuthStatus(authState.value)
-  } catch (error) {
-    errorMessage.value = errorText(error, '查询 CPA OAuth 状态失败', 'Failed to query CPA OAuth status')
-  } finally {
-    isChecking.value = false
+    parsed = new URL(value)
+  } catch {
+    return t('请输入浏览器地址栏中的完整回调 URL', 'Enter the complete callback URL from the browser address bar')
   }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return t('回调 URL 必须使用 http 或 https', 'The callback URL must use http or https')
+  }
+  const state = parsed.searchParams.get('state')?.trim() ?? ''
+  const code = parsed.searchParams.get('code')?.trim() ?? ''
+  const callbackError = parsed.searchParams.get('error')?.trim() ?? parsed.searchParams.get('error_description')?.trim() ?? ''
+  if (!state) return t('回调 URL 缺少 state 参数', 'The callback URL is missing the state parameter')
+  if (!code && !callbackError) return t('回调 URL 缺少 code 或 error 参数', 'The callback URL is missing a code or error parameter')
+  if (authState.value && state !== authState.value) {
+    return t('回调 URL 的 state 与当前登录会话不匹配', 'The callback state does not match the current sign-in session')
+  }
+  return ''
 }
 
 async function submitCallback() {
-  if (!redirectURL.value.trim()) {
-    message.warning(t('Paste the OAuth callback URL', 'Paste the OAuth callback URL'))
+  const value = redirectURL.value.trim()
+  const validationMessage = validateCallbackURL(value)
+  if (validationMessage) {
+    flowStage.value = 'error'
+    flowError.value = validationMessage
     return
   }
+
   isSubmittingCallback.value = true
-  errorMessage.value = null
-  callbackSuccessMessage.value = null
+  flowStage.value = 'validating'
+  flowError.value = null
   try {
-    statusResponse.value = await submitCPAOAuthCallback({
+    const response = await submitCPAOAuthCallback({
       provider: selectedProvider.value,
-      redirect_url: redirectURL.value.trim(),
+      redirect_url: value,
     })
-    callbackSuccessMessage.value = t('OAuth callback submitted to CPA. The response is shown in the status panel.', 'OAuth callback submitted to CPA. The response is shown in the status panel.')
-    message.success(t('OAuth callback submitted to CPA', 'OAuth callback submitted to CPA'))
+    statusResponse.value = response
+    if (!isSuccessfulResponse(response)) {
+      throw new Error(responseError(response) || t('CPA 回调验证失败', 'CPA callback validation failed'))
+    }
+    callbackAccepted.value = true
+    await waitForCompletion()
   } catch (error) {
-    errorMessage.value = errorText(error, 'Failed to submit OAuth callback', 'Failed to submit OAuth callback')
+    flowStage.value = 'error'
+    flowError.value = errorText(error, 'CPA 回调验证失败', 'CPA callback validation failed')
   } finally {
     isSubmittingCallback.value = false
   }
 }
 
-function openAuthURL() {
-  if (!authURL.value) {
-    message.warning(t('当前没有授权链接', 'No authorization URL available'))
-    return
-  }
-  if (!window.open(authURL.value, '_blank', 'noopener')) {
-    message.warning(t('The browser blocked the popup. Copy the link and open it manually.', 'The browser blocked the popup. Copy the link and open it manually.'))
-  }
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
-async function copyText(text: string, emptyMessage: string) {
-  if (!text) {
-    message.warning(emptyMessage)
+async function waitForCompletion() {
+  if (!authState.value) {
+    throw new Error(t('CPA 回调响应缺少可验证的 state', 'The CPA callback response has no state to verify'))
+  }
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await delay(attempt === 0 ? 400 : 750)
+    const response = await getCPAOAuthStatus(authState.value)
+    statusResponse.value = response
+    if (isSuccessfulResponse(response)) {
+      flowStage.value = 'success'
+      message.success(t('回调成功', 'Callback succeeded'))
+      return
+    }
+    if (responseStatus(response) === 'error') {
+      throw new Error(responseError(response) || t('CPA 保存账号失败', 'CPA failed to save the account'))
+    }
+  }
+
+  flowStage.value = 'waiting'
+  message.info(t('CPA 已接收回调，账号仍在保存中', 'CPA accepted the callback and is still saving the account'))
+}
+
+async function checkStatus() {
+  if (!authState.value) {
+    flowStage.value = 'error'
+    flowError.value = t('当前登录会话缺少 state', 'The current sign-in session has no state')
     return
   }
+
+  isChecking.value = true
+  flowStage.value = 'validating'
+  flowError.value = null
   try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.setAttribute('readonly', 'true')
-    textarea.style.position = 'fixed'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textarea)
+    const response = await getCPAOAuthStatus(authState.value)
+    statusResponse.value = response
+    if (isSuccessfulResponse(response)) {
+      flowStage.value = 'success'
+      message.success(t('登录成功', 'Sign-in succeeded'))
+      return
+    }
+    if (responseStatus(response) === 'error') {
+      throw new Error(responseError(response) || t('CPA 登录失败', 'CPA sign-in failed'))
+    }
+    flowStage.value = 'waiting'
+    message.info(t('CPA 仍在等待登录完成', 'CPA is still waiting for sign-in to finish'))
+  } catch (error) {
+    flowStage.value = 'error'
+    flowError.value = errorText(error, '查询 CPA 登录状态失败', 'Failed to check CPA sign-in status')
+  } finally {
+    isChecking.value = false
   }
-  message.success(t('已复制到剪贴板', 'Copied to clipboard'))
 }
 </script>
 
 <template>
   <section class="page cpa-oauth-page">
-    <section class="oauth-hero panel">
-      <div class="hero-glow" aria-hidden="true" />
-      <div class="hero-copy">
-        <div class="eyebrow">
-          <Sparkles :size="16" />
-          <span>{{ t('CPA OAuth 控制台', 'CPA OAuth Console') }}</span>
-        </div>
-        <h1 class="page-title">{{ t('一站式接入 Codex、Claude、Gemini 等 OAuth 认证', 'Connect Codex, Claude, Gemini and more from one OAuth console') }}</h1>
-        <p class="page-subtitle">
-          {{ t('选择服务后发起授权，CPA-Helper 会代理 CPA management API 创建登录链接、提交回调并查询状态。', 'Choose a service, start authorization, and CPA-Helper will proxy CPA management APIs to create sign-in links, submit callbacks and query status.') }}
-        </p>
-        <div class="hero-badges">
-          <NTag round type="info">{{ t('所有登录用户可见', 'Visible to signed-in users') }}</NTag>
-          <NTag round :bordered="false">{{ t('凭据由 CPA 保存', 'Credentials saved by CPA') }}</NTag>
-          <NTag round :bordered="false">{{ t('支持手动回调', 'Manual callback supported') }}</NTag>
-        </div>
+    <div class="page-heading">
+      <div>
+        <h1 class="page-title">{{ t('登录服务', 'Sign-in services') }}</h1>
+        <p class="page-subtitle">{{ t('选择服务并添加 CPA 账号。', 'Choose a service to add a CPA account.') }}</p>
       </div>
-      <div class="hero-steps" aria-label="OAuth steps">
-        <div class="hero-step is-active">
-          <span>1</span>
-          <strong>{{ t('发起', 'Start') }}</strong>
-          <small>{{ t('创建授权链接', 'Create auth URL') }}</small>
-        </div>
-        <div class="hero-step">
-          <span>2</span>
-          <strong>{{ t('授权', 'Authorize') }}</strong>
-          <small>{{ t('浏览器完成登录', 'Finish in browser') }}</small>
-        </div>
-        <div class="hero-step">
-          <span>3</span>
-          <strong>{{ t('保存', 'Save') }}</strong>
-          <small>{{ t('提交回调 / 查询状态', 'Submit callback / check') }}</small>
-        </div>
-      </div>
-    </section>
+      <NButton quaternary circle :loading="isLoadingProviders" :title="t('刷新登录服务', 'Refresh sign-in services')" @click="loadProviders">
+        <template #icon><RefreshCw :size="17" /></template>
+      </NButton>
+    </div>
 
-    <NAlert v-if="errorMessage" type="error" :bordered="false" closable @close="errorMessage = null">
-      {{ errorMessage }}
+    <NAlert v-if="pageError" type="error" :bordered="false" closable @close="pageError = null">
+      {{ pageError }}
     </NAlert>
 
-    <section class="provider-area panel">
-      <div class="panel-inner">
-        <div class="section-heading">
-          <div>
-            <h2 class="section-title">{{ t('选择登录服务', 'Choose a sign-in service') }}</h2>
-            <p>{{ t('从下方卡片选择需要写入 CPA 的认证类型。', 'Pick the credential type you want CPA to write.') }}</p>
+    <NSpin :show="isLoadingProviders">
+      <div class="provider-grid">
+        <button
+          v-for="provider in providerCards"
+          :key="provider.id"
+          type="button"
+          class="provider-card"
+          :class="`tone-${provider.tone}`"
+          :disabled="Boolean(startingProvider)"
+          @click="startOAuth(provider.id)"
+        >
+          <div class="provider-card-top">
+            <div class="brand-mark">{{ provider.iconText }}</div>
+            <NTag size="small" :bordered="false">{{ provider.tag }}</NTag>
           </div>
-          <NButton tertiary :loading="isLoadingProviders" @click="resetFlow">
-            <template #icon><RotateCcw :size="15" /></template>
-            {{ t('重置流程', 'Reset flow') }}
-          </NButton>
+          <div class="provider-copy">
+            <h2>{{ provider.shortName }}</h2>
+            <p>{{ provider.description }}</p>
+          </div>
+          <span class="provider-action">
+            <Loader2 v-if="startingProvider === provider.id" :size="16" class="spin-icon" />
+            <LogIn v-else :size="16" />
+            <span>{{ t('登录', 'Sign in') }}</span>
+          </span>
+        </button>
+      </div>
+    </NSpin>
+
+    <NModal
+      v-model:show="flowModalVisible"
+      preset="card"
+      :title="`${activeProvider.shortName} ${t('登录', 'sign-in')}`"
+      :style="{ width: 'min(560px, calc(100vw - 32px))' }"
+      :mask-closable="!isSubmittingCallback && !isChecking"
+    >
+      <div class="oauth-dialog">
+        <div v-if="flowStage === 'success'" class="result-state success-state">
+          <CheckCircle2 :size="34" />
+          <div>
+            <h3>{{ isDeviceFlow ? t('登录成功', 'Sign-in succeeded') : t('回调成功', 'Callback succeeded') }}</h3>
+            <p>{{ t('CPA 已确认本次授权，可以继续添加账号。', 'CPA confirmed this authorization; you can continue adding accounts.') }}</p>
+          </div>
         </div>
 
-        <NSpin :show="isLoadingProviders">
-          <div class="provider-grid">
-            <article
-              v-for="provider in providerCards"
-              :key="provider.id"
-              class="provider-card"
-              :class="[`tone-${provider.tone}`, { 'is-selected': selectedProvider === provider.id }]"
-              role="button"
-              tabindex="0"
-              @click="selectProvider(provider.id)"
-              @keydown.enter.prevent="selectProvider(provider.id)"
-              @keydown.space.prevent="selectProvider(provider.id)"
-            >
-              <div class="provider-card-bg" aria-hidden="true" />
-              <div class="provider-card-top">
-                <div class="brand-mark">{{ provider.iconText }}</div>
-                <NTag round size="small" :bordered="false">{{ provider.tag }}</NTag>
-              </div>
-              <h3>{{ provider.shortName }}</h3>
-              <p>{{ provider.description }}</p>
-              <div class="provider-helper">
-                <KeyRound :size="14" />
-                <span>{{ provider.helper }}</span>
-              </div>
-              <div class="provider-footer">
-                <span v-if="selectedProvider === provider.id" class="selected-pill">
-                  <CheckCircle2 :size="14" />
-                  {{ t('当前选择', 'Selected') }}
-                </span>
-                <span v-else class="select-hint">{{ t('点击选择', 'Click to select') }}</span>
-                <NButton
-                  size="small"
-                  type="primary"
-                  :loading="isStarting && selectedProvider === provider.id"
-                  @click.stop="startOAuth(provider.id)"
-                >
-                  {{ startButtonText }}
-                </NButton>
-              </div>
-            </article>
-          </div>
-        </NSpin>
-      </div>
-    </section>
-
-    <div class="workspace-grid">
-      <section class="panel workbench-panel">
-        <div class="panel-inner">
-          <div class="workbench-header">
-            <div class="workbench-title">
-              <div class="brand-mark large" :class="`tone-${activeProvider.tone}`">{{ activeProvider.iconText }}</div>
-              <div>
-                <h2>{{ t('当前授权工作台', 'Current authorization workspace') }}</h2>
-                <p>{{ activeProvider.label }} · {{ activeProvider.tag }}</p>
-              </div>
+        <template v-else>
+          <div class="dialog-provider">
+            <div class="brand-mark" :class="`tone-${activeProvider.tone}`">{{ activeProvider.iconText }}</div>
+            <div>
+              <strong>{{ activeProvider.label }}</strong>
+              <span v-if="authState">State: {{ authState }}</span>
             </div>
-            <NButton type="primary" size="large" :loading="isStarting" @click="startOAuth()">
-              <template #icon><ExternalLink :size="17" /></template>
-              {{ t('打开授权页', 'Open authorization page') }}
-            </NButton>
           </div>
 
-          <div v-if="needsProjectID" class="project-field">
-            <label>{{ t('Gemini GCP Project ID（可选）', 'Gemini GCP Project ID (optional)') }}</label>
-            <NInput v-model:value="projectID" placeholder="my-gcp-project" clearable />
-          </div>
+          <NAlert v-if="flowError" type="error" :bordered="false" closable @close="flowError = null">
+            {{ flowError }}
+          </NAlert>
 
-          <div class="auth-surface" :class="{ 'is-empty': !hasActiveFlow }">
-            <template v-if="authURLResponse">
-              <div class="auth-surface-header">
-                <div>
-                  <span class="mini-label">{{ t('授权链接', 'Authorization URL') }}</span>
-                  <strong>{{ authURL ? t('已生成，已尝试在新窗口打开', 'Generated and opened in a new window') : t('CPA 返回了登录信息', 'CPA returned sign-in information') }}</strong>
-                </div>
-                <NTag v-if="responseStatus" round type="info">{{ responseStatus }}</NTag>
-              </div>
+          <template v-if="authURLResponse && isDeviceFlow">
+            <div v-if="deviceCode" class="device-code">
+              <span>{{ t('设备码', 'Device code') }}</span>
+              <strong>{{ deviceCode }}</strong>
+            </div>
+            <p class="dialog-copy">{{ t('在登录页完成确认后，返回这里验证登录结果。', 'Complete confirmation on the sign-in page, then verify the result here.') }}</p>
+          </template>
 
-              <div v-if="authURL" class="url-box">
-                <Link2 :size="16" />
-                <code>{{ authURL }}</code>
-              </div>
-              <pre v-else class="compact-json">{{ responseText }}</pre>
-
-              <div class="action-row">
-                <NButton secondary :disabled="!authURL" @click="copyText(authURL, t('当前没有授权链接', 'No authorization URL available'))">
-                  <template #icon><Clipboard :size="15" /></template>
-                  {{ t('复制链接', 'Copy link') }}
-                </NButton>
-                <NButton secondary :disabled="!authURL" @click="openAuthURL">
-                  <template #icon><ExternalLink :size="15" /></template>
-                  {{ t('重新打开', 'Reopen') }}
-                </NButton>
-                <NButton secondary :disabled="!authState" :loading="isChecking" @click="checkStatus">
-                  <template #icon><RefreshCw :size="15" /></template>
-                  {{ t('查询状态', 'Check status') }}
-                </NButton>
-              </div>
-            </template>
-            <template v-else>
-              <div class="empty-flow-icon"><TerminalSquare :size="28" /></div>
-              <h3>{{ t('还没有授权会话', 'No authorization session yet') }}</h3>
-              <p>{{ t('点击上方服务卡片或「打开授权页」后，这里会展示授权链接、state 与后续操作。', 'Click a service card or “Open authorization page”; the auth URL, state and next actions will appear here.') }}</p>
-            </template>
-          </div>
-
-          <div class="callback-panel">
+          <template v-else-if="authURLResponse">
             <div class="callback-heading">
+              <ShieldCheck :size="20" />
               <div>
-                <h3>{{ t('回调 URL', 'Callback URL') }}</h3>
-                <p>{{ t('如果授权后停在 localhost / provider 回调页，复制浏览器地址栏完整 URL 并提交。', 'If the browser stops at localhost / provider callback, paste the full address bar URL here and submit it.') }}</p>
+                <h3>{{ callbackAccepted ? t('CPA 正在保存账号', 'CPA is saving the account') : t('输入回调 URL', 'Enter callback URL') }}</h3>
+                <p>{{ callbackAccepted ? t('回调已接收，请验证账号保存结果。', 'The callback was accepted; verify that the account was saved.') : t('粘贴授权完成后浏览器地址栏中的完整 URL。', 'Paste the complete browser address after authorization.') }}</p>
               </div>
-              <NTag round :bordered="false" type="warning">{{ t('可选', 'Optional') }}</NTag>
             </div>
             <NInput
               v-model:value="redirectURL"
               type="textarea"
-              :autosize="{ minRows: 2, maxRows: 4 }"
+              :autosize="{ minRows: 3, maxRows: 5 }"
+              :disabled="isSubmittingCallback || callbackAccepted"
               placeholder="http://127.0.0.1:8317/codex/callback?code=...&state=..."
+              @keydown.ctrl.enter.prevent="submitCallback"
             />
-            <div class="action-row">
-              <NButton secondary :loading="isSubmittingCallback" @click="submitCallback">
-                <template #icon><ShieldCheck :size="15" /></template>
-                {{ t('提交回调到 CPA', 'Submit callback to CPA') }}
-              </NButton>
-              <NButton tertiary :disabled="!redirectURL" @click="copyText(redirectURL, t('请先粘贴回调 URL', 'Paste callback URL first'))">
-                <template #icon><Clipboard :size="15" /></template>
-                {{ t('复制回调', 'Copy callback') }}
-              </NButton>
-            </div>
-            <NAlert v-if="callbackSuccessMessage" type="success" :bordered="false" closable @close="callbackSuccessMessage = null">
-              {{ callbackSuccessMessage }}
-            </NAlert>
+          </template>
+
+          <div v-if="flowStage === 'validating'" class="validating-row">
+            <Loader2 :size="17" class="spin-icon" />
+            <span>{{ t('正在等待 CPA 验证', 'Waiting for CPA validation') }}</span>
           </div>
+        </template>
+
+        <div class="dialog-actions">
+          <template v-if="flowStage === 'success'">
+            <NButton type="primary" @click="continueAddingAccount">
+              <template #icon><KeyRound :size="16" /></template>
+              {{ t('继续添加账号', 'Add another account') }}
+            </NButton>
+          </template>
+          <template v-else>
+            <NButton v-if="authURL" secondary :disabled="isSubmittingCallback || isChecking" @click="reopenAuthURL">
+              <template #icon><ExternalLink :size="16" /></template>
+              {{ t('重新打开登录页', 'Reopen sign-in page') }}
+            </NButton>
+            <NButton
+              v-if="isDeviceFlow"
+              type="primary"
+              :loading="isChecking"
+              :disabled="!authState || isSubmittingCallback"
+              @click="checkStatus"
+            >
+              {{ t('验证登录结果', 'Verify sign-in') }}
+            </NButton>
+            <NButton
+              v-else-if="authURLResponse && callbackAccepted"
+              type="primary"
+              :loading="isChecking"
+              :disabled="!authState || isSubmittingCallback"
+              @click="checkStatus"
+            >
+              {{ t('验证保存结果', 'Verify saved account') }}
+            </NButton>
+            <NButton
+              v-else-if="authURLResponse"
+              type="primary"
+              :loading="isSubmittingCallback"
+              :disabled="!canSubmitCallback"
+              @click="submitCallback"
+            >
+              {{ t('提交并验证', 'Submit and verify') }}
+            </NButton>
+            <NButton v-else secondary @click="flowModalVisible = false">{{ t('关闭', 'Close') }}</NButton>
+          </template>
         </div>
-      </section>
-
-      <aside class="panel status-panel">
-        <div class="panel-inner">
-          <div class="status-header">
-            <h2>{{ t('认证状态', 'Authorization status') }}</h2>
-            <NTag round :type="phaseType">{{ phaseText }}</NTag>
-          </div>
-
-          <div class="status-card" :class="`phase-${phaseType}`">
-            <div class="status-orb">
-              <Loader2 v-if="isStarting || isChecking || isSubmittingCallback" :size="20" class="spin-icon" />
-              <CheckCircle2 v-else-if="phaseType === 'success'" :size="20" />
-              <ShieldCheck v-else :size="20" />
-            </div>
-            <div>
-              <strong>{{ activeProvider.shortName }}</strong>
-              <p>{{ phaseText }}</p>
-            </div>
-          </div>
-
-          <dl class="info-list">
-            <div>
-              <dt>{{ t('Provider', 'Provider') }}</dt>
-              <dd>{{ selectedProvider }}</dd>
-            </div>
-            <div>
-              <dt>{{ t('State', 'State') }}</dt>
-              <dd>
-                <code>{{ authState || '-' }}</code>
-              </dd>
-            </div>
-            <div v-if="needsProjectID">
-              <dt>{{ t('Project ID', 'Project ID') }}</dt>
-              <dd>{{ projectID || '-' }}</dd>
-            </div>
-          </dl>
-
-          <NButton block secondary :disabled="!authState" :loading="isChecking" @click="checkStatus">
-            <template #icon><RefreshCw :size="15" /></template>
-            {{ t('刷新 CPA 状态', 'Refresh CPA status') }}
-          </NButton>
-
-          <div v-if="statusResponse" class="raw-panel">
-            <div class="raw-heading">
-              <span>{{ t('CPA 状态响应', 'CPA status response') }}</span>
-              <NButton text size="tiny" @click="copyText(statusText, t('当前没有状态响应', 'No status response available'))">
-                {{ t('复制', 'Copy') }}
-              </NButton>
-            </div>
-            <pre>{{ statusText }}</pre>
-          </div>
-          <div v-else class="tips-card">
-            <strong>{{ t('提示', 'Tips') }}</strong>
-            <ul>
-              <li>{{ t('授权链接会自动在新标签打开。', 'The authorization URL opens in a new tab automatically.') }}</li>
-              <li>{{ t('如浏览器无法回跳，请手动提交完整回调 URL。', 'If the browser cannot redirect back, submit the full callback URL manually.') }}</li>
-              <li>{{ t('管理员需先在系统设置中配置 CPA 地址与 Management Key。', 'Admins must configure the CPA URL and Management Key in Settings first.') }}</li>
-            </ul>
-          </div>
-
-          <details v-if="authURLResponse" class="raw-details">
-            <summary>{{ t('查看登录响应原文', 'View raw sign-in response') }}</summary>
-            <pre>{{ responseText }}</pre>
-          </details>
-        </div>
-      </aside>
-    </div>
+      </div>
+    </NModal>
   </section>
 </template>
 
 <style scoped>
 .cpa-oauth-page {
-  gap: 16px;
-}
-
-.oauth-hero {
-  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.48fr);
   gap: 18px;
-  overflow: hidden;
-  padding: 22px;
-  background:
-    radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--cpa-primary-weak) 72%, transparent), transparent 30%),
-    linear-gradient(135deg, var(--cpa-surface) 0%, var(--cpa-bg-soft) 100%);
 }
 
-.hero-glow {
-  position: absolute;
-  inset: auto -80px -120px auto;
-  width: 300px;
-  height: 300px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--cpa-accent-purple) 18%, transparent);
-  filter: blur(20px);
-  pointer-events: none;
-}
-
-.hero-copy,
-.hero-steps {
-  position: relative;
-  z-index: 1;
-}
-
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 10px;
-  color: var(--cpa-primary);
-  font-size: 13px;
-  font-weight: 760;
-}
-
-.oauth-hero .page-title {
-  max-width: 920px;
-  font-size: clamp(24px, 3vw, 34px);
-}
-
-.oauth-hero .page-subtitle {
-  max-width: 760px;
-  margin-top: 10px;
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.hero-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.hero-steps {
-  display: grid;
-  gap: 10px;
-  align-content: center;
-}
-
-.hero-step {
-  display: grid;
-  grid-template-columns: 38px 1fr;
-  grid-template-areas:
-    'num title'
-    'num text';
-  gap: 2px 12px;
-  padding: 13px;
-  border: 1px solid var(--cpa-border);
-  border-radius: var(--cpa-radius);
-  background: color-mix(in srgb, var(--cpa-surface) 82%, transparent);
-  box-shadow: var(--cpa-shadow-card), var(--cpa-shadow-hairline);
-}
-
-.hero-step span {
-  display: grid;
-  grid-area: num;
-  width: 38px;
-  height: 38px;
-  place-items: center;
-  border-radius: 12px;
-  background: var(--cpa-surface-muted);
-  color: var(--cpa-text-strong);
-  font-weight: 800;
-}
-
-.hero-step strong {
-  grid-area: title;
-  color: var(--cpa-text-strong);
-  font-size: 14px;
-}
-
-.hero-step small {
-  grid-area: text;
-  color: var(--cpa-text-muted);
-  font-size: 12px;
-}
-
-.hero-step.is-active span {
-  background: var(--cpa-primary-weak);
-  color: var(--cpa-primary);
-}
-
-.section-heading,
-.workbench-header,
-.callback-heading,
-.status-header,
-.auth-surface-header,
-.raw-heading {
+.page-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
 }
 
-.section-heading {
-  margin-bottom: 16px;
-}
-
-.section-heading .section-title,
-.workbench-header h2,
-.status-header h2,
-.callback-heading h3 {
+.page-heading h1,
+.page-heading p {
   margin: 0;
-  color: var(--cpa-text-strong);
 }
 
-.section-heading p,
-.callback-heading p,
-.workbench-title p,
-.status-card p {
-  margin: 4px 0 0;
+.page-heading p {
+  margin-top: 6px;
   color: var(--cpa-text-muted);
-  font-size: 13px;
 }
 
 .provider-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(190px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
 }
 
 .provider-card {
-  --provider-color: var(--cpa-primary);
-  --provider-wash: var(--cpa-primary-weak);
-  position: relative;
-  display: flex;
-  min-height: 254px;
-  flex-direction: column;
-  overflow: hidden;
-  padding: 16px;
+  --provider-color: #0f766e;
+  display: grid;
+  min-height: 210px;
+  padding: 18px;
+  gap: 18px;
   border: 1px solid var(--cpa-border);
-  border-radius: calc(var(--cpa-radius) + 6px);
-  background: var(--cpa-surface-raised);
-  box-shadow: var(--cpa-shadow-card), var(--cpa-shadow-hairline);
+  border-top: 3px solid var(--provider-color);
+  border-radius: 8px;
+  background: var(--cpa-surface);
+  color: inherit;
   cursor: pointer;
-  outline: none;
-  transition:
-    transform 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
+  font: inherit;
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 .provider-card:hover,
-.provider-card:focus-visible,
-.provider-card.is-selected {
+.provider-card:focus-visible {
+  border-color: color-mix(in srgb, var(--provider-color) 55%, var(--cpa-border));
+  box-shadow: 0 8px 22px rgb(15 23 42 / 8%);
   transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--provider-color) 48%, var(--cpa-border));
-  box-shadow: 0 16px 34px color-mix(in srgb, var(--provider-color) 12%, transparent), var(--cpa-shadow-hairline);
+  outline: none;
 }
 
-.provider-card.is-selected::after {
-  position: absolute;
-  inset: 0;
-  border: 1px solid color-mix(in srgb, var(--provider-color) 62%, transparent);
-  border-radius: inherit;
-  content: '';
-  pointer-events: none;
-}
-
-.provider-card-bg {
-  position: absolute;
-  inset: -70px -70px auto auto;
-  width: 180px;
-  height: 180px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--provider-color) 14%, transparent);
-  pointer-events: none;
+.provider-card:disabled {
+  cursor: wait;
 }
 
 .provider-card-top,
-.provider-footer,
-.provider-helper,
-.workbench-title {
+.dialog-provider,
+.callback-heading,
+.result-state,
+.validating-row {
   display: flex;
   align-items: center;
-  gap: 10px;
 }
 
 .provider-card-top {
-  position: relative;
   justify-content: space-between;
+  gap: 12px;
 }
 
 .brand-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
   place-items: center;
-  border-radius: 13px;
-  background: var(--provider-wash);
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border: 1px solid color-mix(in srgb, var(--provider-color) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--provider-color) 10%, var(--cpa-surface));
   color: var(--provider-color);
   font-size: 18px;
-  font-weight: 880;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 70%);
+  font-weight: 750;
 }
 
-.brand-mark.large {
-  width: 52px;
-  height: 52px;
-  flex: 0 0 auto;
-  border-radius: 16px;
-  font-size: 22px;
+.provider-copy {
+  align-self: start;
 }
 
-.provider-card h3 {
-  position: relative;
-  margin: 18px 0 8px;
-  color: var(--cpa-text-strong);
-  font-size: 18px;
-  line-height: 1.2;
-}
-
-.provider-card p {
-  position: relative;
-  min-height: 62px;
+.provider-copy h2,
+.provider-copy p {
   margin: 0;
+}
+
+.provider-copy h2 {
+  font-size: 18px;
+}
+
+.provider-copy p {
+  margin-top: 5px;
   color: var(--cpa-text-muted);
   font-size: 13px;
   line-height: 1.55;
 }
 
-.provider-helper {
-  position: relative;
-  margin-top: auto;
-  padding-top: 14px;
-  color: var(--cpa-text-muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.provider-helper svg {
-  flex: 0 0 auto;
-  color: var(--provider-color);
-}
-
-.provider-footer {
-  position: relative;
-  justify-content: space-between;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--cpa-border);
-}
-
-.selected-pill,
-.select-hint {
+.provider-action {
   display: inline-flex;
+  min-height: 34px;
+  align-self: end;
   align-items: center;
-  gap: 5px;
-  color: var(--provider-color);
-  font-size: 12px;
-  font-weight: 760;
-}
-
-.select-hint {
-  color: var(--cpa-text-muted);
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 5px;
+  background: var(--cpa-primary);
+  color: white;
+  font-size: 14px;
   font-weight: 650;
 }
 
-.tone-blue {
-  --provider-color: var(--cpa-accent-blue);
-  --provider-wash: var(--cpa-accent-blue-weak);
-}
+.tone-blue { --provider-color: #2563eb; }
+.tone-orange { --provider-color: #c2410c; }
+.tone-green { --provider-color: #15803d; }
+.tone-purple { --provider-color: #7c3aed; }
+.tone-dark { --provider-color: #334155; }
+.tone-teal { --provider-color: #0f766e; }
 
-.tone-orange {
-  --provider-color: var(--cpa-accent-orange);
-  --provider-wash: var(--cpa-accent-orange-weak);
-}
-
-.tone-green {
-  --provider-color: var(--cpa-success);
-  --provider-wash: var(--cpa-success-weak);
-}
-
-.tone-purple {
-  --provider-color: var(--cpa-accent-purple);
-  --provider-wash: var(--cpa-accent-purple-weak);
-}
-
-.tone-dark {
-  --provider-color: var(--cpa-text-strong);
-  --provider-wash: var(--cpa-surface-muted);
-}
-
-.tone-teal {
-  --provider-color: var(--cpa-primary);
-  --provider-wash: var(--cpa-primary-weak);
-}
-
-.workspace-grid {
+.oauth-dialog {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.38fr);
-  gap: 16px;
+  gap: 18px;
 }
 
-.workbench-panel .panel-inner,
-.status-panel .panel-inner {
-  display: grid;
-  gap: 16px;
-}
-
-.workbench-header {
-  align-items: center;
-}
-
-.workbench-header h2 {
-  font-size: 18px;
-}
-
-.project-field {
-  display: grid;
-  gap: 7px;
-}
-
-.project-field label,
-.mini-label {
-  color: var(--cpa-text-muted);
-  font-size: 12px;
-  font-weight: 720;
-}
-
-.auth-surface {
-  display: grid;
-  gap: 14px;
-  min-height: 196px;
-  padding: 16px;
-  border: 1px dashed color-mix(in srgb, var(--cpa-primary) 34%, var(--cpa-border));
-  border-radius: calc(var(--cpa-radius) + 4px);
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--cpa-primary-wash) 62%, transparent), transparent),
-    var(--cpa-surface-muted);
-}
-
-.auth-surface.is-empty {
-  place-items: center;
-  align-content: center;
-  text-align: center;
-}
-
-.auth-surface h3 {
-  margin: 2px 0 0;
-  color: var(--cpa-text-strong);
-}
-
-.auth-surface p {
-  max-width: 560px;
-  margin: 0;
-  color: var(--cpa-text-muted);
-  line-height: 1.6;
-}
-
-.empty-flow-icon {
-  display: grid;
-  width: 58px;
-  height: 58px;
-  place-items: center;
-  border-radius: 18px;
-  background: var(--cpa-surface);
-  color: var(--cpa-primary);
-  box-shadow: var(--cpa-shadow-card), var(--cpa-shadow-hairline);
-}
-
-.auth-surface-header strong {
-  display: block;
-  margin-top: 2px;
-  color: var(--cpa-text-strong);
-}
-
-.url-box {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 10px;
-  max-height: 118px;
-  overflow: auto;
-  padding: 13px;
-  border: 1px solid var(--cpa-border);
-  border-radius: var(--cpa-radius);
-  background: var(--cpa-surface);
-  color: var(--cpa-text);
-}
-
-.url-box svg {
-  margin-top: 3px;
-  color: var(--cpa-primary);
-}
-
-.url-box code,
-.info-list code {
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  word-break: break-all;
-}
-
-.action-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.callback-panel {
-  display: grid;
+.dialog-provider {
   gap: 12px;
-  padding: 15px;
-  border: 1px solid var(--cpa-border);
-  border-radius: calc(var(--cpa-radius) + 4px);
-  background: var(--cpa-surface);
-}
-
-.status-header {
-  align-items: center;
-}
-
-.status-card {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 14px;
-  border: 1px solid var(--cpa-border);
-  border-radius: calc(var(--cpa-radius) + 4px);
-  background: var(--cpa-surface-muted);
-}
-
-.status-card strong {
-  color: var(--cpa-text-strong);
-}
-
-.status-card p {
-  line-height: 1.35;
-}
-
-.status-orb {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 15px;
-  background: var(--cpa-primary-weak);
-  color: var(--cpa-primary);
-}
-
-.phase-success .status-orb {
-  background: var(--cpa-success-weak);
-  color: var(--cpa-success);
-}
-
-.phase-warning .status-orb {
-  background: var(--cpa-warning-weak);
-  color: var(--cpa-warning);
-}
-
-.info-list {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-}
-
-.info-list > div {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  padding: 10px 0;
+  padding-bottom: 14px;
   border-bottom: 1px solid var(--cpa-border);
 }
 
-.info-list dt {
-  color: var(--cpa-text-muted);
-  font-size: 12px;
-  font-weight: 720;
-}
-
-.info-list dd {
+.dialog-provider > div:last-child {
+  display: grid;
   min-width: 0;
-  margin: 0;
-  color: var(--cpa-text-strong);
-  font-size: 13px;
-  text-align: right;
+  gap: 3px;
 }
 
-.raw-panel,
-.tips-card,
-.raw-details {
-  padding: 13px;
+.dialog-provider span {
+  overflow: hidden;
+  color: var(--cpa-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.callback-heading {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.callback-heading h3,
+.callback-heading p,
+.result-state h3,
+.result-state p,
+.dialog-copy {
+  margin: 0;
+}
+
+.callback-heading h3,
+.result-state h3 {
+  font-size: 16px;
+}
+
+.callback-heading p,
+.result-state p,
+.dialog-copy {
+  margin-top: 4px;
+  color: var(--cpa-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.device-code {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
   border: 1px solid var(--cpa-border);
-  border-radius: var(--cpa-radius);
+  border-radius: 8px;
   background: var(--cpa-surface-muted);
 }
 
-.raw-heading {
-  align-items: center;
-  margin-bottom: 8px;
-  color: var(--cpa-text-strong);
-  font-size: 13px;
-  font-weight: 760;
-}
-
-.raw-panel pre,
-.raw-details pre,
-.compact-json {
-  max-height: 260px;
-  margin: 0;
-  overflow: auto;
-  color: var(--cpa-text);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.compact-json {
-  padding: 13px;
-  border: 1px solid var(--cpa-border);
-  border-radius: var(--cpa-radius);
-  background: var(--cpa-surface);
-}
-
-.tips-card strong {
-  color: var(--cpa-text-strong);
-}
-
-.tips-card ul {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding-left: 18px;
+.device-code span {
   color: var(--cpa-text-muted);
   font-size: 12px;
-  line-height: 1.45;
 }
 
-.raw-details summary {
-  cursor: pointer;
-  color: var(--cpa-text-strong);
+.device-code strong {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+
+.validating-row {
+  gap: 8px;
+  color: var(--cpa-text-muted);
   font-size: 13px;
-  font-weight: 760;
 }
 
-.raw-details pre {
-  margin-top: 10px;
+.result-state {
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #86c99a;
+  border-radius: 8px;
+  background: #f2fbf4;
+  color: #166534;
+}
+
+.result-state p {
+  color: #3f6f4c;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .spin-icon {
-  animation: oauth-spin 900ms linear infinite;
+  animation: spin 1s linear infinite;
 }
 
-@keyframes oauth-spin {
-  to {
-    transform: rotate(360deg);
-  }
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
-@media (max-width: 1380px) {
-  .provider-grid {
-    grid-template-columns: repeat(3, minmax(210px, 1fr));
-  }
-}
-
-@media (max-width: 1080px) {
-  .oauth-hero,
-  .workspace-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .hero-steps {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 760px) {
-  .oauth-hero,
-  .provider-area .panel-inner,
-  .workbench-panel .panel-inner,
-  .status-panel .panel-inner {
-    padding: 14px;
-  }
-
-  .hero-steps,
+@media (max-width: 640px) {
   .provider-grid {
     grid-template-columns: 1fr;
-  }
-
-  .section-heading,
-  .workbench-header,
-  .callback-heading,
-  .auth-surface-header {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .provider-card {
-    min-height: 220px;
+    min-height: 190px;
   }
 
-  .workbench-title {
-    align-items: flex-start;
-  }
-
-  .info-list > div {
-    grid-template-columns: 1fr;
-    gap: 4px;
-  }
-
-  .info-list dd {
-    text-align: left;
+  .dialog-actions .n-button {
+    flex: 1 1 100%;
   }
 }
 </style>

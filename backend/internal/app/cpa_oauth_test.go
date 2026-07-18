@@ -95,3 +95,41 @@ func TestCPAOAuthRequiresLoginAndCPAConfig(t *testing.T) {
 		"provider": "codex",
 	}, cookies, http.StatusUnprocessableEntity)
 }
+
+func TestCPAOAuthCallbackRequiresSuccessfulCPAStatus(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v0/management/oauth-callback" {
+			t.Fatalf("unexpected upstream request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "error",
+			"error":  "state mismatch",
+		})
+	}))
+	defer upstream.Close()
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "test-password",
+		"nickname": "Admin",
+	}, nil, nil)
+	requestJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
+		"cliaproxy_url":  upstream.URL,
+		"management_key": "test-management-key",
+	}, cookies, nil)
+
+	requestJSONExpectStatus(t, handler, http.MethodPost, "/api/cpa-oauth/callback", map[string]any{
+		"provider":     "codex",
+		"redirect_url": "http://127.0.0.1:8317/codex/callback?code=test-code&state=test-state",
+	}, cookies, http.StatusBadGateway)
+}
