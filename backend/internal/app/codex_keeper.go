@@ -1289,6 +1289,9 @@ func keeperQuotaWindowPairForAccount(account keeperAccount, now time.Time) keepe
 }
 
 func keeperQuotaWindowForAccount(account keeperAccount, primary bool, now time.Time) *keeperQuotaWindowUsage {
+	if keeperAntigravityAccount(account) {
+		return keeperAntigravityQuotaWindowForAccount(account, primary, now)
+	}
 	if !primary && keeperFreeQuotaWindowAccount(account.AccountType) {
 		return nil
 	}
@@ -1315,6 +1318,70 @@ func keeperQuotaWindowForAccount(account keeperAccount, primary bool, now time.T
 		Stale:         !now.Before(windowEnd),
 		WindowSource:  source,
 	}
+}
+
+func keeperAntigravityAccount(account keeperAccount) bool {
+	return strings.EqualFold(strings.TrimSpace(valueOr(account.AccountType, "")), "antigravity")
+}
+
+func keeperAntigravityQuotaWindowForAccount(account keeperAccount, primary bool, now time.Time) *keeperQuotaWindowUsage {
+	quota := account.AntigravityQuota
+	if quota == nil {
+		return nil
+	}
+	for _, group := range quota.Groups {
+		if !strings.EqualFold(strings.Join(strings.Fields(group.Label), " "), "Gemini models") {
+			continue
+		}
+		for _, bucket := range group.Buckets {
+			seconds, isPrimary, ok := keeperAntigravityBucketWindow(bucket)
+			if !ok || isPrimary != primary || bucket.ResetTime == nil {
+				continue
+			}
+			resetAt, ok := keeperAntigravityResetTime(*bucket.ResetTime)
+			if !ok {
+				continue
+			}
+			windowEnd := resetAt.In(appTimeLocation)
+			return &keeperQuotaWindowUsage{
+				WindowStart:   windowEnd.Add(-time.Duration(seconds) * time.Second),
+				WindowEnd:     windowEnd,
+				ResetAt:       windowEnd,
+				WindowSeconds: seconds,
+				Stale:         !now.Before(windowEnd),
+				WindowSource:  "antigravity",
+			}
+		}
+	}
+	return nil
+}
+
+func keeperAntigravityBucketWindow(bucket keeperAntigravityQuotaBucket) (seconds int, primary bool, ok bool) {
+	window := strings.ToLower(strings.TrimSpace(bucket.Window))
+	label := strings.ToLower(strings.Join(strings.Fields(bucket.Label), " "))
+	if window == "5h" || window == "five-hour" || window == "five_hour" ||
+		strings.Contains(label, "5 hour") || strings.Contains(label, "5-hour") || strings.Contains(label, "five hour") {
+		return keeperFiveHourWindowSeconds, true, true
+	}
+	if window == "weekly" || window == "week" || strings.Contains(label, "weekly") || strings.Contains(label, "week") {
+		return keeperWeekWindowSeconds, false, true
+	}
+	return 0, false, false
+}
+
+func keeperAntigravityResetTime(value string) (time.Time, bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		parsed, err = time.Parse(time.RFC3339, text)
+	}
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
 }
 
 func keeperQuotaWindowSeconds(accountType *string, saved *int, primary bool) (int, string, bool) {

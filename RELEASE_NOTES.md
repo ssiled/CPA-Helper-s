@@ -1,6 +1,6 @@
-# CPA-Helper 0.3.33
+# CPA-Helper 0.3.34
 
-本次发布补齐 Antigravity 账号的真实分组额度查询与额度条展示。
+本次发布完善 Antigravity 账号的 Gemini 额度窗口和窗口用量展示。
 
 ## Antigravity 额度
 
@@ -8,11 +8,13 @@
 - 读取认证文件中的 `project_id`，并兼容 `projectId`、`cloudaicompanionProject` 等项目字段。
 - 支持 Gemini 模型、Claude 和 GPT 模型等分组，以及 5 小时、日、周、月额度窗口。
 - 保存额度百分比、刷新时间和分组说明；刷新失败时保留上一次成功数据。
+- Gemini 额度按真实 5 小时和周窗口归因 usage_records，计算请求数、Tokens 和费用。
 
 ## 页面展示
 
 - 账号表格直接显示 Antigravity 分组额度条。
 - 进度条卡片和圆环卡片均显示 Antigravity 各额度窗口。
+- Antigravity 页面只展示 Gemini 周限额和 5 小时限额，窗口用量与 GPT 使用相同的请求、Tokens、费用卡片。
 - 旧 AI Credits 文本仅作为未取得分组额度时的兼容兜底。
 
 ## 数据迁移

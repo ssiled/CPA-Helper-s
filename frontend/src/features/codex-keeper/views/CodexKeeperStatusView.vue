@@ -86,6 +86,7 @@ type AntigravityQuotaItem = CodexKeeperAntigravityQuotaBucket & {
   groupLabel: string
   groupDescription: string | undefined
   remainingPercent: number
+  windowType: 'weekly' | 'fiveHour'
 }
 type AntigravityQuotaDisplayGroup = {
   id: string
@@ -918,17 +919,43 @@ function antigravityQuotaItems(account: CodexKeeperAccount): AntigravityQuotaIte
     return []
   }
   const groups = account.antigravity_quota?.groups ?? []
-  return groups.flatMap((group) =>
-    group.buckets
-      .filter((bucket) => Number.isFinite(bucket.remaining_fraction))
-      .map((bucket) => ({
-        ...bucket,
-        groupID: group.id,
-        groupLabel: antigravityGroupLabel(group.label),
-        groupDescription: antigravityDescription(group.description),
-        remainingPercent: Math.round(Math.max(0, Math.min(1, bucket.remaining_fraction)) * 100),
-      })),
-  )
+  return groups
+    .filter((group) => normalizedAntigravityLabel(group.label) === 'gemini models')
+    .flatMap((group) =>
+      group.buckets.flatMap((bucket) => {
+        const windowType = antigravityBucketWindowType(bucket)
+        if (!windowType || !Number.isFinite(bucket.remaining_fraction)) {
+          return []
+        }
+        return [{
+          ...bucket,
+          groupID: group.id,
+          groupLabel: antigravityGroupLabel(group.label),
+          groupDescription: antigravityDescription(group.description),
+          remainingPercent: Math.round(Math.max(0, Math.min(1, bucket.remaining_fraction)) * 100),
+          windowType,
+        }]
+      }),
+    )
+    .sort((left, right) => Number(left.windowType === 'fiveHour') - Number(right.windowType === 'fiveHour'))
+}
+
+function antigravityBucketWindowType(bucket: CodexKeeperAntigravityQuotaBucket): 'weekly' | 'fiveHour' | null {
+  const window = normalizedAntigravityLabel(bucket.window ?? '').replace(/_/g, '-')
+  const label = normalizedAntigravityLabel(bucket.label)
+  if (window === 'weekly' || window === 'week' || label.includes('weekly') || label.includes('week')) {
+    return 'weekly'
+  }
+  if (
+    window === '5h' ||
+    window === 'five-hour' ||
+    label.includes('5 hour') ||
+    label.includes('5-hour') ||
+    label.includes('five hour')
+  ) {
+    return 'fiveHour'
+  }
+  return null
 }
 
 function antigravityQuotaDisplayGroups(account: CodexKeeperAccount): AntigravityQuotaDisplayGroup[] {
@@ -961,6 +988,22 @@ function antigravityQuotaTitle(item: AntigravityQuotaItem): string {
     `${item.groupLabel} / ${antigravityBucketLabel(item.label)}：剩余 ${item.remainingPercent}%${suffix}`,
     `${item.groupLabel} / ${antigravityBucketLabel(item.label)}: ${item.remainingPercent}% remaining${suffix}`,
   )
+}
+
+function antigravityQuotaUsageItem(account: CodexKeeperAccount, item: AntigravityQuotaItem): QuotaWindowItem {
+  const usage = item.windowType === 'weekly'
+    ? account.secondary_window_usage
+    : account.primary_window_usage
+  return {
+    label: `${item.groupLabel} / ${antigravityBucketLabel(item.label)}`,
+    remainingPercent: item.remainingPercent,
+    resetAt: item.reset_time ?? usage?.reset_at ?? null,
+    usage,
+  }
+}
+
+function antigravityQuotaUsageItems(account: CodexKeeperAccount): QuotaWindowItem[] {
+  return antigravityQuotaItems(account).map((item) => antigravityQuotaUsageItem(account, item))
 }
 
 function quotaUnavailableText(account: CodexKeeperAccount): string {
@@ -1278,10 +1321,9 @@ function renderQuotaCell(account: CodexKeeperAccount) {
 }
 
 function renderQuotaUsageCell(account: CodexKeeperAccount) {
-  if (isAntigravityAccount(account)) {
-    return h('span', { class: 'quota-empty-text' }, t('分组额度', 'Grouped quota'))
-  }
-  const items = quotaWindowItems(account)
+  const items = isAntigravityAccount(account)
+    ? antigravityQuotaUsageItems(account)
+    : quotaWindowItems(account)
   if (items.length === 0) {
     return h('span', { class: 'quota-empty-text' }, '-')
   }
@@ -2485,6 +2527,20 @@ onBeforeUnmount(() => {
                           />
                         </div>
                         <span class="card-quota-reset">{{ antigravityQuotaResetText(item) }}</span>
+                        <div
+                          class="card-quota-usage-tags"
+                          :title="quotaWindowUsageTitle(antigravityQuotaUsageItem(account, item))"
+                        >
+                          <span
+                            v-for="tag in quotaWindowUsageTags(antigravityQuotaUsageItem(account, item))"
+                            :key="`${item.id}-${tag.label}`"
+                            class="card-quota-usage-tag"
+                            :class="tag.tone ? `is-${tag.tone}` : undefined"
+                          >
+                            <span>{{ tag.label }}</span>
+                            <strong>{{ tag.value }}</strong>
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </template>
@@ -2516,6 +2572,20 @@ onBeforeUnmount(() => {
                             <strong>{{ antigravityBucketLabel(item.label) }}</strong>
                             <span>{{ antigravityQuotaResetText(item) }}</span>
                           </div>
+                        </div>
+                        <div
+                          class="card-quota-usage-tags"
+                          :title="quotaWindowUsageTitle(antigravityQuotaUsageItem(account, item))"
+                        >
+                          <span
+                            v-for="tag in quotaWindowUsageTags(antigravityQuotaUsageItem(account, item))"
+                            :key="`${item.id}-${tag.label}`"
+                            class="card-quota-usage-tag"
+                            :class="tag.tone ? `is-${tag.tone}` : undefined"
+                          >
+                            <span>{{ tag.label }}</span>
+                            <strong>{{ tag.value }}</strong>
+                          </span>
                         </div>
                       </div>
                     </div>

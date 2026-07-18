@@ -922,6 +922,36 @@ func TestKeeperQuotaWindowUsageInfersAccountWindows(t *testing.T) {
 		t.Fatalf("k12 secondary window = %#v, want inferred weekly", k12Pair.Secondary)
 	}
 
+	fiveHourReset := resetAt.Add(90 * time.Minute)
+	weeklyReset := resetAt.Add(6 * 24 * time.Hour)
+	antigravityPair := keeperQuotaWindowPairForAccount(keeperAccount{
+		Name:        "antigravity.json",
+		AccountType: stringPtr("antigravity"),
+		AntigravityQuota: &keeperAntigravityQuota{Groups: []keeperAntigravityQuotaGroup{
+			{
+				ID:    "claude-and-gpt-models",
+				Label: "Claude and GPT models",
+				Buckets: []keeperAntigravityQuotaBucket{
+					{ID: "ignored", Label: "5 hour limit", RemainingFraction: 1, ResetTime: stringPtr(fiveHourReset.Format(time.RFC3339))},
+				},
+			},
+			{
+				ID:    "gemini-models",
+				Label: "Gemini models",
+				Buckets: []keeperAntigravityQuotaBucket{
+					{ID: "weekly", Label: "Weekly limit", Window: "weekly", RemainingFraction: 1, ResetTime: stringPtr(weeklyReset.Format(time.RFC3339))},
+					{ID: "five-hour", Label: "5 hour limit", Window: "5h", RemainingFraction: 0.1, ResetTime: stringPtr(fiveHourReset.Format(time.RFC3339))},
+				},
+			},
+		}},
+	}, now)
+	if antigravityPair.Primary == nil || antigravityPair.Primary.WindowSeconds != keeperFiveHourWindowSeconds || antigravityPair.Primary.WindowSource != "antigravity" {
+		t.Fatalf("antigravity primary window = %#v, want Gemini 5h", antigravityPair.Primary)
+	}
+	if antigravityPair.Secondary == nil || antigravityPair.Secondary.WindowSeconds != keeperWeekWindowSeconds || antigravityPair.Secondary.WindowSource != "antigravity" {
+		t.Fatalf("antigravity secondary window = %#v, want Gemini weekly", antigravityPair.Secondary)
+	}
+
 	usage := parseKeeperUsageInfo(map[string]any{
 		"plan_type": "plus",
 		"rate_limit": map[string]any{
@@ -944,6 +974,56 @@ func TestKeeperQuotaWindowUsageInfersAccountWindows(t *testing.T) {
 	camelUsage := parseKeeperUsageInfo(map[string]any{"planType": "pro"})
 	if camelUsage.PlanType != "pro" {
 		t.Fatalf("camel planType = %q, want pro", camelUsage.PlanType)
+	}
+}
+
+func TestKeeperQuotaWindowUsageAggregatesAntigravityGeminiWindows(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	app, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	insertKeeperTestPrice(t, app)
+	now := time.Date(2026, 7, 18, 17, 0, 0, 0, appTimeLocation)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(6 * 24 * time.Hour)
+	account := keeperAccount{
+		Name:        "antigravity-janet.json",
+		Email:       stringPtr("janet@example.com"),
+		AccountType: stringPtr("antigravity"),
+		AntigravityQuota: &keeperAntigravityQuota{Groups: []keeperAntigravityQuotaGroup{
+			{
+				ID:    "gemini-models",
+				Label: "Gemini models",
+				Buckets: []keeperAntigravityQuotaBucket{
+					{ID: "weekly", Label: "Weekly limit", Window: "weekly", RemainingFraction: 1, ResetTime: stringPtr(weeklyReset.Format(time.RFC3339))},
+					{ID: "five-hour", Label: "5 hour limit", Window: "5h", RemainingFraction: 0.1, ResetTime: stringPtr(fiveHourReset.Format(time.RFC3339))},
+				},
+			},
+		}},
+	}
+	insertKeeperWindowUsageRecord(t, app, keeperWindowUsageSeed{
+		Dedupe:       "antigravity-current",
+		Timestamp:    now.Add(-time.Hour),
+		Source:       "janet@example.com",
+		InputTokens:  40,
+		OutputTokens: 10,
+	})
+
+	usages, err := app.computeKeeperQuotaWindowUsages(context.Background(), []keeperAccount{account}, now)
+	if err != nil {
+		t.Fatalf("compute antigravity window usages: %v", err)
+	}
+	pair := usages[account.Name]
+	for label, usage := range map[string]*keeperQuotaWindowUsage{"five-hour": pair.Primary, "weekly": pair.Secondary} {
+		if usage == nil || usage.Records != 1 || usage.TotalTokens != 50 {
+			t.Fatalf("%s usage = %#v, want one record and 50 tokens", label, usage)
+		}
+		if math.Abs(usage.EstimatedCostUSD-0.00006) > 0.00000001 {
+			t.Fatalf("%s estimated cost = %.8f, want 0.00006000", label, usage.EstimatedCostUSD)
+		}
 	}
 }
 
