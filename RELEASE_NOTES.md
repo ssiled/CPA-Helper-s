@@ -1,27 +1,26 @@
-# CPA-Helper 0.3.32
+# CPA-Helper 0.3.33
 
-本次发布修复 API 密钥页“请求测试”的用量归因，并保留号池用户可见范围功能。
+本次发布补齐 Antigravity 账号的真实分组额度查询与额度条展示。
 
-## 请求测试归因
+## Antigravity 额度
 
-- 请求测试现在登记 Helper 请求 ID 和 CPA 响应请求 ID。
-- usage 记录可正确恢复实际用户昵称和 API KEY 描述，不再显示“未知”。
-- 登记包含模型、接口、开始/完成时间和状态码，兼容 CPA 返回自有请求 ID 的情况。
+- 按 CPA 管理面板的实际契约调用 `retrieveUserQuotaSummary`，不再只显示 `loadCodeAssist` 返回的 AI Credits。
+- 读取认证文件中的 `project_id`，并兼容 `projectId`、`cloudaicompanionProject` 等项目字段。
+- 支持 Gemini 模型、Claude 和 GPT 模型等分组，以及 5 小时、日、周、月额度窗口。
+- 保存额度百分比、刷新时间和分组说明；刷新失败时保留上一次成功数据。
 
-## 号池可见范围
+## 页面展示
 
-- 支持“仅管理员”“全部用户”“指定用户”三种模式。
-- “指定用户”模式保留逐用户授权能力，并要求至少选择一个用户。
-- 现有号池保持原权限：已有授权用户的号池迁移为“指定用户”，空授权号池迁移为“仅管理员”。
+- 账号表格直接显示 Antigravity 分组额度条。
+- 进度条卡片和圆环卡片均显示 Antigravity 各额度窗口。
+- 旧 AI Credits 文本仅作为未取得分组额度时的兼容兜底。
 
-## 后端权限
+## 数据迁移
 
-- 普通用户只能查询并绑定自己有权查看的号池。
-- “全部用户”号池无需逐个添加用户即可用于新建 API Key。
-- 缩小可见范围时，自动撤销失去权限用户的现有号池绑定。
-- 渠道状态响应按当前用户的号池可见范围过滤，管理员仍可查看全部号池。
+- 新增迁移 `202607180003`，持久化 Antigravity 分组额度数据。
+- 升级后刷新一次 Antigravity 账号即可显示额度条。
 
 ## 验证
 
-- 后端：`go test ./...`、`go vet ./...`
+- 后端：`go test ./...`、`go build ./cmd/cpa-helper`
 - 前端：`npm.cmd run build`、`npm.cmd run lint`、`npm.cmd run test:i18n`
