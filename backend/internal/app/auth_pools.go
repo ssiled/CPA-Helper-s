@@ -2193,33 +2193,24 @@ func (a *App) listCPAProviderChannels(ctx context.Context) ([]keeperAccount, err
 		}
 		provider := openAICompatibilityProviderKey(name)
 		models := cpaOpenAICompatibilityModels(channel.Models)
-		add := func(authID string, disabled bool) {
-			authID = strings.TrimSpace(authID)
-			if authID == "" {
-				return
-			}
-			display := "CPA AI 提供商 · " + name
-			accountType := "openai-compatible"
-			providerValue := provider
-			source := "ai_provider"
-			nameValue := display
-			accounts = append(accounts, keeperAccount{
-				Name:        authID,
-				DisplayName: &nameValue,
-				AccountType: &accountType,
-				Provider:    &providerValue,
-				Source:      &source,
-				Models:      append([]string(nil), models...),
-				Disabled:    disabled || channel.Disabled,
-			})
+		credentialCount := len(channel.APIKeyEntries)
+		if credentialCount == 0 {
+			credentialCount = 1
 		}
-		if len(channel.APIKeyEntries) == 0 {
-			add(channel.AuthID, channel.Disabled)
-			continue
-		}
-		for _, entry := range channel.APIKeyEntries {
-			add(entry.AuthID, entry.Disabled)
-		}
+		display := "CPA AI 提供商 · " + name
+		accountType := "openai-compatible"
+		providerValue := provider
+		source := "ai_provider"
+		accounts = append(accounts, keeperAccount{
+			Name:            "cpa-provider:" + provider,
+			DisplayName:     &display,
+			CredentialCount: credentialCount,
+			AccountType:     &accountType,
+			Provider:        &providerValue,
+			Source:          &source,
+			Models:          append([]string(nil), models...),
+			Disabled:        channel.Disabled,
+		})
 	}
 	return accounts, nil
 }

@@ -431,6 +431,7 @@ export interface AuthPoolBindingPayload {
 export interface CodexKeeperAccount {
   name: string
   display_name?: string | null
+  credential_count?: number
   email: string | null
   account_type: string | null
   provider?: string | null

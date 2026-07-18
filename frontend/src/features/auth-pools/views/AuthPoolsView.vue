@@ -40,6 +40,8 @@ const apiKeyProviderOptions = [
   { label: 'Grok / xAI API Key', value: 'grok' },
 ]
 
+const accountByName = computed(() => new Map(accounts.value.map((account) => [account.name, account])))
+
 const accountOptions = computed(() => accounts.value.map((account) => ({
   label: accountLabel(account),
   value: account.name,
@@ -58,23 +60,28 @@ interface ProviderChannelOption extends SelectOption {
 }
 
 const providerChannelOptions = computed<ProviderChannelOption[]>(() => {
-  const channels = new Map<string, { channelName: string; authIDs: string[]; total: number; models: Set<string> }>()
+  const channels = new Map<string, { channelName: string; authIDs: string[]; active: number; total: number; models: Set<string> }>()
   for (const account of accounts.value) {
     if (account.source !== 'ai_provider' || !account.provider) continue
     const current = channels.get(account.provider) ?? {
       channelName: providerChannelName(account),
       authIDs: [],
+      active: 0,
       total: 0,
       models: new Set<string>(),
     }
-    current.total += 1
-    if (!account.disabled && (!account.last_status_code || account.last_status_code < 400)) current.authIDs.push(account.name)
+    const credentialCount = Math.max(1, account.credential_count ?? 1)
+    current.total += credentialCount
+    if (!account.disabled && (!account.last_status_code || account.last_status_code < 400)) {
+      current.active += credentialCount
+      current.authIDs.push(account.name)
+    }
     for (const model of account.models ?? []) current.models.add(model)
     channels.set(account.provider, current)
   }
   return Array.from(channels.entries())
     .map(([provider, channel]) => {
-      const active = channel.authIDs.length
+      const active = channel.active
       const models = channel.models.size
       return {
         value: provider,
@@ -93,8 +100,7 @@ const providerChannelOptions = computed<ProviderChannelOption[]>(() => {
 const selectedProviderChannelTags = computed(() => {
   const selected = new Set(selectedAuthIDs.value)
   return providerChannelOptions.value
-    .map((channel) => ({ ...channel, selected: channel.authIDs.filter((authID) => selected.has(authID)).length }))
-    .filter((channel) => channel.selected > 0)
+    .filter((channel) => channel.authIDs.some((authID) => selected.has(authID)))
 })
 
 const accountTypeOptions = computed(() => Array.from(new Set([
@@ -117,7 +123,7 @@ const healthyAuthIDs = computed(() => accounts.value.filter((account) => !accoun
 const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
   { title: t('ID', 'ID'), key: 'id' },
-  { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(row.auth_ids.length + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
+  { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(manualAccountCount(row.auth_ids) + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
   { title: t('可见范围', 'Visibility'), key: 'visibility', render: (row) => visibilityLabel(row) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
@@ -150,7 +156,7 @@ function hButton(label: string, onClick: () => void, type: 'default' | 'error' =
 }
 
 function accountStatus(id: string): string {
-  const account = accounts.value.find((item) => item.name === id)
+  const account = accountByName.value.get(id)
   if (!account) return '\u672a\u77e5'
   if (account.disabled) return '\u7981\u7528'
   if (account.last_status_code && account.last_status_code >= 400) return `\u5f02\u5e38 ${account.last_status_code}`
@@ -178,7 +184,7 @@ function providerChannelName(account: CodexKeeperAccount): string {
 }
 
 function accountTagLabel(id: string): string {
-  const account = accounts.value.find((item) => item.name === id)
+  const account = accountByName.value.get(id)
   return account?.source === 'ai_provider' ? providerChannelName(account) : id
 }
 
@@ -205,6 +211,13 @@ function selectAccountsByType() {
   const accountType = selectedBatchType.value.trim().toLowerCase()
   if (!accountType) return
   selectedAccountTypes.value = Array.from(new Set([...selectedAccountTypes.value, accountType]))
+}
+
+function manualAccountCount(authIDs: string[]): number {
+  return authIDs.reduce((total, authID) => {
+    const account = accountByName.value.get(authID)
+    return total + Math.max(1, account?.credential_count ?? 1)
+  }, 0)
 }
 
 function selectProviderChannel() {
@@ -400,7 +413,7 @@ onMounted(refresh)
             <p class="form-help">{{ t('按渠道加入其全部活跃密钥；已停用渠道仅显示，不参与号池调度。', 'Adds every active key from the channel; disabled channels remain visible and are not scheduled.') }}</p>
             <div v-if="selectedProviderChannelTags.length" class="selected-type-rules">
               <NTag v-for="channel in selectedProviderChannelTags" :key="channel.value" size="small" closable type="success" @close="removeProviderChannel(channel.value)">
-                {{ channel.channelName }} · {{ channel.selected }}/{{ channel.active }} {{ t('已选择', 'selected') }}
+                {{ channel.channelName }} · {{ channel.active }} {{ t('个活跃密钥已加入', 'active keys added') }}
               </NTag>
             </div>
           </div>

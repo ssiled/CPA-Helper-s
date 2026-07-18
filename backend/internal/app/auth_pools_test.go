@@ -500,12 +500,12 @@ func TestListAuthPoolAccountsIncludesCPAProviderChannels(t *testing.T) {
 	for _, account := range accounts {
 		byName[account.Name] = account
 	}
-	first, ok := byName["openai-compat-mimo-1"]
+	first, ok := byName["cpa-provider:openai-compatible-mimo"]
 	if !ok || stringPtrValue(first.Provider) != "openai-compatible-mimo" || stringPtrValue(first.Source) != "ai_provider" || !reflect.DeepEqual(first.Models, []string{"mimo", "mimo-v2"}) {
 		t.Fatalf("provider channel = %#v", first)
 	}
-	if second, ok := byName["openai-compat-mimo-2"]; !ok || !second.Disabled {
-		t.Fatalf("disabled provider channel = %#v", second)
+	if first.CredentialCount != 2 {
+		t.Fatalf("provider credential count = %d, want 2", first.CredentialCount)
 	}
 	if _, err := app.listAuthPoolAccounts(t.Context()); err != nil {
 		t.Fatalf("cached listAuthPoolAccounts failed: %v", err)
@@ -553,7 +553,7 @@ func TestUpsertAuthPoolPersistsProviderAndUsesConfiguredModels(t *testing.T) {
 	}
 	defer app.Close()
 	configureKeeperTestCPA(t, app, cpa.URL, nil)
-	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{ID: "mimo", Name: "Mimo", AuthIDs: []string{"openai-compat-mimo-1"}})
+	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{ID: "mimo", Name: "Mimo", AuthIDs: []string{"cpa-provider:openai-compatible-mimo"}})
 	if err != nil {
 		t.Fatalf("upsertAuthPool failed: %v", err)
 	}

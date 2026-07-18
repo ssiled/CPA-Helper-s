@@ -114,6 +114,7 @@ type keeperPriorityUpdateRequest struct {
 type keeperAccount struct {
 	Name                   string                  `json:"name"`
 	DisplayName            *string                 `json:"display_name,omitempty"`
+	CredentialCount        int                     `json:"credential_count,omitempty"`
 	Email                  *string                 `json:"email"`
 	AuthIndex              *string                 `json:"auth_index"`
 	AccountType            *string                 `json:"account_type"`
@@ -144,6 +145,7 @@ type keeperAccount struct {
 type keeperAccountResponse struct {
 	Name                   string                          `json:"name"`
 	DisplayName            *string                         `json:"display_name,omitempty"`
+	CredentialCount        int                             `json:"credential_count,omitempty"`
 	Email                  *string                         `json:"email"`
 	AccountType            *string                         `json:"account_type"`
 	Provider               *string                         `json:"provider,omitempty"`
@@ -1097,6 +1099,7 @@ func keeperAccountResponses(accounts []keeperAccount, windowUsages map[string]ke
 		responses = append(responses, keeperAccountResponse{
 			Name:                   account.Name,
 			DisplayName:            account.DisplayName,
+			CredentialCount:        account.CredentialCount,
 			Email:                  account.Email,
 			AccountType:            account.AccountType,
 			Provider:               account.Provider,
