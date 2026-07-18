@@ -185,6 +185,9 @@ export interface CodexKeeperSettings {
   enable_credential_websockets: boolean
   auto_start_daemon: boolean
   priority_rules: CodexKeeperPriorityRule[]
+  auth_pool_priority_mode?: boolean
+  auth_pool_priority_error?: string
+  auth_pool_priority_synced_at?: string | null
 }
 
 export interface CodexKeeperSettingsUpdatePayload {
@@ -317,6 +320,9 @@ export interface AuthPoolPluginEvent {
   selected_state?: string
   candidate_count: number
   matched_count: number
+  input_candidates?: number
+  pool_matched_candidates?: number
+  eligible_candidates?: number
   matched_auth_ids?: string[]
   account_types?: string[]
   candidates?: AuthPoolPluginEventCandidate[]

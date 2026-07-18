@@ -38,10 +38,13 @@ type authPoolPluginEvent struct {
 	UserID           int                            `json:"user_id,omitempty"`
 	Username         string                         `json:"username,omitempty"`
 	SelectedAuthID   string                         `json:"selected_auth_id,omitempty"`
-	SelectedPriority int                            `json:"selected_priority,omitempty"`
+	SelectedPriority *int                           `json:"selected_priority,omitempty"`
 	SelectedState    string                         `json:"selected_state,omitempty"`
 	CandidateCount   int                            `json:"candidate_count"`
 	MatchedCount     int                            `json:"matched_count"`
+	InputCandidates  int                            `json:"input_candidates"`
+	PoolMatched      int                            `json:"pool_matched_candidates"`
+	Eligible         int                            `json:"eligible_candidates"`
 	MatchedAuthIDs   []string                       `json:"matched_auth_ids,omitempty"`
 	AccountTypes     []string                       `json:"account_types,omitempty"`
 	Candidates       []authPoolPluginEventCandidate `json:"candidates,omitempty"`

@@ -121,7 +121,7 @@ const columns = computed<DataTableColumns<AuthPoolPluginEvent>>(() => [
     title: t('候选', 'Candidates'),
     key: 'candidate_count',
     width: 104,
-    render: (row) => `${formatInteger(row.matched_count)} / ${formatInteger(row.candidate_count)}`,
+     render: (row) => `${formatInteger(row.pool_matched_candidates ?? row.matched_count)} / ${formatInteger(row.eligible_candidates ?? row.matched_count)} / ${formatInteger(row.input_candidates ?? row.candidate_count)}`,
   },
   {
     title: t('原因 / HTTP', 'Reason / HTTP'),
@@ -181,6 +181,10 @@ function reasonLabel(reason?: string): string {
     auth_pool_unavailable: t('号池不可用', 'Pool unavailable'),
     model_not_allowed: t('模型不在号池范围', 'Model outside pool'),
     no_eligible_candidates: t('没有匹配账号', 'No eligible candidates'),
+    no_input_candidates: t('宿主未传入候选账号', 'Host supplied no candidates'),
+    pool_no_matching_candidates: t('号池成员匹配为 0', 'No candidates matched the pool'),
+    pool_candidates_unavailable: t('号池成员均不可用', 'Pool candidates are unavailable'),
+    all_candidates_quota_exhausted: t('号池成员额度均已耗尽', 'All pool candidates exhausted quota'),
     auth_pool_busy: t('号池并发已满', 'Pool concurrency full'),
     no_available_candidates: t('没有可用账号', 'No available candidates'),
   }
@@ -320,7 +324,7 @@ onBeforeUnmount(() => {
         <section class="detail-section">
           <div class="detail-section-heading">
             <span class="detail-label">{{ t('候选账号样本', 'Candidate account sample') }}</span>
-            <strong>{{ selectedEvent.matched_count }} / {{ selectedEvent.candidate_count }}</strong>
+            <strong>{{ selectedEvent.pool_matched_candidates ?? selectedEvent.matched_count }} / {{ selectedEvent.eligible_candidates ?? selectedEvent.matched_count }} / {{ selectedEvent.input_candidates ?? selectedEvent.candidate_count }}</strong>
           </div>
           <div v-if="selectedEvent.candidates?.length" class="candidate-list">
             <article v-for="candidate in selectedEvent.candidates" :key="candidate.id" class="candidate-row">

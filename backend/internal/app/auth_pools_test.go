@@ -477,6 +477,8 @@ func TestUpdateAuthPoolProxyConfigWritesCodexConcurrencyLimits(t *testing.T) {
 				t.Fatalf("decode limits payload: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-priorities":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"scheduler_priorities": true}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"pools":       []any{},
@@ -561,7 +563,7 @@ func TestSyncAuthPoolModelsKeepsLastSnapshotOnPartialFailure(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
-			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{
+			_ = json.NewEncoder(w).Encode(map[string]any{"scheduler_priorities": true, "pools": []map[string]any{{
 				"id": "paid", "name": "Paid", "auth_ids": []string{"auth-a", "auth-b"}, "models": []string{"last-good"}, "enabled": true,
 			}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
@@ -584,6 +586,8 @@ func TestSyncAuthPoolModelsKeepsLastSnapshotOnPartialFailure(t *testing.T) {
 				membershipPosts++
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-priorities":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"scheduler_priorities": true}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -636,7 +640,7 @@ func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
-			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []map[string]any{{
+			_ = json.NewEncoder(w).Encode(map[string]any{"scheduler_priorities": true, "pools": []map[string]any{{
 				"id": "002", "name": "plus/team", "account_types": []string{"k12", "team", "plus"},
 				"resolved_auth_ids": []string{"old.json"}, "models": []string{"gpt-5.5"}, "enabled": true,
 			}}})
@@ -693,8 +697,8 @@ func TestSyncAuthPoolResolvedAuthIDsRefreshesNewDynamicAccount(t *testing.T) {
 		t.Fatalf("resolved IDs = %#v, want new.json", resolved["002"])
 	}
 	overrides, ok := priorityPayload["auth_priority_overrides"].(map[string]any)
-	if !ok || overrides["new.json"] != float64(50) {
-		t.Fatalf("priority overrides = %#v, want new.json=50", priorityPayload["auth_priority_overrides"])
+	if !ok || overrides["new_json"] != float64(50) {
+		t.Fatalf("priority overrides = %#v, want new_json=50", priorityPayload["auth_priority_overrides"])
 	}
 	if replace, _ := priorityPayload["replace_overrides"].(bool); !replace {
 		t.Fatalf("replace_overrides = %#v, want true", priorityPayload["replace_overrides"])
@@ -740,6 +744,139 @@ func TestCacheAuthPoolPrioritiesReplacesRemovedOverrides(t *testing.T) {
 	app.authPoolPriorityMu.RUnlock()
 	if exists {
 		t.Fatal("stale auth priority override remained after a full status refresh")
+	}
+}
+
+func TestSyncAuthPoolPrioritiesRejectsOldPlugin(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"pools": []any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer cpa.Close()
+	app, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	err = app.syncAuthPoolSchedulerPriorities(t.Context(), nil)
+	if err == nil || !strings.Contains(err.Error(), "version is too old") {
+		t.Fatalf("sync error = %v, want old plugin error", err)
+	}
+	enabled, statusError, _ := app.authPoolPriorityStatus()
+	if enabled || !strings.Contains(statusError, "version is too old") {
+		t.Fatalf("priority status = enabled:%v error:%q", enabled, statusError)
+	}
+}
+
+func TestSyncAuthPoolPrioritiesFailureDoesNotNormalizeHostPriority(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var priorityPatches atomic.Int32
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"scheduler_priorities": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-priorities":
+			http.Error(w, "persist failed", http.StatusInternalServerError)
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/fields":
+			priorityPatches.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+	app, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	priority := 50
+	err = app.syncAuthPoolSchedulerPriorities(t.Context(), []keeperAccount{{Name: "manual.json", AccountType: stringPtr("k12"), Priority: &priority}})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("sync error = %v, want HTTP 500", err)
+	}
+	if priorityPatches.Load() != 0 {
+		t.Fatalf("host priority patches = %d, want 0", priorityPatches.Load())
+	}
+}
+
+func TestSyncAuthPoolPrioritiesRetainsPersistedOverride(t *testing.T) {
+	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
+	var syncedOverrides map[string]int
+	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"scheduler_priorities":    true,
+				"auth_priority_overrides": map[string]int{"manual_json": 50},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/plugins/cpa-auth-pool/auth-priorities":
+			var payload struct {
+				Overrides map[string]int `json:"auth_priority_overrides"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			syncedOverrides = payload.Overrides
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"scheduler_priorities": true, "auth_priority_overrides": payload.Overrides}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer cpa.Close()
+	app, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	configureKeeperTestCPA(t, app, cpa.URL, nil)
+	zero := 0
+	if err := app.syncAuthPoolSchedulerPriorities(t.Context(), []keeperAccount{{Name: "manual.json", AccountType: stringPtr("k12"), Priority: &zero}}); err != nil {
+		t.Fatal(err)
+	}
+	if syncedOverrides["manual_json"] != 50 {
+		t.Fatalf("synced overrides = %#v, want retained manual_json=50", syncedOverrides)
+	}
+}
+
+func TestApplyAuthPoolLogicalPrioritiesNormalizesAliases(t *testing.T) {
+	app := &App{}
+	app.cacheAuthPoolPriorities(
+		map[string]string{"burenbigbie4105_outlook_com_json": "free"},
+		map[string]int{"free": 5},
+		map[string]int{"burenbigbie4105_outlook_com_json": 50},
+		true,
+	)
+	zero := 0
+	accounts := []keeperAccount{{Name: "root_cli_proxy_api_burenbigbie4105_outlook_com_json", Priority: &zero}}
+	app.applyAuthPoolLogicalPriorities(accounts)
+	if accounts[0].Priority == nil || *accounts[0].Priority != 50 {
+		t.Fatalf("logical priority = %v, want 50", accounts[0].Priority)
+	}
+}
+
+func TestApplyKeeperPriorityPolicyRestoresPluginHostPriorityToZero(t *testing.T) {
+	app := &App{}
+	app.cacheAuthPoolPriorities(nil, nil, map[string]int{"manual_json": 50}, true)
+	cfg, err := defaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.CodexKeeper.DryRun = true
+	minusOne := -1
+	restore := 50
+	action := app.applyKeeperPriorityPolicy(t.Context(), cfg, "manual.json", stringPtr("k12"), &minusOne, &restore, keeperUsageInfo{})
+	if action == nil || action.Priority == nil || *action.Priority != 0 {
+		t.Fatalf("restore action = %#v, want host priority 0", action)
 	}
 }
 

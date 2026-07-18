@@ -80,6 +80,8 @@ type App struct {
 	authPoolResolvedNext    time.Time
 	authPoolPriorityMu      sync.RWMutex
 	authPoolPriorityMode    bool
+	authPoolPriorityError   string
+	authPoolPrioritySyncAt  *time.Time
 	authPoolAuthTypes       map[string]string
 	authPoolTypePriorities  map[string]int
 	authPoolAuthOverrides   map[string]int
@@ -198,6 +200,9 @@ func (a *App) startBackground(ctx context.Context) {
 	a.keeper.LoadPersistedState(ctx)
 	a.keeper.StartAutoIfConfigured()
 	a.channelStatus.Start()
+	// Reconcile plugin logical priorities after all runners are available so
+	// legacy host priorities are migrated before the first inspection request.
+	a.syncAuthPoolResolvedAuthIDsAsync()
 }
 
 func (a *App) Close() {
@@ -825,7 +830,7 @@ func normalizePriorityRules(input map[string]int) map[string]int {
 	rules := clonePriorityRules(defaultKeeperPriorityRules)
 	for rawKey, rawValue := range input {
 		key := strings.ToLower(strings.TrimSpace(rawKey))
-		if key != "" && rawValue >= 0 && rawValue <= 20 {
+		if key != "" && rawValue >= 0 && rawValue <= 100 {
 			rules[key] = rawValue
 		}
 	}

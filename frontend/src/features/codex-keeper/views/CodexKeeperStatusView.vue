@@ -108,6 +108,7 @@ const isBulkRefreshing = ref(false)
 const actingActions = ref<Set<string>>(new Set())
 const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
+const authPoolPriorityMode = ref(false)
 const keeperStatus = ref<CodexKeeperStatus | null>(null)
 const selectedAccount = ref<CodexKeeperAccount | null>(null)
 const selectedDisabledAccountKeys = ref<DataTableRowKey[]>([])
@@ -564,7 +565,10 @@ const canSubmitPriority = computed(() => {
   if (value === null || !Number.isInteger(value)) {
     return false
   }
-  return priorityDialog.mode === 'low' ? value < -1 : value > 20
+  if (priorityDialog.mode === 'low') {
+    return !authPoolPriorityMode.value && value < -1
+  }
+  return value > 20 && value <= 100
 })
 const priorityDialogTitle = computed(() => t('修改优先级', 'Change Priority'))
 const priorityDialogHint = computed(() => {
@@ -572,7 +576,7 @@ const priorityDialogHint = computed(() => {
     return t('手动低优先级必须小于 -1，巡检永远不会自动调整。', 'Manual low priority must be less than -1. Inspection will never adjust it automatically.')
   }
   if (priorityDialog.mode === 'high') {
-    return t('手动优先必须大于 20；号池插件会保存该账号覆盖，CPA 宿主 priority 仍保持 0。额度耗尽时宿主临时降为 -1，恢复后回到 0。', 'Manual priority must be greater than 20. The auth-pool plugin stores the account override while CPA host priority stays at 0. Quota exhaustion temporarily lowers the host to -1 and recovery returns it to 0.')
+    return t('手动优先必须在 21 ~ 100；号池插件会保存该账号覆盖，CPA 宿主 priority 仍保持 0。额度耗尽时宿主临时降为 -1，恢复后回到 0。', 'Manual priority must be 21-100. The auth-pool plugin stores the account override while CPA host priority stays at 0. Quota exhaustion temporarily lowers the host to -1 and recovery returns it to 0.')
   }
   const account = priorityDialog.account
   const value = account ? defaultPriority(account) : null
@@ -585,14 +589,14 @@ const priorityDialogBounds = computed(() => {
     return { max: -2 }
   }
   if (priorityDialog.mode === 'high') {
-    return { min: 21 }
+    return { min: 21, max: 100 }
   }
   return {}
 })
 const priorityModeOptions = computed(() => {
   const defaultValue = priorityDialog.account ? defaultPriority(priorityDialog.account) : null
   return [
-    { label: t('手动低优先 (< -1)', 'Manual Low Priority (< -1)'), value: 'low' },
+    ...(authPoolPriorityMode.value ? [] : [{ label: t('手动低优先 (< -1)', 'Manual Low Priority (< -1)'), value: 'low' as const }]),
     { label: t('手动优先 (> 20)', 'Manual Priority (> 20)'), value: 'high' },
     {
       label: defaultValue === null
@@ -1199,9 +1203,12 @@ function renderAccountTypeCell(account: CodexKeeperAccount) {
 
 function renderAccountPriorityCell(account: CodexKeeperAccount) {
   const priorityLabel = formatInteger(accountPriority(account))
+  const label = authPoolPriorityMode.value
+    ? t('号池调度优先级', 'Pool Scheduling Priority')
+    : t('宿主优先级', 'Host Priority')
   return h(
     'span',
-    { class: ['account-table-chip', 'is-priority'], title: t(`优先级 ${priorityLabel}`, `Priority ${priorityLabel}`) },
+    { class: ['account-table-chip', 'is-priority'], title: `${label} ${priorityLabel}` },
     priorityLabel,
   )
 }
@@ -1240,6 +1247,7 @@ async function loadAccounts() {
     ])
     accounts.value = accountsResponse.items
     priorityRules.value = settings.priority_rules
+    authPoolPriorityMode.value = settings.auth_pool_priority_mode === true
     keeperStatus.value = nextStatus
   } catch (error) {
     message.error(errorText(error, '加载账号状态失败', 'Failed to load account status'))
@@ -1670,7 +1678,7 @@ const baseColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
     render: (row) => renderAccountTypeCell(row),
   },
   {
-    title: t('优先级', 'Priority'),
+    title: authPoolPriorityMode.value ? t('号池优先级', 'Pool Priority') : t('宿主优先级', 'Host Priority'),
     key: 'priority',
     width: 88,
     render: (row) => renderAccountPriorityCell(row),
@@ -1892,7 +1900,11 @@ onBeforeUnmount(() => {
             </NButton>
           </div>
         </div>
-        <p class="page-subtitle">{{ t('查看 Codex auth file 的健康、额度和优先级维护结果', 'View Codex auth file health, quota, and priority maintenance results') }}</p>
+        <p class="page-subtitle">
+          {{ authPoolPriorityMode
+            ? t('显示号池调度逻辑优先级；CLIProxyAPI 宿主中可用账号保持 0，额度耗尽时为 -1。', 'Shows pool scheduling logical priorities. Available CLIProxyAPI host accounts stay at 0 and quota-exhausted accounts use -1.')
+            : t('当前未启用双层优先级，页面显示 CLIProxyAPI 宿主 priority。', 'Dual-layer priority is not active; this page shows CLIProxyAPI host priority.') }}
+        </p>
       </div>
     </div>
 
@@ -2087,7 +2099,7 @@ onBeforeUnmount(() => {
               :type="isAccountSortActive('priority') ? 'primary' : 'default'"
               @click="toggleAccountSort('priority')"
             >
-              {{ t('优先级', 'Priority') }} {{ accountSortMark('priority') }}
+              {{ authPoolPriorityMode ? t('号池优先级', 'Pool Priority') : t('宿主优先级', 'Host Priority') }} {{ accountSortMark('priority') }}
             </NButton>
             <NButton
               secondary
@@ -2283,7 +2295,7 @@ onBeforeUnmount(() => {
                   <strong>{{ accountTypeLabel(account.account_type) }}</strong>
                 </div>
                 <div class="account-card-meta-item">
-                  <span>{{ t('优先级', 'Priority') }}</span>
+                  <span>{{ authPoolPriorityMode ? t('号池优先级', 'Pool Priority') : t('宿主优先级', 'Host Priority') }}</span>
                   <strong>{{ formatInteger(accountPriority(account)) }}</strong>
                 </div>
                 <div class="account-card-meta-item">
@@ -2422,7 +2434,7 @@ onBeforeUnmount(() => {
           <NDescriptionsItem :label="t('启用状态', 'Enabled Status')">
             {{ selectedAccount.disabled ? t('已禁用', 'Disabled') : t('启用中', 'Enabled') }}
           </NDescriptionsItem>
-          <NDescriptionsItem :label="t('当前优先级', 'Current Priority')">
+          <NDescriptionsItem :label="authPoolPriorityMode ? t('当前号池调度优先级', 'Current Pool Scheduling Priority') : t('当前宿主优先级', 'Current Host Priority')">
             {{ accountPriority(selectedAccount) }}
           </NDescriptionsItem>
           <NDescriptionsItem :label="t('类型默认优先级', 'Type Default Priority')">

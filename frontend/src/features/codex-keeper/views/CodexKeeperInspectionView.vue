@@ -67,6 +67,9 @@ const isActing = ref(false)
 const status = ref<CodexKeeperStatus | null>(null)
 const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
+const authPoolPriorityMode = ref(false)
+const authPoolPriorityError = ref('')
+const authPoolPrioritySyncedAt = ref<string | null>(null)
 const availableProviders = ref<string[]>(['codex', 'antigravity', 'gemini', 'grok', 'claude'])
 const nextRunTimes = ref<string[]>([])
 const schedulePreviewError = ref('')
@@ -202,6 +205,9 @@ function applySettings(nextSettings: Awaited<ReturnType<typeof getCodexKeeperSet
   nextRunTimes.value = nextSettings.next_run_times
   schedulePreviewError.value = ''
   priorityRules.value = nextSettings.priority_rules.map((rule) => ({ ...rule }))
+  authPoolPriorityMode.value = nextSettings.auth_pool_priority_mode === true
+  authPoolPriorityError.value = nextSettings.auth_pool_priority_error ?? ''
+  authPoolPrioritySyncedAt.value = nextSettings.auth_pool_priority_synced_at ?? null
 }
 
 function isQuotaExhaustedAccount(account: CodexKeeperAccount): boolean {
@@ -251,7 +257,7 @@ function normalizedRules(): CodexKeeperPriorityRule[] {
         return false
       }
       seen.add(rule.account_type)
-      return rule.priority >= 0 && rule.priority <= 20
+      return rule.priority >= 0 && rule.priority <= 100
     })
 }
 
@@ -262,7 +268,7 @@ async function saveSettings() {
     return
   }
   if (rules.length !== priorityRules.value.length) {
-    message.error(t('账号类型不可为空或重复，优先级必须在 0 ~ 20', 'Account types cannot be empty or duplicated, and priorities must be 0-20'))
+    message.error(t('账号类型不可为空或重复，插件逻辑优先级必须在 0 ~ 100', 'Account types cannot be empty or duplicated, and plugin logical priorities must be 0-100'))
     return
   }
   isSaving.value = true
@@ -487,7 +493,7 @@ const priorityColumns = computed<DataTableColumns<CodexKeeperPriorityRule>>(() =
       }),
   },
   {
-    title: t('优先级', 'Priority'),
+    title: t('插件逻辑优先级', 'Plugin Logical Priority'),
     key: 'priority',
     width: 112,
     render: (row) =>
@@ -495,7 +501,7 @@ const priorityColumns = computed<DataTableColumns<CodexKeeperPriorityRule>>(() =
         size: 'small',
         value: row.priority,
         min: 0,
-        max: 20,
+        max: 100,
         onUpdateValue: (value: number | null) => {
           row.priority = value ?? 0
         },
@@ -778,12 +784,19 @@ onBeforeUnmount(() => {
       <section class="panel priority-rules-panel">
         <div class="panel-inner">
           <div class="section-heading">
-            <h2 class="section-title">{{ t('账号类型优先级', 'Account Type Priorities') }}</h2>
+            <h2 class="section-title">{{ t('账号类型插件逻辑优先级', 'Account Type Plugin Logical Priorities') }}</h2>
             <NButton size="small" secondary @click="addRule">{{ t('新增规则', 'Add Rule') }}</NButton>
           </div>
           <p class="section-hint">
-            {{ t('号池插件启用时，这些值用于插件内部排序，数值越高越优先；CPA 中的活跃账号统一保持 priority 0。账号手动优先级超过 20 时作为插件账号覆盖保存。', 'When the auth-pool plugin is enabled, these values control plugin-internal ordering; higher values win. Active CPA accounts stay at priority 0. Manual account priorities above 20 are stored as plugin overrides.') }}
+            {{ t('这些数值只决定号池内部调度顺序，数值越高越优先。插件同步成功时，CLIProxyAPI 中可用账号的宿主 priority 统一为 0，额度耗尽时为 -1；单账号覆盖优先于账号类型规则。', 'These values only control ordering inside an auth pool; higher values win. After a successful plugin sync, available CLIProxyAPI host priorities stay at 0 and quota-exhausted accounts use -1. Per-account overrides win over account type rules.') }}
           </p>
+          <div class="priority-sync-state">
+            <NTag size="small" :type="authPoolPriorityMode ? 'success' : (authPoolPriorityError ? 'error' : 'default')">
+              {{ authPoolPriorityMode ? t('插件逻辑优先级已同步', 'Plugin logical priorities synced') : t('当前使用宿主优先级兼容模式', 'Using host priority compatibility mode') }}
+            </NTag>
+            <span v-if="authPoolPrioritySyncedAt" class="section-hint">{{ formatDateTime(authPoolPrioritySyncedAt) }}</span>
+            <span v-if="authPoolPriorityError" class="section-hint is-error">{{ authPoolPriorityError }}</span>
+          </div>
           <NDataTable
             class="priority-table"
             size="small"
@@ -863,6 +876,18 @@ onBeforeUnmount(() => {
   color: var(--cpa-text-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.priority-sync-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.priority-sync-state .is-error {
+  color: var(--cpa-danger);
 }
 
 .inspection-status-card {

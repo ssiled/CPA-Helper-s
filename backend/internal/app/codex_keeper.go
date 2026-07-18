@@ -118,6 +118,7 @@ type keeperAccount struct {
 	AccountType            *string    `json:"account_type"`
 	Disabled               bool       `json:"disabled"`
 	Priority               *int       `json:"priority"`
+	LegacyRestorePriority  *int       `json:"-"`
 	PrimaryUsedPercent     *int       `json:"primary_used_percent"`
 	SecondaryUsedPercent   *int       `json:"secondary_used_percent"`
 	CreditsAmount          *float64   `json:"credits_amount"`
@@ -881,7 +882,7 @@ func (a *App) handleCodexKeeper(w http.ResponseWriter, r *http.Request) error {
 			if err != nil {
 				return err
 			}
-			writeJSON(w, http.StatusOK, keeperSettingsResponse(cfg))
+			writeJSON(w, http.StatusOK, a.keeperSettingsResponse(cfg))
 			return nil
 		}
 		if r.Method == http.MethodPut {
@@ -1023,12 +1024,13 @@ func (a *App) handleCodexKeeper(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-func keeperSettingsResponse(cfg AppConfig) map[string]any {
+func (a *App) keeperSettingsResponse(cfg AppConfig) map[string]any {
 	times, normalized, err := nextRunTimes(cfg.CodexKeeper.ScheduleCron, 5, time.Now())
 	if err != nil {
 		normalized = cfg.CodexKeeper.ScheduleCron
 		times = []time.Time{}
 	}
+	priorityMode, priorityError, prioritySyncedAt := a.authPoolPriorityStatus()
 	return map[string]any{
 		"cliaproxy_url":                        cfg.Collector.CLIProxyURL,
 		"management_key_set":                   strings.TrimSpace(cfg.Collector.ManagementKey) != "",
@@ -1047,6 +1049,9 @@ func keeperSettingsResponse(cfg AppConfig) map[string]any {
 		"enable_credential_websockets":         cfg.CodexKeeper.EnableCredentialWebsockets,
 		"auto_start_daemon":                    cfg.CodexKeeper.AutoStartDaemon,
 		"priority_rules":                       sortedPriorityRules(cfg.CodexKeeperPriorityRule),
+		"auth_pool_priority_mode":              priorityMode,
+		"auth_pool_priority_error":             priorityError,
+		"auth_pool_priority_synced_at":         apiDateTimePtr(prioritySyncedAt),
 	}
 }
 
@@ -1528,7 +1533,7 @@ func (a *App) updateKeeperSettings(w http.ResponseWriter, r *http.Request) error
 			if key == "" {
 				return validationError("账号类型不能为空")
 			}
-			if item.Priority < 0 || item.Priority > 20 {
+			if item.Priority < 0 || item.Priority > 100 {
 				return validationError("priority 超出范围")
 			}
 			rules[key] = item.Priority
@@ -1538,7 +1543,15 @@ func (a *App) updateKeeperSettings(w http.ResponseWriter, r *http.Request) error
 	if err := a.saveConfig(r.Context(), cfg); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, keeperSettingsResponse(cfg))
+	if payload.PriorityRules != nil {
+		accounts, listErr := a.listAuthPoolAccounts(r.Context())
+		if listErr != nil {
+			a.failAuthPoolPrioritySync(listErr)
+		} else if syncErr := a.syncAuthPoolSchedulerPriorities(r.Context(), accounts); syncErr != nil {
+			log.Printf("sync auth pool priorities after keeper settings update failed: %v", syncErr)
+		}
+	}
+	writeJSON(w, http.StatusOK, a.keeperSettingsResponse(cfg))
 	return nil
 }
 
@@ -1617,8 +1630,11 @@ func (a *App) executeKeeperRunWithOptions(ctx context.Context, options keeperRun
 		provider := keeperAuthProvider(item)
 		priorityAccounts = append(priorityAccounts, keeperAccountFromRemoteAuthFile(item, provider))
 	}
+	prioritySyncSucceeded := false
 	if err := a.syncAuthPoolSchedulerPriorities(ctx, priorityAccounts); err != nil {
 		logFn("同步号池插件优先级失败：" + err.Error())
+	} else {
+		prioritySyncSucceeded = true
 	}
 	filtered := make([]map[string]any, 0, len(authFiles))
 	remoteKnownNames := map[string]bool{}
@@ -1742,6 +1758,13 @@ func (a *App) executeKeeperRunWithOptions(ctx context.Context, options keeperRun
 			if err := a.recordKeeperRunAccount(ctx, runID, result); err != nil {
 				logFn("写入巡检账号历史失败：" + err.Error())
 			}
+		}
+	}
+	if prioritySyncSucceeded {
+		if refreshedAccounts, refreshErr := a.listAuthPoolAccounts(ctx); refreshErr != nil {
+			logFn("刷新号池插件账号类型失败：" + refreshErr.Error())
+		} else if syncErr := a.syncAuthPoolSchedulerPriorities(ctx, refreshedAccounts); syncErr != nil {
+			logFn("刷新号池插件逻辑优先级失败：" + syncErr.Error())
 		}
 	}
 	if options.Mode == "conditional" {
@@ -2750,7 +2773,8 @@ func (a *App) applyKeeperPriorityPolicy(ctx context.Context, cfg AppConfig, name
 		(usage.SecondaryUsedPercent != nil && *usage.SecondaryUsedPercent >= cfg.CodexKeeper.QuotaThreshold)
 	currentPriority := keeperEffectivePriority(priority)
 	next := keeperPriorityForType(accountType, cfg.CodexKeeperPriorityRule)
-	if a.authPoolPriorityModeEnabled() {
+	pluginPriorityMode := a.authPoolPriorityModeEnabled()
+	if pluginPriorityMode {
 		zero := 0
 		next = &zero
 	}
@@ -2762,7 +2786,7 @@ func (a *App) applyKeeperPriorityPolicy(ctx context.Context, cfg AppConfig, name
 		if restoreTo == nil {
 			restoreTo = next
 		}
-		if currentPriority > 20 {
+		if currentPriority > 20 && !pluginPriorityMode {
 			restoreTo = &currentPriority
 		}
 		if restoreTo == nil {
@@ -2783,7 +2807,10 @@ func (a *App) applyKeeperPriorityPolicy(ctx context.Context, cfg AppConfig, name
 	}
 	if currentPriority == -1 {
 		restoreTo := restorePriority
-		if restoreTo == nil {
+		if pluginPriorityMode {
+			zero := 0
+			restoreTo = &zero
+		} else if restoreTo == nil {
 			restoreTo = next
 		}
 		if restoreTo == nil {
@@ -3330,7 +3357,9 @@ func (a *App) listKeeperAccounts(ctx context.Context) ([]keeperAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		accounts = append(accounts, state.keeperAccount)
+		account := state.keeperAccount
+		account.LegacyRestorePriority = state.RestorePriority
+		accounts = append(accounts, account)
 	}
 	return accounts, rows.Err()
 }
@@ -3544,8 +3573,13 @@ func (a *App) deleteKeeperAccount(ctx context.Context, authName string) error {
 	if err := a.deleteKeeperRemoteAuthFile(ctx, cfg, authName); err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, `DELETE FROM codex_keeper_auth_states WHERE auth_name = ?`, authName)
-	return err
+	if _, err = a.db.ExecContext(ctx, `DELETE FROM codex_keeper_auth_states WHERE auth_name = ?`, authName); err != nil {
+		return err
+	}
+	if syncErr := a.syncAuthPoolResolvedAuthIDs(ctx); syncErr != nil {
+		log.Printf("cleanup auth pool priority data after deleting %s failed: %v", authName, syncErr)
+	}
+	return nil
 }
 
 func (a *App) bulkDeleteKeeperAccounts(w http.ResponseWriter, r *http.Request) error {
@@ -3591,21 +3625,24 @@ func (a *App) updateKeeperAccountPriority(ctx context.Context, authName string, 
 	hostPriority := priority
 	if pluginMode {
 		switch {
-		case priority > 20:
-			if err := a.updateAuthPoolPriorityOverride(ctx, authName, &priority); err != nil {
+		case priority < -1:
+			return validationError("号池插件模式下，账号宿主 priority 只能是 0 或额度耗尽时的 -1")
+		case keeperPriorityMatchesType(priority, state.AccountType, cfg.CodexKeeperPriorityRule):
+			if err := a.updateAuthPoolPriorityOverride(ctx, authName, nil); err != nil {
 				return err
 			}
 			hostPriority = 0
 		case priority >= 0:
-			if err := a.updateAuthPoolPriorityOverride(ctx, authName, nil); err != nil {
+			if err := a.updateAuthPoolPriorityOverride(ctx, authName, &priority); err != nil {
 				return err
 			}
 			hostPriority = 0
-		case priority < -1:
-			if err := a.updateAuthPoolPriorityOverride(ctx, authName, nil); err != nil {
-				return err
-			}
+		default:
+			return validationError("invalid plugin logical priority")
 		}
+	}
+	if !pluginMode {
+		hostPriority = priority
 	}
 	if err := a.setKeeperRemotePriority(ctx, cfg, authName, &hostPriority); err != nil {
 		return err
@@ -4057,7 +4094,15 @@ func keeperPriorityForType(accountType *string, rules map[string]int) *int {
 	return &value
 }
 
+func keeperPriorityMatchesType(priority int, accountType *string, rules map[string]int) bool {
+	expected := keeperPriorityForType(accountType, rules)
+	return expected != nil && *expected == priority
+}
+
 func validateKeeperPriority(priority int, accountType *string, rules map[string]int) error {
+	if priority > 100 {
+		return validationError("priority 不能大于 100")
+	}
 	if priority < -1 || priority > 20 {
 		return nil
 	}
