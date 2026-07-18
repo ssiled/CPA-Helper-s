@@ -126,9 +126,22 @@ func (a *App) handleCPAOAuthCallback(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return err
 	}
+	if !cpaOAuthCallbackSucceeded(result) {
+		return appError("upstream_error", http.StatusBadGateway, "CPA OAuth 回调验证失败")
+	}
 	a.syncAuthPoolResolvedAuthIDsAsync()
 	writeJSON(w, http.StatusOK, result)
 	return nil
+}
+
+func cpaOAuthCallbackSucceeded(result map[string]any) bool {
+	status, _ := result["status"].(string)
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "success", "complete", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) cpaOAuthRequest(r *http.Request, method string, endpoint string, query url.Values, body any) (map[string]any, error) {
