@@ -4,7 +4,7 @@ import { NButton, NEmpty, NSpin, NTag, useMessage } from 'naive-ui'
 import { CheckCircle2, Clock3, FolderKanban, RadioTower, WalletCards } from 'lucide-vue-next'
 
 import { getChannelStatus } from '@/features/codex-keeper/api/codexKeeperApi'
-import type { ChannelStatusItem, ChannelStatusRecentBucket } from '@/shared/types/api'
+import type { ChannelStatusItem, ChannelStatusRecentRequest } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 import { formatDateTime, formatInteger, formatUsd } from '@/shared/utils/format'
 
@@ -76,27 +76,58 @@ function successRate(item: ChannelStatusItem): number {
 
 type SparkPoint = 'idle' | 'ok' | 'mixed' | 'fail'
 
-function recentBuckets(item: ChannelStatusItem): ChannelStatusRecentBucket[] {
-  const buckets = Array.isArray(item.recent_buckets) ? item.recent_buckets.slice(0, 36) : []
-  while (buckets.length < 36) buckets.push({ success_records: 0, failed_records: 0 })
-  return buckets
+interface RecentRequestGroup {
+  requests: ChannelStatusRecentRequest[]
+  success: number
+  failed: number
+  startAt: string | null
+  endAt: string | null
+}
+
+const recentRequestCount = 360
+const recentRequestGroupSize = 10
+const recentRequestGroupCount = recentRequestCount / recentRequestGroupSize
+
+function recentRequests(item: ChannelStatusItem): ChannelStatusRecentRequest[] {
+  const requests = Array.isArray(item.recent_requests)
+    ? item.recent_requests
+        .slice(-recentRequestCount)
+        .map((request) => ({ timestamp: request.timestamp ?? '', failed: request.failed === true }))
+    : []
+  while (requests.length < recentRequestCount) requests.unshift({ timestamp: '', failed: false })
+  return requests
+}
+
+function recentRequestGroups(item: ChannelStatusItem): RecentRequestGroup[] {
+  const requests = recentRequests(item)
+  return Array.from({ length: recentRequestGroupCount }, (_, index) => {
+    const populated = requests
+      .slice(index * recentRequestGroupSize, (index + 1) * recentRequestGroupSize)
+      .filter((request) => Boolean(request.timestamp))
+    const failed = populated.filter((request) => request.failed).length
+    return {
+      requests: populated,
+      success: populated.length - failed,
+      failed,
+      startAt: populated[0]?.timestamp ?? null,
+      endAt: populated[populated.length - 1]?.timestamp ?? null,
+    }
+  })
 }
 
 function sparkPoints(item: ChannelStatusItem): SparkPoint[] {
-  return recentBuckets(item).map((bucket) => {
-    const success = Math.max(bucket.success_records, 0)
-    const failed = Math.max(bucket.failed_records, 0)
-    if (!success && !failed) return 'idle'
-    if (success && failed) return 'mixed'
-    return failed ? 'fail' : 'ok'
+  return recentRequestGroups(item).map((group) => {
+    if (!group.requests.length) return 'idle'
+    if (group.success && group.failed) return 'mixed'
+    return group.failed ? 'fail' : 'ok'
   })
 }
 
 function recentRequestTotals(item: ChannelStatusItem): { success: number; failed: number } {
-  return recentBuckets(item).reduce(
-    (totals, bucket) => ({
-      success: totals.success + Math.max(bucket.success_records, 0),
-      failed: totals.failed + Math.max(bucket.failed_records, 0),
+  return recentRequestGroups(item).reduce(
+    (totals, group) => ({
+      success: totals.success + group.success,
+      failed: totals.failed + group.failed,
     }),
     { success: 0, failed: 0 },
   )
@@ -105,16 +136,25 @@ function recentRequestTotals(item: ChannelStatusItem): { success: number; failed
 function windowDistributionLabel(item: ChannelStatusItem): string {
   const totals = recentRequestTotals(item)
   return t(
-    `最近 1 小时成功 ${formatInteger(totals.success)}，失败 ${formatInteger(totals.failed)}`,
-    `${formatInteger(totals.success)} succeeded and ${formatInteger(totals.failed)} failed in the last hour`,
+    `最近 ${recentRequestCount} 条请求中成功 ${formatInteger(totals.success)}，失败 ${formatInteger(totals.failed)}`,
+    `${formatInteger(totals.success)} succeeded and ${formatInteger(totals.failed)} failed in the latest ${recentRequestCount} requests`,
   )
 }
 
 function recentBucketLabel(item: ChannelStatusItem, index: number): string {
-  const bucket = recentBuckets(item)[index] ?? { success_records: 0, failed_records: 0 }
+  const group = recentRequestGroups(item)[index]
+  if (!group?.requests.length) {
+    return t(
+      `第 ${index + 1}/${recentRequestGroupCount} 组：暂无请求数据`,
+      `Group ${index + 1}/${recentRequestGroupCount}: no request data`,
+    )
+  }
+  const timeRange = group.startAt === group.endAt
+    ? formatDateTime(group.startAt)
+    : `${formatDateTime(group.startAt)} - ${formatDateTime(group.endAt)}`
   return t(
-    `时间段 ${index + 1}/36：成功 ${formatInteger(bucket.success_records)}，失败 ${formatInteger(bucket.failed_records)}`,
-    `Time slot ${index + 1}/36: ${formatInteger(bucket.success_records)} succeeded, ${formatInteger(bucket.failed_records)} failed`,
+    `第 ${index + 1}/${recentRequestGroupCount} 组：成功 ${formatInteger(group.success)}，失败 ${formatInteger(group.failed)}；${timeRange}`,
+    `Group ${index + 1}/${recentRequestGroupCount}: ${formatInteger(group.success)} succeeded, ${formatInteger(group.failed)} failed; ${timeRange}`,
   )
 }
 
@@ -135,7 +175,7 @@ onMounted(refresh)
       <div>
         <h1 class="page-title">{{ t('渠道状态', 'Channel Status') }}</h1>
         <p class="page-subtitle">
-          {{ t('按号池展示 CPA 渠道健康状态；七天汇总保留请求与费用，条形图展示最近 1 小时真实请求时间段，后台每 5 分钟更新。', 'Pool-based CPA channel health from stored snapshots. Seven-day totals retain requests and cost, while the bars show real request time slots from the last hour. Refreshed every 5 minutes.') }}
+          {{ t('按号池展示 CPA 渠道健康状态；七天汇总保留请求与费用，36 根状态条展示最近 360 条请求，每根代表连续 10 条，后台每 5 分钟更新。', 'Pool-based CPA channel health from stored snapshots. Seven-day totals retain requests and cost; 36 bars show the latest 360 requests, with 10 consecutive requests per bar. Refreshed every 5 minutes.') }}
         </p>
       </div>
       <NButton secondary :loading="isLoading" @click="refresh">{{ t('刷新页面', 'Refresh page') }}</NButton>
@@ -217,7 +257,7 @@ onMounted(refresh)
           <section class="channel-panel__bars">
             <div class="channel-panel__bars-head">
               <span>
-                {{ t('最近 1 小时请求', 'Requests in the last hour') }}
+                {{ t('最近 360 条请求', 'Latest 360 requests') }}
                 · {{ t('失败', 'Failed') }} {{ formatInteger(recentRequestTotals(channel).failed) }}
               </span>
               <span>{{ formatDateTime(channel.refreshed_at) }}</span>

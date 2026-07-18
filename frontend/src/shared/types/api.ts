@@ -428,9 +428,9 @@ export interface CodexKeeperAccountsResponse {
   items: CodexKeeperAccount[]
 }
 
-export interface ChannelStatusRecentBucket {
-  success_records: number
-  failed_records: number
+export interface ChannelStatusRecentRequest {
+  timestamp: string
+  failed: boolean
 }
 
 export interface ChannelStatusItem {
@@ -457,7 +457,7 @@ export interface ChannelStatusItem {
   window_cost_usd: number
   recent_window_start_at: string
   recent_window_end_at: string
-  recent_buckets: ChannelStatusRecentBucket[]
+  recent_requests: ChannelStatusRecentRequest[]
   last_checked_at?: string
   last_healthy_at?: string
   last_error?: string

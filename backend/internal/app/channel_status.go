@@ -14,11 +14,10 @@ import (
 )
 
 const (
-	channelStatusRefreshInterval      = 5 * time.Minute
-	channelStatusRefreshTimeout       = 60 * time.Second
-	channelStatusWindowDuration       = 7 * 24 * time.Hour
-	channelStatusRecentWindowDuration = time.Hour
-	channelStatusRecentBucketCount    = 36
+	channelStatusRefreshInterval    = 5 * time.Minute
+	channelStatusRefreshTimeout     = 60 * time.Second
+	channelStatusWindowDuration     = 7 * 24 * time.Hour
+	channelStatusRecentRequestCount = 360
 )
 
 type ChannelStatusRunner struct {
@@ -35,39 +34,66 @@ type channelStatusResponse struct {
 }
 
 type channelStatusItem struct {
-	ID                        string                      `json:"id"`
-	Name                      string                      `json:"name"`
-	Description               string                      `json:"description,omitempty"`
-	Enabled                   bool                        `json:"enabled"`
-	AccountTypes              []string                    `json:"account_types"`
-	Status                    string                      `json:"status"`
-	Available                 bool                        `json:"available"`
-	AccountCount              int                         `json:"account_count"`
-	AvailableAccounts         int                         `json:"available_accounts"`
-	DisabledAccounts          int                         `json:"disabled_accounts"`
-	ErrorAccounts             int                         `json:"error_accounts"`
-	QuotaExhaustedAccounts    int                         `json:"quota_exhausted_accounts"`
-	StatusCode                *int                        `json:"status_code,omitempty"`
-	PrimaryRemainingPercent   *int                        `json:"primary_remaining_percent,omitempty"`
-	SecondaryRemainingPercent *int                        `json:"secondary_remaining_percent,omitempty"`
-	WindowStartAt             string                      `json:"window_start_at"`
-	WindowEndAt               string                      `json:"window_end_at"`
-	WindowRecords             int                         `json:"window_records"`
-	WindowSuccessRecords      int                         `json:"window_success_records"`
-	WindowFailedRecords       int                         `json:"window_failed_records"`
-	WindowCostUSD             float64                     `json:"window_cost_usd"`
-	RecentWindowStartAt       string                      `json:"recent_window_start_at"`
-	RecentWindowEndAt         string                      `json:"recent_window_end_at"`
-	RecentBuckets             []channelStatusRecentBucket `json:"recent_buckets"`
-	LastCheckedAt             *string                     `json:"last_checked_at,omitempty"`
-	LastHealthyAt             *string                     `json:"last_healthy_at,omitempty"`
-	LastError                 *string                     `json:"last_error,omitempty"`
-	RefreshedAt               string                      `json:"refreshed_at"`
+	ID                        string                       `json:"id"`
+	Name                      string                       `json:"name"`
+	Description               string                       `json:"description,omitempty"`
+	Enabled                   bool                         `json:"enabled"`
+	AccountTypes              []string                     `json:"account_types"`
+	Status                    string                       `json:"status"`
+	Available                 bool                         `json:"available"`
+	AccountCount              int                          `json:"account_count"`
+	AvailableAccounts         int                          `json:"available_accounts"`
+	DisabledAccounts          int                          `json:"disabled_accounts"`
+	ErrorAccounts             int                          `json:"error_accounts"`
+	QuotaExhaustedAccounts    int                          `json:"quota_exhausted_accounts"`
+	StatusCode                *int                         `json:"status_code,omitempty"`
+	PrimaryRemainingPercent   *int                         `json:"primary_remaining_percent,omitempty"`
+	SecondaryRemainingPercent *int                         `json:"secondary_remaining_percent,omitempty"`
+	WindowStartAt             string                       `json:"window_start_at"`
+	WindowEndAt               string                       `json:"window_end_at"`
+	WindowRecords             int                          `json:"window_records"`
+	WindowSuccessRecords      int                          `json:"window_success_records"`
+	WindowFailedRecords       int                          `json:"window_failed_records"`
+	WindowCostUSD             float64                      `json:"window_cost_usd"`
+	RecentWindowStartAt       string                       `json:"recent_window_start_at"`
+	RecentWindowEndAt         string                       `json:"recent_window_end_at"`
+	RecentRequests            []channelStatusRecentRequest `json:"recent_requests"`
+	LastCheckedAt             *string                      `json:"last_checked_at,omitempty"`
+	LastHealthyAt             *string                      `json:"last_healthy_at,omitempty"`
+	LastError                 *string                      `json:"last_error,omitempty"`
+	RefreshedAt               string                       `json:"refreshed_at"`
 }
 
-type channelStatusRecentBucket struct {
-	SuccessRecords int `json:"success_records"`
-	FailedRecords  int `json:"failed_records"`
+type channelStatusRecentRequest struct {
+	Timestamp string `json:"timestamp"`
+	Failed    bool   `json:"failed"`
+}
+
+type channelStatusRecentRequestBuffer struct {
+	items [channelStatusRecentRequestCount]channelStatusRecentRequest
+	next  int
+	size  int
+}
+
+func (b *channelStatusRecentRequestBuffer) add(record UsageRecord) {
+	if record.Timestamp.IsZero() {
+		return
+	}
+	b.items[b.next] = channelStatusRecentRequest{Timestamp: dbTime(record.Timestamp), Failed: record.Failed}
+	b.next = (b.next + 1) % channelStatusRecentRequestCount
+	if b.size < channelStatusRecentRequestCount {
+		b.size++
+	}
+}
+
+func (b channelStatusRecentRequestBuffer) snapshot() []channelStatusRecentRequest {
+	requests := make([]channelStatusRecentRequest, channelStatusRecentRequestCount)
+	start := (b.next - b.size + channelStatusRecentRequestCount) % channelStatusRecentRequestCount
+	offset := channelStatusRecentRequestCount - b.size
+	for index := 0; index < b.size; index++ {
+		requests[offset+index] = b.items[(start+index)%channelStatusRecentRequestCount]
+	}
+	return requests
 }
 
 func NewChannelStatusRunner(app *App) *ChannelStatusRunner {
@@ -264,9 +290,10 @@ func scanChannelStatusItem(scanner interface{ Scan(dest ...any) error }) (channe
 	item.WindowEndAt = apiDateTimeFromDBString(windowEnd.String)
 	item.RecentWindowStartAt = apiDateTimeFromDBString(recentWindowStart.String)
 	item.RecentWindowEndAt = apiDateTimeFromDBString(recentWindowEnd.String)
-	if err := json.Unmarshal([]byte(recentBucketsJSON.String), &item.RecentBuckets); err != nil || item.RecentBuckets == nil {
-		item.RecentBuckets = make([]channelStatusRecentBucket, channelStatusRecentBucketCount)
+	if err := json.Unmarshal([]byte(recentBucketsJSON.String), &item.RecentRequests); err != nil {
+		item.RecentRequests = nil
 	}
+	item.RecentRequests = normalizeChannelStatusRecentRequests(item.RecentRequests)
 	item.LastCheckedAt = apiDateTimePtrFromDBString(lastChecked.String)
 	item.LastHealthyAt = apiDateTimePtrFromDBString(lastHealthy.String)
 	item.LastError = nullableCleanString(lastError)
@@ -304,14 +331,14 @@ func (a *App) replaceChannelStatusSnapshots(ctx context.Context, items []channel
 	now := dbTime(time.Now())
 	for _, item := range items {
 		accountTypes, _ := json.Marshal(item.AccountTypes)
-		recentBuckets, _ := json.Marshal(item.RecentBuckets)
+		recentRequests, _ := json.Marshal(item.RecentRequests)
 		if _, err := stmt.ExecContext(ctx,
 			item.ID, item.Name, item.Description, item.Enabled, string(accountTypes), item.AccountCount,
 			item.AvailableAccounts, item.DisabledAccounts, item.ErrorAccounts, item.QuotaExhaustedAccounts,
 			item.Status, item.Available, item.StatusCode, item.PrimaryRemainingPercent, item.SecondaryRemainingPercent,
 			item.WindowStartAt, item.WindowEndAt, item.WindowRecords, item.WindowSuccessRecords,
 			item.WindowFailedRecords, item.WindowCostUSD, item.RecentWindowStartAt, item.RecentWindowEndAt,
-			string(recentBuckets), item.LastCheckedAt, item.LastHealthyAt,
+			string(recentRequests), item.LastCheckedAt, item.LastHealthyAt,
 			item.LastError, item.RefreshedAt, now,
 		); err != nil {
 			return err
@@ -321,10 +348,11 @@ func (a *App) replaceChannelStatusSnapshots(ctx context.Context, items []channel
 }
 
 func (a *App) channelStatusWindowRecords(ctx context.Context, start time.Time) ([]UsageRecord, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT CAST(timestamp AS TEXT), provider, model, source_account, auth, auth_index, failed,
+	rows, err := a.db.QueryContext(ctx, `SELECT id, CAST(timestamp AS TEXT), provider, model, source_account, auth, auth_index, failed,
 		input_tokens, output_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens,
 		reasoning_tokens, total_tokens, raw_json
-		FROM usage_records WHERE timestamp >= ?`, dbTime(start))
+		FROM usage_records WHERE timestamp >= ?
+		ORDER BY timestamp ASC, id ASC`, dbTime(start))
 	if err != nil {
 		return nil, err
 	}
@@ -341,21 +369,17 @@ func buildChannelStatusItemsContext(ctx context.Context, pools []authPool, accou
 	items := make([]channelStatusItem, 0, len(pools))
 	poolIndexesByMemberKey := make(map[string][]int)
 	windowStart := now.Add(-channelStatusWindowDuration)
-	recentWindowStart := now.Add(-channelStatusRecentWindowDuration)
 	for _, pool := range pools {
 		members := channelPoolAccounts(pool, accounts)
 		item := channelStatusItem{
-			ID:                  strings.TrimSpace(pool.ID),
-			Name:                strings.TrimSpace(pool.Name),
-			Description:         strings.TrimSpace(pool.Description),
-			Enabled:             pool.Enabled,
-			AccountTypes:        normalizedStringList(pool.AccountTypes),
-			WindowStartAt:       dbTime(windowStart),
-			WindowEndAt:         dbTime(now),
-			RecentWindowStartAt: dbTime(recentWindowStart),
-			RecentWindowEndAt:   dbTime(now),
-			RecentBuckets:       make([]channelStatusRecentBucket, channelStatusRecentBucketCount),
-			RefreshedAt:         dbTime(now),
+			ID:            strings.TrimSpace(pool.ID),
+			Name:          strings.TrimSpace(pool.Name),
+			Description:   strings.TrimSpace(pool.Description),
+			Enabled:       pool.Enabled,
+			AccountTypes:  normalizedStringList(pool.AccountTypes),
+			WindowStartAt: dbTime(windowStart),
+			WindowEndAt:   dbTime(now),
+			RefreshedAt:   dbTime(now),
 		}
 		if item.Name == "" {
 			item.Name = item.ID
@@ -369,6 +393,7 @@ func buildChannelStatusItemsContext(ctx context.Context, pools []authPool, accou
 	}
 	seenPoolMarkers := make([]int, len(items))
 	matchedPoolIndexes := make([]int, 0, 2)
+	recentRequestBuffers := make([]channelStatusRecentRequestBuffer, len(items))
 	for recordIndex, record := range records {
 		if recordIndex%1024 == 0 {
 			select {
@@ -393,17 +418,12 @@ func buildChannelStatusItemsContext(ctx context.Context, pools []authPool, accou
 				item.WindowSuccessRecords++
 			}
 			item.WindowCostUSD = mathRound(item.WindowCostUSD+cost, 8)
-			if bucketIndex, ok := channelStatusRecentBucketIndex(record.Timestamp, recentWindowStart, now); ok {
-				bucket := &item.RecentBuckets[bucketIndex]
-				if record.Failed {
-					bucket.FailedRecords++
-				} else {
-					bucket.SuccessRecords++
-				}
-			}
+			recentRequestBuffers[itemIndex].add(record)
 		}
 	}
 	for index := range items {
+		items[index].RecentRequests = recentRequestBuffers[index].snapshot()
+		items[index].RecentWindowStartAt, items[index].RecentWindowEndAt = channelStatusRecentRequestBounds(items[index].RecentRequests)
 		applyChannelRecentRequestStatus(&items[index])
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -421,7 +441,7 @@ func scanChannelStatusUsageRecords(rows *sql.Rows) ([]UsageRecord, error) {
 		var record UsageRecord
 		var timestamp, provider, model, sourceAccount, auth, authIndex, rawJSON sql.NullString
 		if err := rows.Scan(
-			&timestamp, &provider, &model, &sourceAccount, &auth, &authIndex, &record.Failed,
+			&record.ID, &timestamp, &provider, &model, &sourceAccount, &auth, &authIndex, &record.Failed,
 			&record.InputTokens, &record.OutputTokens, &record.CachedTokens,
 			&record.CacheReadTokens, &record.CacheCreationTokens, &record.ReasoningTokens,
 			&record.TotalTokens, &rawJSON,
@@ -442,19 +462,39 @@ func scanChannelStatusUsageRecords(rows *sql.Rows) ([]UsageRecord, error) {
 	return records, rows.Err()
 }
 
-func channelStatusRecentBucketIndex(timestamp, windowStart, windowEnd time.Time) (int, bool) {
-	if timestamp.IsZero() || timestamp.Before(windowStart) || timestamp.After(windowEnd) {
-		return 0, false
+func channelStatusRecentRequestBounds(requests []channelStatusRecentRequest) (string, string) {
+	start := ""
+	end := ""
+	for _, request := range requests {
+		if strings.TrimSpace(request.Timestamp) == "" {
+			continue
+		}
+		if start == "" {
+			start = request.Timestamp
+		}
+		end = request.Timestamp
 	}
-	elapsed := timestamp.Sub(windowStart)
-	index := int(elapsed * channelStatusRecentBucketCount / channelStatusRecentWindowDuration)
-	if index >= channelStatusRecentBucketCount {
-		index = channelStatusRecentBucketCount - 1
+	return start, end
+}
+
+func normalizeChannelStatusRecentRequests(requests []channelStatusRecentRequest) []channelStatusRecentRequest {
+	normalized := make([]channelStatusRecentRequest, 0, channelStatusRecentRequestCount)
+	for _, request := range requests {
+		if strings.TrimSpace(request.Timestamp) == "" {
+			continue
+		}
+		request.Timestamp = apiDateTimeFromDBString(request.Timestamp)
+		if request.Timestamp == "" {
+			continue
+		}
+		normalized = append(normalized, request)
 	}
-	if index < 0 {
-		return 0, false
+	if len(normalized) > channelStatusRecentRequestCount {
+		normalized = normalized[len(normalized)-channelStatusRecentRequestCount:]
 	}
-	return index, true
+	result := make([]channelStatusRecentRequest, channelStatusRecentRequestCount)
+	copy(result[channelStatusRecentRequestCount-len(normalized):], normalized)
+	return result
 }
 
 func appendChannelUsageRecordPoolIndexes(matched []int, record UsageRecord, poolIndexesByMemberKey map[string][]int, seenPoolMarkers []int, marker int) []int {
