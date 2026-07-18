@@ -2161,17 +2161,11 @@ type cpaOpenAICompatibilityResponse struct {
 }
 
 type cpaOpenAICompatibilityChannel struct {
-	Name          string                         `json:"name"`
-	Disabled      bool                           `json:"disabled"`
-	Prefix        string                         `json:"prefix"`
-	Models        []cpaOpenAICompatibilityModel  `json:"models"`
-	AuthID        string                         `json:"auth-id"`
-	APIKeyEntries []cpaOpenAICompatibilityAPIKey `json:"api-key-entries"`
-}
-
-type cpaOpenAICompatibilityAPIKey struct {
-	AuthID   string `json:"auth-id"`
-	Disabled bool   `json:"disabled"`
+	Name          string                        `json:"name"`
+	Disabled      bool                          `json:"disabled"`
+	Prefix        string                        `json:"prefix"`
+	Models        []cpaOpenAICompatibilityModel `json:"models"`
+	APIKeyEntries []json.RawMessage             `json:"api-key-entries"`
 }
 
 type cpaOpenAICompatibilityModel struct {
