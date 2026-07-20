@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NInput, NModal, NSpin, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NInput, NModal, NSpin, useMessage } from 'naive-ui'
 import {
   CheckCircle2,
   ExternalLink,
@@ -25,15 +25,27 @@ interface ProviderView {
   label: string
   shortName: string
   tag: string
-  description: string
+  descriptionZh: string
+  descriptionEn: string
+  methodZh: string
+  methodEn: string
+  logoPath: string
   iconText: string
-  tone: 'blue' | 'orange' | 'green' | 'purple' | 'dark' | 'teal'
+  sequence: string
+  tone: 'codex' | 'claude' | 'gemini' | 'antigravity' | 'grok' | 'kimi'
 }
+
+type ProviderMeta = Omit<ProviderView, 'id' | 'label' | 'sequence'>
 
 type FlowStage = 'waiting' | 'validating' | 'success' | 'error'
 
 const message = useMessage()
 const { errorText, t } = useI18n()
+const assetCacheKey = encodeURIComponent(import.meta.env.VITE_APP_VERSION || 'dev')
+
+function providerLogo(name: string) {
+  return `/providers/${name}.svg?v=${assetCacheKey}`
+}
 
 const defaultProviders: CPAOAuthProvider[] = [
   { id: 'codex', label: 'Codex / OpenAI' },
@@ -44,48 +56,72 @@ const defaultProviders: CPAOAuthProvider[] = [
   { id: 'kimi', label: 'Kimi' },
 ]
 
-const providerMeta: Record<string, Omit<ProviderView, 'id' | 'label'>> = {
+const providerMeta: Record<string, ProviderMeta> = {
   codex: {
     shortName: 'Codex',
     tag: 'OpenAI',
-    description: 'Codex CLI / OpenAI OAuth',
+    descriptionZh: '连接 Codex CLI 与 OpenAI 账号，凭据由 CPA 统一保存。',
+    descriptionEn: 'Connect Codex CLI and OpenAI accounts with credentials managed by CPA.',
+    methodZh: '浏览器 OAuth',
+    methodEn: 'Browser OAuth',
+    logoPath: providerLogo('openai'),
     iconText: 'C',
-    tone: 'blue',
+    tone: 'codex',
   },
   anthropic: {
     shortName: 'Claude',
     tag: 'Anthropic',
-    description: 'Claude Code / Claude CLI OAuth',
+    descriptionZh: '为 Claude Code 与 Claude CLI 添加 Anthropic 授权账号。',
+    descriptionEn: 'Add an Anthropic account for Claude Code and Claude CLI.',
+    methodZh: '浏览器 OAuth',
+    methodEn: 'Browser OAuth',
+    logoPath: providerLogo('claude'),
     iconText: '\u2726',
-    tone: 'orange',
+    tone: 'claude',
   },
   gemini: {
     shortName: 'Gemini',
     tag: 'Google',
-    description: 'Gemini CLI OAuth',
+    descriptionZh: '连接 Google 账号，为 Gemini CLI 写入 OAuth 凭据。',
+    descriptionEn: 'Connect a Google account and add OAuth credentials for Gemini CLI.',
+    methodZh: '浏览器 OAuth',
+    methodEn: 'Browser OAuth',
+    logoPath: providerLogo('gemini'),
     iconText: 'G',
-    tone: 'green',
+    tone: 'gemini',
   },
   antigravity: {
     shortName: 'Antigravity',
     tag: 'Google',
-    description: 'Antigravity OAuth',
+    descriptionZh: '通过 Google 授权接入 Antigravity 账号与项目凭据。',
+    descriptionEn: 'Connect Antigravity account and project credentials through Google.',
+    methodZh: '浏览器 OAuth',
+    methodEn: 'Browser OAuth',
+    logoPath: providerLogo('antigravity'),
     iconText: 'A',
-    tone: 'purple',
+    tone: 'antigravity',
   },
   xai: {
     shortName: 'Grok',
     tag: 'xAI',
-    description: 'Grok / xAI device authorization',
+    descriptionZh: '使用 xAI 设备授权登录，由 CPA 跟踪认证状态。',
+    descriptionEn: 'Sign in with xAI device authorization while CPA tracks the session.',
+    methodZh: '设备授权',
+    methodEn: 'Device flow',
+    logoPath: providerLogo('xai'),
     iconText: 'X',
-    tone: 'dark',
+    tone: 'grok',
   },
   kimi: {
     shortName: 'Kimi',
     tag: 'Moonshot',
-    description: 'Kimi device authorization',
+    descriptionZh: '使用 Moonshot 设备授权添加 Kimi 服务账号。',
+    descriptionEn: 'Add a Kimi service account through Moonshot device authorization.',
+    methodZh: '设备授权',
+    methodEn: 'Device flow',
+    logoPath: providerLogo('kimi'),
     iconText: 'K',
-    tone: 'teal',
+    tone: 'kimi',
   },
 }
 
@@ -104,10 +140,10 @@ const flowModalVisible = ref(false)
 const flowStage = ref<FlowStage>('waiting')
 const callbackAccepted = ref(false)
 
-const providerCards = computed(() => providers.value.map(toProviderView))
+const providerCards = computed(() => providers.value.map((provider, index) => toProviderView(provider, index)))
 const activeProvider = computed(() => {
   return providerCards.value.find((provider) => provider.id === selectedProvider.value)
-    ?? toProviderView({ id: selectedProvider.value, label: selectedProvider.value })
+    ?? toProviderView({ id: selectedProvider.value, label: selectedProvider.value }, 0)
 })
 const authURL = computed(() => getFirstString(authURLResponse.value, [
   'url',
@@ -161,16 +197,21 @@ function responseError(source: Record<string, unknown> | null | undefined) {
   return getFirstString(source, ['error', 'message', 'detail'])
 }
 
-function toProviderView(provider: CPAOAuthProvider): ProviderView {
+function toProviderView(provider: CPAOAuthProvider, index: number): ProviderView {
   const meta = providerMeta[provider.id] ?? providerMeta[provider.id.toLowerCase()]
   return {
     id: provider.id,
     label: provider.label,
     shortName: meta?.shortName ?? provider.label,
     tag: meta?.tag ?? 'OAuth',
-    description: meta?.description ?? `${provider.label} OAuth`,
+    descriptionZh: meta?.descriptionZh ?? `通过 CPA 添加 ${provider.label} 授权账号。`,
+    descriptionEn: meta?.descriptionEn ?? `Add a ${provider.label} account through CPA.`,
+    methodZh: meta?.methodZh ?? 'OAuth 授权',
+    methodEn: meta?.methodEn ?? 'OAuth authorization',
+    logoPath: meta?.logoPath ?? '',
     iconText: meta?.iconText ?? provider.label.slice(0, 1).toUpperCase(),
-    tone: meta?.tone ?? 'teal',
+    sequence: String(index + 1).padStart(2, '0'),
+    tone: meta?.tone ?? 'codex',
   }
 }
 
@@ -379,8 +420,9 @@ async function checkStatus() {
   <section class="page cpa-oauth-page">
     <div class="page-heading">
       <div>
+        <span class="page-kicker">CPA / ACCOUNT ACCESS</span>
         <h1 class="page-title">{{ t('登录服务', 'Sign-in services') }}</h1>
-        <p class="page-subtitle">{{ t('选择服务并添加 CPA 账号。', 'Choose a service to add a CPA account.') }}</p>
+        <p class="page-subtitle">{{ t('选择对应渠道，将新的认证账号安全写入 CPA。', 'Choose a provider and add a new authenticated account to CPA.') }}</p>
       </div>
       <NButton quaternary circle :loading="isLoadingProviders" :title="t('刷新登录服务', 'Refresh sign-in services')" @click="loadProviders">
         <template #icon><RefreshCw :size="17" /></template>
@@ -402,19 +444,28 @@ async function checkStatus() {
           :disabled="Boolean(startingProvider)"
           @click="startOAuth(provider.id)"
         >
-          <div class="provider-card-top">
-            <div class="brand-mark">{{ provider.iconText }}</div>
-            <NTag size="small" :bordered="false">{{ provider.tag }}</NTag>
+          <div class="provider-art">
+            <div class="provider-art-toolbar">
+              <span class="provider-index">{{ provider.sequence }}</span>
+              <span class="provider-method-label">{{ t(provider.methodZh, provider.methodEn) }}</span>
+            </div>
+            <span class="provider-logo-shell">
+              <img v-if="provider.logoPath" class="provider-logo-image" :src="provider.logoPath" :alt="`${provider.label} logo`">
+              <span v-else class="provider-logo-fallback">{{ provider.iconText }}</span>
+            </span>
+            <strong class="provider-wordmark">{{ provider.shortName }}</strong>
           </div>
-          <div class="provider-copy">
-            <h2>{{ provider.shortName }}</h2>
-            <p>{{ provider.description }}</p>
+          <div class="provider-body">
+            <span class="provider-owner">{{ provider.tag }}</span>
+            <p class="provider-description">{{ t(provider.descriptionZh, provider.descriptionEn) }}</p>
+            <span class="provider-action">
+              <span>{{ t('连接账号', 'Connect account') }}</span>
+              <span class="provider-action-icon">
+                <Loader2 v-if="startingProvider === provider.id" :size="16" class="spin-icon" />
+                <LogIn v-else :size="16" />
+              </span>
+            </span>
           </div>
-          <span class="provider-action">
-            <Loader2 v-if="startingProvider === provider.id" :size="16" class="spin-icon" />
-            <LogIn v-else :size="16" />
-            <span>{{ t('登录', 'Sign in') }}</span>
-          </span>
         </button>
       </div>
     </NSpin>
@@ -437,7 +488,10 @@ async function checkStatus() {
 
         <template v-else>
           <div class="dialog-provider">
-            <div class="brand-mark" :class="`tone-${activeProvider.tone}`">{{ activeProvider.iconText }}</div>
+            <div class="brand-mark" :class="`tone-${activeProvider.tone}`">
+              <img v-if="activeProvider.logoPath" :src="activeProvider.logoPath" :alt="`${activeProvider.label} logo`">
+              <span v-else>{{ activeProvider.iconText }}</span>
+            </div>
             <div>
               <strong>{{ activeProvider.label }}</strong>
               <span v-if="authState">State: {{ authState }}</span>
@@ -530,11 +584,14 @@ async function checkStatus() {
 <style scoped>
 .cpa-oauth-page {
   display: grid;
-  gap: 18px;
+  gap: 22px;
 }
 
 .page-heading {
   display: flex;
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -546,46 +603,286 @@ async function checkStatus() {
 }
 
 .page-heading p {
-  margin-top: 6px;
+  max-width: 640px;
+  margin-top: 7px;
   color: var(--cpa-text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.page-kicker {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--cpa-primary);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .provider-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
+  gap: 18px;
 }
 
 .provider-card {
-  --provider-color: #0f766e;
+  --provider-color: #168570;
+  --provider-soft: #e9f6f2;
+  --provider-art-bg: #dceee8;
+  --provider-art-ink: #12362d;
   display: grid;
-  min-height: 210px;
-  padding: 18px;
-  gap: 18px;
-  border: 1px solid var(--cpa-border);
-  border-top: 3px solid var(--provider-color);
+  grid-template-rows: 142px minmax(156px, 1fr);
+  min-width: 0;
+  min-height: 298px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--provider-color) 16%, var(--cpa-border));
   border-radius: 8px;
   background: var(--cpa-surface);
   color: inherit;
   cursor: pointer;
   font: inherit;
   text-align: left;
-  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--provider-color) 7%, transparent), var(--cpa-shadow-hairline);
+  transition: border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
 }
 
 .provider-card:hover,
 .provider-card:focus-visible {
-  border-color: color-mix(in srgb, var(--provider-color) 55%, var(--cpa-border));
-  box-shadow: 0 8px 22px rgb(15 23 42 / 8%);
-  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--provider-color) 46%, var(--cpa-border));
+  box-shadow: 0 18px 36px color-mix(in srgb, var(--provider-color) 15%, transparent), var(--cpa-shadow-hairline);
+  transform: translateY(-4px);
   outline: none;
+}
+
+.provider-card:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--provider-color) 24%, transparent), 0 18px 36px color-mix(in srgb, var(--provider-color) 15%, transparent);
+}
+
+.provider-card:active {
+  transform: translateY(-1px) scale(0.995);
 }
 
 .provider-card:disabled {
   cursor: wait;
 }
 
-.provider-card-top,
+.provider-art {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  padding: 15px 18px 17px;
+  overflow: hidden;
+  border-bottom: 1px solid color-mix(in srgb, var(--provider-color) 18%, transparent);
+  background: var(--provider-art-bg);
+  color: var(--provider-art-ink);
+}
+
+.provider-art::after {
+  position: absolute;
+  inset: 0 0 0 52%;
+  background: repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--provider-art-ink) 8%, transparent) 12px 13px);
+  content: '';
+  pointer-events: none;
+}
+
+.provider-art-toolbar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-index,
+.provider-method-label {
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.provider-index {
+  opacity: 0.62;
+}
+
+.provider-method-label {
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--provider-art-ink) 16%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, white 42%, transparent);
+}
+
+.provider-logo-shell {
+  position: absolute;
+  z-index: 1;
+  top: 48px;
+  left: 18px;
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--provider-art-ink) 12%, transparent);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 78%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 86%), 0 8px 20px color-mix(in srgb, var(--provider-art-ink) 10%, transparent);
+  transition: transform 220ms ease;
+}
+
+.provider-card:hover .provider-logo-shell {
+  transform: translateY(-2px) rotate(-2deg);
+}
+
+.provider-logo-image {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.tone-kimi .provider-logo-image {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+}
+
+.provider-logo-fallback {
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.provider-wordmark {
+  position: relative;
+  z-index: 1;
+  align-self: end;
+  justify-self: end;
+  max-width: calc(100% - 78px);
+  overflow: hidden;
+  font-size: 24px;
+  font-weight: 760;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-body {
+  display: grid;
+  grid-template-rows: auto minmax(42px, 1fr) auto;
+  min-width: 0;
+  gap: 11px;
+  padding: 17px 18px 15px;
+}
+
+.provider-owner {
+  color: var(--provider-color);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.provider-description {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--cpa-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  text-wrap: pretty;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.provider-action {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--provider-color) 15%, var(--cpa-border));
+  color: var(--cpa-text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.provider-action-icon {
+  display: grid;
+  width: 29px;
+  height: 29px;
+  flex: 0 0 29px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--provider-soft);
+  color: var(--provider-color);
+  transition: background 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.provider-card:hover .provider-action-icon {
+  background: var(--provider-color);
+  color: white;
+  transform: translateX(2px);
+}
+
+.tone-codex {
+  --provider-color: #168570;
+  --provider-soft: #e9f6f2;
+  --provider-art-bg: #dceee8;
+  --provider-art-ink: #12362d;
+}
+
+.tone-claude {
+  --provider-color: #c45f3d;
+  --provider-soft: #fcf1ea;
+  --provider-art-bg: #f5e5da;
+  --provider-art-ink: #603321;
+}
+
+.tone-gemini {
+  --provider-color: #6d5eaa;
+  --provider-soft: #f2f0fa;
+  --provider-art-bg: #e8e6f4;
+  --provider-art-ink: #40386a;
+}
+
+.tone-antigravity {
+  --provider-color: #7846b8;
+  --provider-soft: #f5effb;
+  --provider-art-bg: #eee5f7;
+  --provider-art-ink: #4c2f71;
+}
+
+.tone-grok {
+  --provider-color: #263746;
+  --provider-soft: #edf0f2;
+  --provider-art-bg: #e0e5e8;
+  --provider-art-ink: #111c25;
+}
+
+.tone-kimi {
+  --provider-color: #1778d3;
+  --provider-soft: #edf6ff;
+  --provider-art-bg: #dfedfb;
+  --provider-art-ink: #153f69;
+}
+
+:root.dark .tone-codex { --provider-soft: #183d34; --provider-art-bg: #173229; --provider-art-ink: #d9f5eb; }
+:root.dark .tone-claude { --provider-soft: #4b2b20; --provider-art-bg: #45271d; --provider-art-ink: #ffe8db; }
+:root.dark .tone-gemini { --provider-soft: #36304f; --provider-art-bg: #2d2945; --provider-art-ink: #ece8ff; }
+:root.dark .tone-antigravity { --provider-soft: #3d2a53; --provider-art-bg: #342547; --provider-art-ink: #f1e7ff; }
+:root.dark .tone-grok { --provider-color: #9eb7c8; --provider-soft: #28353d; --provider-art-bg: #1e282f; --provider-art-ink: #f2f5f7; }
+:root.dark .tone-kimi { --provider-soft: #1b3c5b; --provider-art-bg: #17324d; --provider-art-ink: #e3f0ff; }
+
+:root.dark .provider-card.tone-grok:hover .provider-action-icon {
+  color: #111c25;
+}
+
+.brand-mark,
 .dialog-provider,
 .callback-heading,
 .result-state,
@@ -594,66 +891,34 @@ async function checkStatus() {
   align-items: center;
 }
 
-.provider-card-top {
-  justify-content: space-between;
-  gap: 12px;
-}
-
 .brand-mark {
+  --provider-color: var(--cpa-primary);
+  --provider-soft: var(--cpa-primary-weak);
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   border: 1px solid color-mix(in srgb, var(--provider-color) 30%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--provider-color) 10%, var(--cpa-surface));
+  background: var(--provider-soft);
   color: var(--provider-color);
   font-size: 18px;
   font-weight: 750;
 }
 
-.provider-copy {
-  align-self: start;
+.brand-mark img {
+  display: block;
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
 }
 
-.provider-copy h2,
-.provider-copy p {
-  margin: 0;
+.brand-mark.tone-kimi img {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
 }
-
-.provider-copy h2 {
-  font-size: 18px;
-}
-
-.provider-copy p {
-  margin-top: 5px;
-  color: var(--cpa-text-muted);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.provider-action {
-  display: inline-flex;
-  min-height: 34px;
-  align-self: end;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 7px 14px;
-  border-radius: 5px;
-  background: var(--cpa-primary);
-  color: white;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.tone-blue { --provider-color: #2563eb; }
-.tone-orange { --provider-color: #c2410c; }
-.tone-green { --provider-color: #15803d; }
-.tone-purple { --provider-color: #7c3aed; }
-.tone-dark { --provider-color: #334155; }
-.tone-teal { --provider-color: #0f766e; }
 
 .oauth-dialog {
   display: grid;
@@ -763,13 +1028,29 @@ async function checkStatus() {
   to { transform: rotate(360deg); }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 1100px) {
+  .provider-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .cpa-oauth-page {
+    gap: 18px;
+  }
+
   .provider-grid {
     grid-template-columns: 1fr;
+    gap: 14px;
   }
 
   .provider-card {
-    min-height: 190px;
+    grid-template-rows: 132px minmax(150px, 1fr);
+    min-height: 282px;
+  }
+
+  .provider-wordmark {
+    font-size: 22px;
   }
 
   .dialog-actions .n-button {

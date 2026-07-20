@@ -498,6 +498,7 @@ func (a *App) serveExternalSPA(w http.ResponseWriter, r *http.Request) (bool, er
 		staticPath := filepath.Join(a.frontendDist, filepath.FromSlash(requested))
 		if insideDir(a.frontendDist, staticPath) {
 			if info, err := os.Stat(staticPath); err == nil && !info.IsDir() {
+				setSPAContentType(w, staticPath)
 				http.ServeFile(w, r, staticPath)
 				return true, nil
 			}
@@ -541,8 +542,15 @@ func serveFSFile(w http.ResponseWriter, r *http.Request, filesystem fs.FS, name 
 	if err != nil {
 		return err
 	}
+	setSPAContentType(w, name)
 	http.ServeContent(w, r, slashpath.Base(name), info.ModTime(), bytes.NewReader(data))
 	return nil
+}
+
+func setSPAContentType(w http.ResponseWriter, name string) {
+	if strings.EqualFold(filepath.Ext(name), ".svg") {
+		w.Header().Set("Content-Type", "image/svg+xml")
+	}
 }
 
 func (a *App) serveFrontendNotBuilt(w http.ResponseWriter) error {

@@ -59,6 +59,43 @@ func TestHandleSPAServesEmbeddedFrontendAsset(t *testing.T) {
 	}
 }
 
+func TestHandleSPAServesSVGWithBrowserCompatibleContentType(t *testing.T) {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>`
+
+	t.Run("embedded", func(t *testing.T) {
+		app := &App{frontendFS: fstest.MapFS{
+			"index.html":         &fstest.MapFile{Data: []byte("<html></html>")},
+			"providers/logo.svg": &fstest.MapFile{Data: []byte(svg)},
+		}}
+		recorder := httptest.NewRecorder()
+		if err := app.handleSPA(recorder, httptest.NewRequest("GET", "http://example.com/providers/logo.svg", nil)); err != nil {
+			t.Fatal(err)
+		}
+		if got := recorder.Header().Get("Content-Type"); got != "image/svg+xml" {
+			t.Fatalf("Content-Type = %q, want image/svg+xml", got)
+		}
+	})
+
+	t.Run("external", func(t *testing.T) {
+		distDir := t.TempDir()
+		providerDir := filepath.Join(distDir, "providers")
+		if err := os.MkdirAll(providerDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(providerDir, "logo.svg"), []byte(svg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		app := &App{frontendDist: distDir, frontendEnv: true}
+		recorder := httptest.NewRecorder()
+		if err := app.handleSPA(recorder, httptest.NewRequest("GET", "http://example.com/providers/logo.svg", nil)); err != nil {
+			t.Fatal(err)
+		}
+		if got := recorder.Header().Get("Content-Type"); got != "image/svg+xml" {
+			t.Fatalf("Content-Type = %q, want image/svg+xml", got)
+		}
+	})
+}
+
 func TestHandleSPAFallsBackToEmbeddedIndex(t *testing.T) {
 	app := &App{frontendFS: fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<html>embedded index</html>")},
