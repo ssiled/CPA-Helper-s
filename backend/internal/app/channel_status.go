@@ -21,6 +21,7 @@ const (
 	channelStatusRefreshTimeout     = 60 * time.Second
 	channelStatusWindowDuration     = 7 * 24 * time.Hour
 	channelStatusRecentRequestCount = 360
+	channelStatusHealthyPercent     = 90
 )
 
 type ChannelStatusRunner struct {
@@ -980,17 +981,32 @@ func applyChannelRecentRequestStatus(item *channelStatusItem) {
 		item.Available = false
 		return
 	}
-	if item.WindowRecords <= 0 {
+	if !item.Available || item.ErrorAccounts > 0 {
 		return
 	}
-	if item.WindowFailedRecords == 0 {
-		item.Status = "normal"
-		item.Available = true
+	var successRecords, failedRecords int
+	for _, request := range item.RecentRequests {
+		if strings.TrimSpace(request.Timestamp) == "" {
+			continue
+		}
+		if request.Failed {
+			failedRecords++
+		} else {
+			successRecords++
+		}
+	}
+	records := successRecords + failedRecords
+	if records == 0 {
 		return
 	}
-	if item.WindowFailedRecords > item.WindowSuccessRecords {
+	if failedRecords > successRecords {
 		item.Status = "error"
 		item.Available = false
+		return
+	}
+	if successRecords*100 >= records*channelStatusHealthyPercent {
+		item.Status = "normal"
+		item.Available = true
 		return
 	}
 	item.Status = "degraded"
@@ -1001,11 +1017,11 @@ func channelPoolStatus(item *channelStatusItem) (string, bool) {
 	if item.AccountCount == 0 {
 		return "empty", false
 	}
-	if item.AvailableAccounts == item.AccountCount {
-		return "normal", true
-	}
 	if item.AvailableAccounts > 0 {
-		return "degraded", true
+		if item.ErrorAccounts > 0 {
+			return "degraded", true
+		}
+		return "normal", true
 	}
 	if item.QuotaExhaustedAccounts == item.AccountCount {
 		return "quota_exhausted", false

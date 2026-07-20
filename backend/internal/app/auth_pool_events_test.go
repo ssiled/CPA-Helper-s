@@ -17,7 +17,9 @@ func TestAuthPoolPluginEventsAddsTargetContext(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]any{{
-					"id": 8, "timestamp": "2026-07-17T21:00:00+08:00", "phase": "selection", "status": "selected", "pool_id": "002", "selected_auth_id": "auth-a",
+					"id": 8, "timestamp": "2026-07-17T21:00:00+08:00", "phase": "completion", "status": "failed", "pool_id": "002", "selected_auth_id": "auth-a",
+					"error_code": "usage_limit_reached", "error_message": "The usage limit has been reached", "error_detail": `{"error":{"type":"usage_limit_reached"}}`,
+					"plan_type": "free", "resets_at": 1787123950, "resets_in_seconds": 2588673,
 				}},
 				"total": 8, "capacity": 500,
 			})
@@ -43,6 +45,10 @@ func TestAuthPoolPluginEventsAddsTargetContext(t *testing.T) {
 	}
 	if response.Items[0].TargetID != "default" || response.Items[0].TargetName != "Default CPA" || response.Items[0].SelectedAuthID != "auth-a" {
 		t.Fatalf("event = %#v, want default target auth-a", response.Items[0])
+	}
+	event := response.Items[0]
+	if event.ErrorCode != "usage_limit_reached" || event.PlanType != "free" || event.ResetsAt != 1787123950 || event.ResetsInSeconds != 2588673 || event.ErrorDetail == "" {
+		t.Fatalf("structured failure event = %#v", event)
 	}
 }
 

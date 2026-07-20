@@ -27,21 +27,25 @@ const (
 	authPoolVisibilityAdminsOnly = "admins_only"
 	authPoolVisibilityAllUsers   = "all_users"
 	authPoolVisibilitySelected   = "selected_users"
+
+	authPoolSchedulingRoundRobin = "round-robin"
+	authPoolSchedulingFillFirst  = "fill-first"
 )
 
 type authPool struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Description     string   `json:"description,omitempty"`
-	AuthIDs         []string `json:"auth_ids"`
-	ResolvedAuthIDs []string `json:"resolved_auth_ids,omitempty"`
-	AccountTypes    []string `json:"account_types,omitempty"`
-	Providers       []string `json:"providers,omitempty"`
-	Models          []string `json:"models,omitempty"`
-	Visibility      string   `json:"visibility,omitempty"`
-	AllowedUserIDs  []int    `json:"allowed_user_ids"`
-	Enabled         bool     `json:"enabled"`
-	Accounts        []any    `json:"accounts,omitempty"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description,omitempty"`
+	AuthIDs            []string `json:"auth_ids"`
+	ResolvedAuthIDs    []string `json:"resolved_auth_ids,omitempty"`
+	AccountTypes       []string `json:"account_types,omitempty"`
+	Providers          []string `json:"providers,omitempty"`
+	Models             []string `json:"models,omitempty"`
+	SchedulingStrategy string   `json:"scheduling_strategy"`
+	Visibility         string   `json:"visibility,omitempty"`
+	AllowedUserIDs     []int    `json:"allowed_user_ids"`
+	Enabled            bool     `json:"enabled"`
+	Accounts           []any    `json:"accounts,omitempty"`
 }
 
 type authPoolBinding struct {
@@ -125,15 +129,27 @@ type authPoolAPIKeyAccountResponse struct {
 }
 
 type authPoolPayload struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	AuthIDs        []string `json:"auth_ids"`
-	AccountTypes   []string `json:"account_types"`
-	Providers      []string `json:"providers,omitempty"`
-	Models         []string `json:"models,omitempty"`
-	Visibility     string   `json:"visibility"`
-	AllowedUserIDs []int    `json:"allowed_user_ids"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description"`
+	AuthIDs            []string `json:"auth_ids"`
+	AccountTypes       []string `json:"account_types"`
+	Providers          []string `json:"providers,omitempty"`
+	Models             []string `json:"models,omitempty"`
+	SchedulingStrategy *string  `json:"scheduling_strategy"`
+	Visibility         string   `json:"visibility"`
+	AllowedUserIDs     []int    `json:"allowed_user_ids"`
+}
+
+func normalizeAuthPoolSchedulingStrategy(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "round-robin", "round_robin", "roundrobin", "rr":
+		return authPoolSchedulingRoundRobin, nil
+	case "fill-first", "fill_first", "fillfirst", "ff":
+		return authPoolSchedulingFillFirst, nil
+	default:
+		return "", validationError("auth pool scheduling strategy must be round-robin or fill-first")
+	}
 }
 
 func normalizeAuthPoolVisibility(value string, allowedUserIDs []int) (string, error) {
@@ -398,6 +414,9 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 			status.PluginError = err.Error()
 		}
 	}
+	if strategyErr := normalizeAuthPoolSchedulingStrategies(status.Pools); strategyErr != nil && status.PluginError == "" {
+		status.PluginError = strategyErr.Error()
+	}
 	if len(status.Pools) > 0 {
 		_ = a.saveLocalAuthPools(ctx, status.Pools)
 	}
@@ -420,6 +439,21 @@ func (a *App) authPoolStatus(ctx context.Context, user *AuthUser) (authPoolStatu
 	status.Pools = authPoolsVisibleToUser(status.Pools, localPools, user)
 	status.Bindings = authPoolBindingsVisibleToPools(localBindings, status.Pools)
 	return status, nil
+}
+
+func normalizeAuthPoolSchedulingStrategies(pools []authPool) error {
+	var firstErr error
+	for index := range pools {
+		strategy, err := normalizeAuthPoolSchedulingStrategy(pools[index].SchedulingStrategy)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			strategy = authPoolSchedulingRoundRobin
+		}
+		pools[index].SchedulingStrategy = strategy
+	}
+	return firstErr
 }
 
 func (a *App) syncAuthPoolModelsAsync() {
@@ -842,7 +876,12 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if visibility != authPoolVisibilitySelected {
 		allowedUserIDs = []int{}
 	}
-	pool := authPool{ID: strings.TrimSpace(payload.ID), Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Providers: payload.Providers, Models: payload.Models, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
+	poolID := strings.TrimSpace(payload.ID)
+	schedulingStrategy, err := a.resolveAuthPoolSchedulingStrategy(ctx, poolID, payload.SchedulingStrategy)
+	if err != nil {
+		return authPool{}, err
+	}
+	pool := authPool{ID: poolID, Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Providers: payload.Providers, Models: payload.Models, SchedulingStrategy: schedulingStrategy, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}
@@ -869,6 +908,13 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err := a.authPoolPluginRequest(ctx, http.MethodPost, "/pools", pool, &response); err != nil {
 		return authPool{}, err
 	}
+	if strings.TrimSpace(response.Pool.SchedulingStrategy) == "" && pool.SchedulingStrategy == authPoolSchedulingFillFirst {
+		return authPool{}, validationError("CPA cpa-auth-pool plugin version is too old: missing fill-first scheduling support")
+	}
+	response.Pool.SchedulingStrategy, err = normalizeAuthPoolSchedulingStrategy(response.Pool.SchedulingStrategy)
+	if err != nil {
+		return authPool{}, err
+	}
 	response.Pool.Visibility = pool.Visibility
 	response.Pool.AllowedUserIDs = pool.AllowedUserIDs
 	response.Pool.Providers = append([]string(nil), pool.Providers...)
@@ -883,6 +929,25 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	}
 	a.refreshChannelStatusAfterChange()
 	return response.Pool, nil
+}
+
+func (a *App) resolveAuthPoolSchedulingStrategy(ctx context.Context, poolID string, requested *string) (string, error) {
+	if requested != nil {
+		return normalizeAuthPoolSchedulingStrategy(*requested)
+	}
+	if poolID == "" {
+		return authPoolSchedulingRoundRobin, nil
+	}
+	var stored string
+	err := a.db.QueryRowContext(ctx, `SELECT scheduling_strategy FROM auth_pools WHERE id = ?`, poolID).Scan(&stored)
+	switch {
+	case err == nil:
+		return normalizeAuthPoolSchedulingStrategy(stored)
+	case errors.Is(err, sql.ErrNoRows):
+		return authPoolSchedulingRoundRobin, nil
+	default:
+		return "", err
+	}
 }
 
 func (a *App) deleteAuthPool(ctx context.Context, id string) error {
@@ -915,6 +980,11 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	if pool.ID == "" || pool.Name == "" {
 		return nil
 	}
+	schedulingStrategy, err := normalizeAuthPoolSchedulingStrategy(pool.SchedulingStrategy)
+	if err != nil {
+		return err
+	}
+	pool.SchedulingStrategy = schedulingStrategy
 	if strings.TrimSpace(pool.Visibility) == "" {
 		var storedVisibility string
 		err := a.db.QueryRowContext(ctx, `SELECT visibility FROM auth_pools WHERE id = ?`, pool.ID).Scan(&storedVisibility)
@@ -954,8 +1024,8 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	}
 	now := dbTime(time.Now())
 	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, visibility, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, visibility, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
@@ -964,16 +1034,17 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 			account_types_json = excluded.account_types_json,
 			providers_json = excluded.providers_json,
 			models_json = excluded.models_json,
+			scheduling_strategy = excluded.scheduling_strategy,
 			visibility = excluded.visibility,
 			enabled = excluded.enabled,
 			updated_at = excluded.updated_at
-	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON, pool.Visibility, pool.Enabled, now, now)
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON, pool.SchedulingStrategy, pool.Visibility, pool.Enabled, now, now)
 	return err
 }
 
 func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, visibility, enabled
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, visibility, enabled
 		FROM auth_pools
 		ORDER BY id
 	`)
@@ -985,7 +1056,7 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	for rows.Next() {
 		var pool authPool
 		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON string
-		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &providersJSON, &modelsJSON, &pool.Visibility, &pool.Enabled); err != nil {
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &providersJSON, &modelsJSON, &pool.SchedulingStrategy, &pool.Visibility, &pool.Enabled); err != nil {
 			return nil, err
 		}
 		pool.AuthIDs = unmarshalStringList(authIDsJSON)

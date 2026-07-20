@@ -64,7 +64,7 @@ const filteredEvents = computed(() => {
     if (statusFilter.value && event.status !== statusFilter.value) return false
     if (poolFilter.value && event.pool_id !== poolFilter.value) return false
     if (!query) return true
-    return [event.selected_auth_id, event.pool_id, event.pool_name, event.model, event.provider, event.username, event.reason, event.target_name]
+    return [event.selected_auth_id, event.pool_id, event.pool_name, event.model, event.provider, event.username, event.reason, event.error_code, event.error_message, event.error_detail, event.plan_type, event.target_name]
       .some((value) => value?.toLowerCase().includes(query))
   })
 })
@@ -129,8 +129,8 @@ const columns = computed<DataTableColumns<AuthPoolPluginEvent>>(() => [
     minWidth: 170,
     ellipsis: { tooltip: true },
     render: (row) => h('div', { class: 'identity-stack' }, [
-      h('strong', reasonLabel(row.reason) || '-'),
-      h('span', row.http_status ? `HTTP ${row.http_status}` : row.duration_ms !== undefined ? `${row.duration_ms} ms` : '-'),
+      h('strong', failureTitle(row) || '-'),
+      h('span', failureMeta(row)),
     ]),
   },
   {
@@ -184,11 +184,71 @@ function reasonLabel(reason?: string): string {
     no_input_candidates: t('宿主未传入候选账号', 'Host supplied no candidates'),
     pool_no_matching_candidates: t('号池成员匹配为 0', 'No candidates matched the pool'),
     pool_candidates_unavailable: t('号池成员均不可用', 'Pool candidates are unavailable'),
+    pool_candidates_cooling_down: t('号池成员正在等待额度恢复', 'Pool candidates are waiting for quota recovery'),
     all_candidates_quota_exhausted: t('号池成员额度均已耗尽', 'All pool candidates exhausted quota'),
     auth_pool_busy: t('号池并发已满', 'Pool concurrency full'),
     no_available_candidates: t('没有可用账号', 'No available candidates'),
   }
   return labels[reason] ?? reason
+}
+
+function errorCodeLabel(code?: string): string {
+  if (!code) return ''
+  const labels: Record<string, string> = {
+    model_not_supported: t('当前账号不支持该模型', 'The account does not support this model'),
+    proxy_network_unreachable: t('SOCKS 代理网络不可达', 'SOCKS proxy network is unreachable'),
+    proxy_connection_refused: t('SOCKS 代理拒绝连接', 'SOCKS proxy connection was refused'),
+    proxy_timeout: t('SOCKS 代理连接超时', 'SOCKS proxy connection timed out'),
+    proxy_dns_failed: t('SOCKS 代理 DNS 解析失败', 'SOCKS proxy DNS lookup failed'),
+    proxy_connect_failed: t('SOCKS 代理连接失败', 'SOCKS proxy connection failed'),
+    usage_limit_reached: t('账号使用额度已耗尽', 'Account usage limit reached'),
+    rate_limited: t('上游请求频率受限', 'Upstream rate limited the request'),
+    upstream_bad_request: t('上游拒绝了该请求', 'Upstream rejected the request'),
+    upstream_unavailable: t('上游服务不可用', 'Upstream service unavailable'),
+  }
+  return labels[code] ?? code
+}
+
+function failureTitle(event: AuthPoolPluginEvent): string {
+  return errorCodeLabel(event.error_code) || event.error_message || reasonLabel(event.reason) || ''
+}
+
+function failureMessage(event: AuthPoolPluginEvent): string {
+  return event.error_message || reasonLabel(event.reason) || '-'
+}
+
+function failureMeta(event: AuthPoolPluginEvent): string {
+  const values = [
+    event.http_status ? `HTTP ${event.http_status}` : '',
+    event.plan_type ? `${t('套餐', 'Plan')} ${event.plan_type}` : '',
+    event.duration_ms !== undefined ? `${event.duration_ms} ms` : '',
+  ].filter(Boolean)
+  return values.join(' · ') || '-'
+}
+
+function formatFailureResetAt(value?: number): string {
+  if (!value || !Number.isFinite(value)) return '-'
+  return formatDateTime(new Date(value * 1000).toISOString())
+}
+
+function formatRemainingSeconds(value?: number): string {
+  if (value === undefined || value < 0 || !Number.isFinite(value)) return '-'
+  const totalMinutes = Math.floor(value / 60)
+  const days = Math.floor(totalMinutes / (24 * 60))
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60)
+  const minutes = totalMinutes % 60
+  if (days > 0) return t(`${days}天 ${hours}小时`, `${days}d ${hours}h`)
+  if (hours > 0) return t(`${hours}小时 ${minutes}分钟`, `${hours}h ${minutes}m`)
+  return t(`${minutes}分钟`, `${minutes}m`)
+}
+
+function formatErrorDetail(value?: string): string {
+  if (!value) return '-'
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2)
+  } catch {
+    return value
+  }
 }
 
 async function refresh(silent = false) {
@@ -317,8 +377,20 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="detail-section">
-          <span class="detail-label">{{ t('原因', 'Reason') }}</span>
-          <pre class="reason-block">{{ reasonLabel(selectedEvent.reason) || '-' }}</pre>
+          <span class="detail-label">{{ selectedEvent.error_code ? t('错误摘要', 'Error summary') : t('原因', 'Reason') }}</span>
+          <div v-if="selectedEvent.error_code" class="detail-tags">
+            <NTag size="small" type="error">{{ errorCodeLabel(selectedEvent.error_code) }}</NTag>
+            <NTag v-if="selectedEvent.http_status" size="small">HTTP {{ selectedEvent.http_status }}</NTag>
+            <NTag v-if="selectedEvent.plan_type" size="small" type="info">{{ t('套餐', 'Plan') }} {{ selectedEvent.plan_type }}</NTag>
+            <NTag v-if="selectedEvent.resets_at" size="small" type="warning">{{ t('重置', 'Reset') }} {{ formatFailureResetAt(selectedEvent.resets_at) }}</NTag>
+            <NTag v-if="selectedEvent.resets_in_seconds !== undefined" size="small" type="warning">{{ t('剩余', 'Remaining') }} {{ formatRemainingSeconds(selectedEvent.resets_in_seconds) }}</NTag>
+          </div>
+          <pre class="reason-block">{{ failureMessage(selectedEvent) }}</pre>
+        </section>
+
+        <section v-if="selectedEvent.error_detail" class="detail-section">
+          <span class="detail-label">{{ t('原始错误详情', 'Raw error details') }}</span>
+          <pre class="error-detail-block">{{ formatErrorDetail(selectedEvent.error_detail) }}</pre>
         </section>
 
         <section class="detail-section">
@@ -371,6 +443,7 @@ onBeforeUnmount(() => {
 .selected-account { padding: 11px 12px; border: 1px solid var(--cpa-border); border-radius: 6px; background: color-mix(in srgb, var(--cpa-surface-muted) 88%, #6b7b8c 12%); overflow-wrap: anywhere; }
 .detail-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .reason-block { margin: 0; padding: 11px 12px; border-left: 3px solid #d97706; background: color-mix(in srgb, var(--cpa-surface-muted) 91%, #d97706 9%); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.error-detail-block { margin: 0; max-height: 280px; padding: 11px 12px; border: 1px solid var(--cpa-border); background: var(--cpa-surface-muted); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
 .candidate-list { border-top: 1px solid var(--cpa-border); }
 .candidate-row { display: grid; grid-template-columns: minmax(220px, 1.5fr) minmax(90px, 0.7fr) 54px 76px minmax(100px, 0.8fr); gap: 10px; align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--cpa-border); font-size: 12px; }
 .candidate-row span { color: var(--cpa-text-muted); }

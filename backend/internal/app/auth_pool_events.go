@@ -28,6 +28,12 @@ type authPoolPluginEvent struct {
 	Phase            string                         `json:"phase"`
 	Status           string                         `json:"status"`
 	Reason           string                         `json:"reason,omitempty"`
+	ErrorCode        string                         `json:"error_code,omitempty"`
+	ErrorMessage     string                         `json:"error_message,omitempty"`
+	ErrorDetail      string                         `json:"error_detail,omitempty"`
+	PlanType         string                         `json:"plan_type,omitempty"`
+	ResetsAt         int64                          `json:"resets_at,omitempty"`
+	ResetsInSeconds  int64                          `json:"resets_in_seconds,omitempty"`
 	HTTPStatus       int                            `json:"http_status,omitempty"`
 	DurationMS       int64                          `json:"duration_ms,omitempty"`
 	Provider         string                         `json:"provider,omitempty"`

@@ -64,6 +64,28 @@ func TestNormalizeAuthPoolVisibilityPreservesLegacyDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeAuthPoolSchedulingStrategy(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{want: authPoolSchedulingRoundRobin},
+		{value: "round_robin", want: authPoolSchedulingRoundRobin},
+		{value: "fill_first", want: authPoolSchedulingFillFirst},
+		{value: "random", wantErr: true},
+	}
+	for _, test := range tests {
+		got, err := normalizeAuthPoolSchedulingStrategy(test.value)
+		if (err != nil) != test.wantErr {
+			t.Fatalf("normalize strategy %q error = %v, want error %v", test.value, err, test.wantErr)
+		}
+		if !test.wantErr && got != test.want {
+			t.Fatalf("normalize strategy %q = %q, want %q", test.value, got, test.want)
+		}
+	}
+}
+
 func TestAuthPoolsVisibleToUserHonorsVisibility(t *testing.T) {
 	user := &AuthUser{ID: 7, Username: "user"}
 	pools := []authPool{
@@ -553,18 +575,19 @@ func TestUpsertAuthPoolPersistsProviderAndUsesConfiguredModels(t *testing.T) {
 	}
 	defer app.Close()
 	configureKeeperTestCPA(t, app, cpa.URL, nil)
-	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{ID: "mimo", Name: "Mimo", AuthIDs: []string{"cpa-provider:openai-compatible-mimo"}})
+	strategy := authPoolSchedulingFillFirst
+	pool, err := app.upsertAuthPool(t.Context(), authPoolPayload{ID: "mimo", Name: "Mimo", AuthIDs: []string{"cpa-provider:openai-compatible-mimo"}, SchedulingStrategy: &strategy})
 	if err != nil {
 		t.Fatalf("upsertAuthPool failed: %v", err)
 	}
-	if !reflect.DeepEqual(savedPool.Providers, []string{"openai-compatible-mimo"}) || !reflect.DeepEqual(savedPool.Models, []string{"mimo", "mimo-v2"}) {
+	if !reflect.DeepEqual(savedPool.Providers, []string{"openai-compatible-mimo"}) || !reflect.DeepEqual(savedPool.Models, []string{"mimo", "mimo-v2"}) || savedPool.SchedulingStrategy != authPoolSchedulingFillFirst {
 		t.Fatalf("plugin pool = %#v", savedPool)
 	}
 	if !reflect.DeepEqual(pool.Providers, savedPool.Providers) {
 		t.Fatalf("response providers = %#v", pool.Providers)
 	}
 	stored, err := app.localAuthPools(t.Context())
-	if err != nil || len(stored) != 1 || !reflect.DeepEqual(stored[0].Providers, []string{"openai-compatible-mimo"}) {
+	if err != nil || len(stored) != 1 || !reflect.DeepEqual(stored[0].Providers, []string{"openai-compatible-mimo"}) || stored[0].SchedulingStrategy != authPoolSchedulingFillFirst {
 		t.Fatalf("stored pools = %#v, err=%v", stored, err)
 	}
 }

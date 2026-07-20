@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { NButton, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns, type SelectOption } from 'naive-ui'
 import { addAuthPoolAPIKeyAccount, deleteAuthPool, getAuthPoolStatus, listAuthPoolAccounts, saveAuthPool } from '@/features/auth-pools/api/authPoolsApi'
 import { listUsers } from '@/features/users/api/usersApi'
-import type { AuthPool, AuthPoolVisibility, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
+import type { AuthPool, AuthPoolSchedulingStrategy, AuthPoolVisibility, CodexKeeperAccount, UserSummary } from '@/shared/types/api'
 import { useI18n } from '@/shared/i18n'
 
 const message = useMessage()
@@ -24,6 +24,7 @@ const selectedAuthIDs = ref<string[]>([])
 const selectedBatchType = ref<string | null>(null)
 const selectedProviderChannel = ref<string | null>(null)
 const selectedAccountTypes = ref<string[]>([])
+const poolSchedulingStrategy = ref<AuthPoolSchedulingStrategy>('round-robin')
 const poolVisibility = ref<AuthPoolVisibility>('admins_only')
 const selectedAllowedUserIDs = ref<number[]>([])
 const apiKeyProvider = ref<'gemini' | 'grok'>('gemini')
@@ -38,6 +39,11 @@ const defaultAccountTypes = ['codex', 'free', 'plus', 'team', 'gemini', 'grok', 
 const apiKeyProviderOptions = [
   { label: 'Gemini API Key', value: 'gemini' },
   { label: 'Grok / xAI API Key', value: 'grok' },
+]
+
+const schedulingStrategyOptions: Array<{ label: string; value: AuthPoolSchedulingStrategy }> = [
+  { label: t('轮询均衡', 'Round robin'), value: 'round-robin' },
+  { label: t('优先填充', 'Fill first'), value: 'fill-first' },
 ]
 
 const accountByName = computed(() => new Map(accounts.value.map((account) => [account.name, account])))
@@ -124,6 +130,7 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('\u53f7\u6c60', 'Pool'), key: 'name', render: (row) => row.name },
   { title: t('ID', 'ID'), key: 'id' },
   { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(manualAccountCount(row.auth_ids) + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
+  { title: t('调度策略', 'Scheduling'), key: 'scheduling_strategy', render: (row) => schedulingStrategyLabel(row.scheduling_strategy) },
   { title: t('可见范围', 'Visibility'), key: 'visibility', render: (row) => visibilityLabel(row) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
@@ -175,6 +182,10 @@ function accountLabel(account: CodexKeeperAccount): string {
   const status = account.disabled ? t('已禁用', 'Disabled') : account.last_status_code && account.last_status_code >= 400 ? t('异常', 'Error') : t('正常', 'Normal')
   const source = account.source === 'ai_provider' ? t('CPA AI 提供商', 'CPA AI provider') : account.source
   return [account.display_name || account.name, account.provider, account.account_type, source, status].filter((item) => item && item.trim()).join(' · ')
+}
+
+function schedulingStrategyLabel(strategy?: AuthPoolSchedulingStrategy): string {
+  return strategy === 'fill-first' ? t('优先填充', 'Fill first') : t('轮询均衡', 'Round robin')
 }
 
 function providerChannelName(account: CodexKeeperAccount): string {
@@ -263,6 +274,7 @@ function openCreate() {
   selectedBatchType.value = null
   selectedProviderChannel.value = null
   selectedAccountTypes.value = []
+  poolSchedulingStrategy.value = 'round-robin'
   poolVisibility.value = 'admins_only'
   selectedAllowedUserIDs.value = []
   editorVisible.value = true
@@ -297,6 +309,7 @@ function editPool(pool: AuthPool) {
   selectedBatchType.value = null
   selectedProviderChannel.value = null
   selectedAccountTypes.value = [...(pool.account_types ?? [])]
+  poolSchedulingStrategy.value = pool.scheduling_strategy === 'fill-first' ? 'fill-first' : 'round-robin'
   poolVisibility.value = pool.visibility || ((pool.allowed_user_ids?.length ?? 0) > 0 ? 'selected_users' : 'admins_only')
   selectedAllowedUserIDs.value = [...(pool.allowed_user_ids ?? [])]
   editorVisible.value = true
@@ -315,7 +328,7 @@ async function savePool() {
   }
   isSaving.value = true
   try {
-    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, visibility: poolVisibility.value, allowed_user_ids: poolVisibility.value === 'selected_users' ? selectedAllowedUserIDs.value : [] })
+    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, scheduling_strategy: poolSchedulingStrategy.value, visibility: poolVisibility.value, allowed_user_ids: poolVisibility.value === 'selected_users' ? selectedAllowedUserIDs.value : [] })
     message.success(t('\u53f7\u6c60\u5df2\u4fdd\u5b58', 'Pool saved'))
     editorVisible.value = false
     await refresh()
@@ -439,6 +452,13 @@ onMounted(refresh)
               </NTag>
             </div>
           </div>
+        </NFormItem>
+        <NFormItem :label="t('调度策略', 'Scheduling strategy')">
+          <NRadioGroup v-model:value="poolSchedulingStrategy" :disabled="isSaving">
+            <NRadioButton v-for="option in schedulingStrategyOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </NRadioButton>
+          </NRadioGroup>
         </NFormItem>
         <NFormItem :label="t('用户可见范围', 'User visibility')">
           <NRadioGroup v-model:value="poolVisibility" class="visibility-options" :disabled="isSaving">

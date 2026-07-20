@@ -260,6 +260,7 @@ export interface CodexKeeperQuotaWindowUsage {
 
 
 export type AuthPoolVisibility = 'admins_only' | 'all_users' | 'selected_users'
+export type AuthPoolSchedulingStrategy = 'round-robin' | 'fill-first'
 
 export interface AuthPool {
   id: string
@@ -270,6 +271,7 @@ export interface AuthPool {
   account_types?: string[]
   providers?: string[]
   models?: string[]
+  scheduling_strategy: AuthPoolSchedulingStrategy
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
   enabled: boolean
@@ -323,6 +325,12 @@ export interface AuthPoolPluginEvent {
   phase: 'selection' | 'completion' | string
   status: 'selected' | 'blocked' | 'ignored' | 'success' | 'failed' | string
   reason?: string
+  error_code?: string
+  error_message?: string
+  error_detail?: string
+  plan_type?: string
+  resets_at?: number
+  resets_in_seconds?: number
   http_status?: number
   duration_ms?: number
   provider?: string
@@ -419,6 +427,7 @@ export interface AuthPoolPayload {
   account_types: string[]
   providers?: string[]
   models?: string[]
+  scheduling_strategy: AuthPoolSchedulingStrategy
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
 }

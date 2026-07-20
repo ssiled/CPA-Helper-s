@@ -96,6 +96,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testColumnExists(t, app.db, "auth_pools", "visibility") {
 		t.Fatal("auth_pools.visibility was not created")
 	}
+	if !testColumnExists(t, app.db, "auth_pools", "scheduling_strategy") {
+		t.Fatal("auth_pools.scheduling_strategy was not created")
+	}
 	if !testTableExists(t, app.db, "auth_pool_entitlements") {
 		t.Fatal("auth_pool_entitlements was not created")
 	}

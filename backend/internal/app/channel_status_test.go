@@ -410,6 +410,14 @@ func TestChannelStatusWindowRecordsRangeExcludesRowsAfterCacheHighWaterMark(t *t
 }
 
 func TestChannelPoolStatusUnavailableStates(t *testing.T) {
+	availableWithExhaustedMembers := channelStatusItem{Enabled: true, AccountCount: 77, AvailableAccounts: 3, QuotaExhaustedAccounts: 74}
+	if status, available := channelPoolStatus(&availableWithExhaustedMembers); status != "normal" || !available {
+		t.Fatalf("available pool status = %q available = %v, want normal true", status, available)
+	}
+	partiallyBroken := channelStatusItem{Enabled: true, AccountCount: 3, AvailableAccounts: 2, ErrorAccounts: 1}
+	if status, available := channelPoolStatus(&partiallyBroken); status != "degraded" || !available {
+		t.Fatalf("partially broken status = %q available = %v, want degraded true", status, available)
+	}
 	exhausted := channelStatusItem{Enabled: true, AccountCount: 2, QuotaExhaustedAccounts: 2}
 	if status, available := channelPoolStatus(&exhausted); status != "quota_exhausted" || available {
 		t.Fatalf("quota status = %q available = %v", status, available)
@@ -425,24 +433,58 @@ func TestChannelPoolStatusUnavailableStates(t *testing.T) {
 	}
 }
 
-func TestApplyChannelRecentRequestStatusPrefersWindowResults(t *testing.T) {
-	allSuccess := channelStatusItem{Enabled: true, AccountCount: 75, AvailableAccounts: 2, QuotaExhaustedAccounts: 73, Status: "degraded", Available: true, WindowRecords: 998, WindowSuccessRecords: 998}
-	applyChannelRecentRequestStatus(&allSuccess)
-	if allSuccess.Status != "normal" || !allSuccess.Available {
-		t.Fatalf("all-success status = %q available = %v, want normal true", allSuccess.Status, allSuccess.Available)
+func TestApplyChannelRecentRequestStatusUsesLatestRequests(t *testing.T) {
+	healthy := channelStatusItem{
+		Enabled: true, AccountCount: 77, AvailableAccounts: 3, QuotaExhaustedAccounts: 74,
+		Status: "normal", Available: true,
+		WindowRecords: 3323, WindowSuccessRecords: 3094, WindowFailedRecords: 229,
+		RecentRequests: channelStatusTestRequests(352, 8),
+	}
+	applyChannelRecentRequestStatus(&healthy)
+	if healthy.Status != "normal" || !healthy.Available {
+		t.Fatalf("healthy status = %q available = %v, want normal true", healthy.Status, healthy.Available)
 	}
 
-	mixed := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, QuotaExhaustedAccounts: 6, Status: "degraded", Available: true, WindowRecords: 1201, WindowSuccessRecords: 1200, WindowFailedRecords: 1}
-	applyChannelRecentRequestStatus(&mixed)
-	if mixed.Status != "degraded" || !mixed.Available {
-		t.Fatalf("mixed status = %q available = %v, want degraded true", mixed.Status, mixed.Available)
+	boundary := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, Status: "normal", Available: true, RecentRequests: channelStatusTestRequests(324, 36)}
+	applyChannelRecentRequestStatus(&boundary)
+	if boundary.Status != "normal" || !boundary.Available {
+		t.Fatalf("boundary status = %q available = %v, want normal true", boundary.Status, boundary.Available)
 	}
 
-	mostlyFailed := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, Status: "normal", Available: true, WindowRecords: 9, WindowSuccessRecords: 4, WindowFailedRecords: 5}
+	degraded := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, Status: "normal", Available: true, RecentRequests: channelStatusTestRequests(323, 37)}
+	applyChannelRecentRequestStatus(&degraded)
+	if degraded.Status != "degraded" || !degraded.Available {
+		t.Fatalf("degraded status = %q available = %v, want degraded true", degraded.Status, degraded.Available)
+	}
+
+	mostlyFailed := channelStatusItem{Enabled: true, AccountCount: 8, AvailableAccounts: 2, Status: "normal", Available: true, RecentRequests: channelStatusTestRequests(4, 5)}
 	applyChannelRecentRequestStatus(&mostlyFailed)
 	if mostlyFailed.Status != "error" || mostlyFailed.Available {
 		t.Fatalf("mostly-failed status = %q available = %v, want error false", mostlyFailed.Status, mostlyFailed.Available)
 	}
+
+	unavailable := channelStatusItem{Enabled: true, AccountCount: 2, QuotaExhaustedAccounts: 2, Status: "quota_exhausted", RecentRequests: channelStatusTestRequests(360, 0)}
+	applyChannelRecentRequestStatus(&unavailable)
+	if unavailable.Status != "quota_exhausted" || unavailable.Available {
+		t.Fatalf("unavailable status = %q available = %v, want quota_exhausted false", unavailable.Status, unavailable.Available)
+	}
+
+	currentError := channelStatusItem{Enabled: true, AccountCount: 2, AvailableAccounts: 1, ErrorAccounts: 1, Status: "degraded", Available: true, RecentRequests: channelStatusTestRequests(360, 0)}
+	applyChannelRecentRequestStatus(&currentError)
+	if currentError.Status != "degraded" || !currentError.Available {
+		t.Fatalf("current error status = %q available = %v, want degraded true", currentError.Status, currentError.Available)
+	}
+}
+
+func channelStatusTestRequests(success, failed int) []channelStatusRecentRequest {
+	requests := make([]channelStatusRecentRequest, 0, success+failed)
+	for index := 0; index < success; index++ {
+		requests = append(requests, channelStatusRecentRequest{Timestamp: "2026-07-18 22:49:52"})
+	}
+	for index := 0; index < failed; index++ {
+		requests = append(requests, channelStatusRecentRequest{Timestamp: "2026-07-18 22:49:54", Failed: true})
+	}
+	return requests
 }
 
 func findChannelStatusItem(t *testing.T, items []channelStatusItem, id string) channelStatusItem {
