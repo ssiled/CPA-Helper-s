@@ -69,6 +69,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	if !testColumnExists(t, app.db, "app_settings", "auth_pool_proxy_targets") {
 		t.Fatal("app_settings.auth_pool_proxy_targets was not created")
 	}
+	if !testColumnExists(t, app.db, "app_settings", "model_proxy_max_concurrency") {
+		t.Fatal("app_settings.model_proxy_max_concurrency was not created")
+	}
 	if !testColumnExists(t, app.db, "users", "quota_lifetime_usd") {
 		t.Fatal("users.quota_lifetime_usd was not created")
 	}
@@ -98,6 +101,9 @@ func TestRunMigrationsCreatesGooseVersionAndFinalSchema(t *testing.T) {
 	}
 	if !testColumnExists(t, app.db, "auth_pools", "scheduling_strategy") {
 		t.Fatal("auth_pools.scheduling_strategy was not created")
+	}
+	if !testColumnExists(t, app.db, "auth_pools", "max_concurrency") {
+		t.Fatal("auth_pools.max_concurrency was not created")
 	}
 	if !testTableExists(t, app.db, "auth_pool_entitlements") {
 		t.Fatal("auth_pool_entitlements was not created")

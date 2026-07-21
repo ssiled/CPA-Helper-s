@@ -23,7 +23,7 @@ CPA-Helper is a local self-hosted multi-user administration panel for CLIProxyAP
 
 It separates API keys and usage data by user: each user can create and manage their own keys and inspect their own requests, tokens and cost statistics, while administrators can create or disable regular accounts and review global plus per-user usage. It is built with Go, SQLite, Vue 3 and Vite, with runtime data stored in the root-level `data/` directory by default.
 
-For clarity, model requests initiated by an Agent are still sent directly from that Agent to CPA. CPA-Helper does not proxy or relay those requests; it only calls CPA management-style interfaces such as the usage queue, API key creation and deletion, and credential management for usage views, key management and credential maintenance.
+Clients configured with the CPA-Helper model request URL send model traffic through Helper and then CPA. This proxy path enforces user and auth-pool binding, global admission limits and request attribution. Keep CPA model ports private or localhost-only because direct CPA traffic bypasses those Helper controls.
 
 ## Table of Contents
 
@@ -51,6 +51,7 @@ For clarity, model requests initiated by an Agent are still sent directly from t
 - **Card shop index**: Admins can browse real-time public card-shop and product snapshots, search by product title, use popular tags, sort results and favorite shops for faster lookup. This is only a public information index and does not participate in transactions.
 - **Available model aggregation**: Query available models through the current account's bound CPA API keys and enrich them with local pricing data.
 - **Auth-pool visibility**: Set each pool to administrators only, all users, or selected users; API-key selection and channel status use the same access scope.
+- **Model ingress backpressure**: Bound global model concurrency and queue wait time, reject overload with fast 429 responses, spill large request bodies to disk, and actively flush SSE with Nginx buffering disabled.
 - **CLIProxyAPI / CPAMC integration**: Configure the service URL, management key, usage queue and local collector options to persist remote usage events into SQLite.
 - **Auth-pool plugin monitoring**: Inspect scheduler selections, candidate accounts, selected auth IDs, completion status and failure reasons across configured CPA targets.
 - **Codex auth file inspection**: Support Cron scheduling, quota thresholds, check-only mode, conditional scanning, concurrent workers, priority rules, account enable/disable and deletion.

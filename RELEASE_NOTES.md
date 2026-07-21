@@ -1,4 +1,27 @@
-# CPA-Helper 0.3.36
+# CPA-Helper 0.3.37
+
+This release adds bounded model-request admission and streaming safeguards without changing CLIProxyAPI / CPA.
+
+## Model request backpressure
+
+- Add configurable global concurrency, bounded queue length and queue timeout at the Helper model-request entry point.
+- Reject full or expired queues before reading the request body with an OpenAI-compatible HTTP 429 response.
+- Keep the 32 MB compatibility limit while spilling request bodies larger than 1 MB to permission-restricted temporary files.
+- Extract the top-level model with a bounded streaming scanner so large JSON fields are not buffered back into memory.
+
+## Streaming and auth pools
+
+- Flush SSE response headers and every streamed chunk, and send `X-Accel-Buffering: no` for Nginx.
+- Add a configurable total concurrency limit to each auth pool, independent of per-account limits.
+- Add migration `202607210001` for admission settings and pool concurrency.
+
+## Validation
+
+- Backend: `go test ./...`, `go vet ./...`
+- Frontend: `npm.cmd run build`
+- Linux: amd64 and arm64 builds
+
+## Previous 0.3.36
 
 This release repairs unknown usage ownership without changing CLIProxyAPI / CPA.
 

@@ -1,9 +1,9 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -161,29 +161,46 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	if err := a.ensureAPIKeyAuthPoolSelected(r.Context(), apiKey.APIKeyHash); err != nil {
 		return err
 	}
+	cfg, err := a.loadConfig(r.Context())
+	if err != nil {
+		return err
+	}
+	release, rejection := a.modelProxyAdmission.acquire(r.Context(), cfg.ModelProxy.MaxConcurrency, cfg.ModelProxy.QueueSize, cfg.ModelProxy.QueueTimeoutMS)
+	if rejection != "" {
+		writeModelProxyRateLimit(w, rejection)
+		return nil
+	}
+	defer release()
+
 	body, err := readLimitedProxyBody(r)
 	if err != nil {
-		return validationError("Request body too large")
+		if errors.Is(err, http.ErrBodyReadAfterClose) {
+			return validationError("Request body too large")
+		}
+		return err
 	}
+	defer body.close()
 	model := modelFromProxyBody(body)
 	if model != "" {
 		if err := a.ensureAPIKeyModelAllowedByPool(r.Context(), apiKey.APIKeyHash, model); err != nil {
 			return err
 		}
 	}
-	cfg, err := a.loadConfig(r.Context())
-	if err != nil {
-		return err
-	}
 	proxyTarget, upstreamAPIKey, useProxyHeader, err := modelProxyTarget(cfg, strings.TrimSpace(*apiKey.APIKey))
 	if err != nil {
 		return err
 	}
 	target := makeURL(proxyTarget.CPAURL, r.URL.Path, r.URL.Query())
-	request, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
+	requestBody, err := body.open()
 	if err != nil {
 		return err
 	}
+	request, err := http.NewRequestWithContext(r.Context(), r.Method, target, requestBody)
+	if err != nil {
+		_ = requestBody.Close()
+		return err
+	}
+	request.ContentLength = body.size
 	request.Header = modelProxyRequestHeaders(r, upstreamAPIKey, apiKey.APIKeyHash, useProxyHeader)
 	requestID := newModelProxyRequestID()
 	request.Header.Set("X-Request-Id", requestID)
@@ -232,34 +249,8 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	if err := a.recordModelProxyRequestAttributionsWithMetadata(r.Context(), apiKey.APIKeyHash, attributionMeta, requestID, responseRequestID); err != nil {
 		return err
 	}
-	copyProxyHeaders(w.Header(), response.Header)
-	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	streamModelProxyResponse(w, response)
 	return nil
-}
-
-func readLimitedProxyBody(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, modelProxyBodyLimit+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > modelProxyBodyLimit {
-		return nil, http.ErrBodyReadAfterClose
-	}
-	return body, nil
-}
-
-func modelFromProxyBody(body []byte) string {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return ""
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-	model, _ := payload["model"].(string)
-	return strings.TrimSpace(model)
 }
 
 func modelProxyRequestEndpoint(r *http.Request) string {
@@ -350,4 +341,47 @@ func writeRawProxyResponse(w http.ResponseWriter, response *http.Response, paylo
 	copyProxyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(payload)
+}
+
+func streamModelProxyResponse(w http.ResponseWriter, response *http.Response) {
+	copyProxyHeaders(w.Header(), response.Header)
+	isSSE := strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream")
+	if isSSE {
+		w.Header().Set("X-Accel-Buffering", "no")
+	}
+	w.WriteHeader(response.StatusCode)
+	if !isSSE {
+		_, _ = io.Copy(w, response.Body)
+		return
+	}
+	controller := http.NewResponseController(w)
+	_ = controller.Flush()
+	buffer := make([]byte, 32<<10)
+	for {
+		read, readErr := response.Body.Read(buffer)
+		if read > 0 {
+			if _, writeErr := w.Write(buffer[:read]); writeErr != nil {
+				return
+			}
+			_ = controller.Flush()
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+func writeModelProxyRateLimit(w http.ResponseWriter, reason string) {
+	message := "Model request capacity is full; retry shortly"
+	if reason == "queue_timeout" {
+		message = "Model request queue timed out; retry shortly"
+	}
+	w.Header().Set("Retry-After", "1")
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error": map[string]string{
+			"message": message,
+			"type":    "rate_limit_error",
+			"code":    "rate_limit_exceeded",
+		},
+	})
 }

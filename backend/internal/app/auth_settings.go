@@ -362,14 +362,17 @@ func (a *App) userCredentialsByUsername(ctx context.Context, username string) (A
 }
 
 type settingsUpdateRequest struct {
-	CLIProxyURL          *string  `json:"cliaproxy_url"`
-	ModelRequestURL      *string  `json:"model_request_url"`
-	ManagementKey        *string  `json:"management_key"`
-	CollectorEnabled     *bool    `json:"collector_enabled"`
-	QueueName            *string  `json:"queue_name"`
-	BatchSize            *int     `json:"batch_size"`
-	PollIntervalSeconds  *float64 `json:"poll_interval_seconds"`
-	RetryIntervalSeconds *float64 `json:"retry_interval_seconds"`
+	CLIProxyURL              *string  `json:"cliaproxy_url"`
+	ModelRequestURL          *string  `json:"model_request_url"`
+	ManagementKey            *string  `json:"management_key"`
+	CollectorEnabled         *bool    `json:"collector_enabled"`
+	QueueName                *string  `json:"queue_name"`
+	BatchSize                *int     `json:"batch_size"`
+	PollIntervalSeconds      *float64 `json:"poll_interval_seconds"`
+	RetryIntervalSeconds     *float64 `json:"retry_interval_seconds"`
+	ModelProxyMaxConcurrency *int     `json:"model_proxy_max_concurrency"`
+	ModelProxyQueueSize      *int     `json:"model_proxy_queue_size"`
+	ModelProxyQueueTimeoutMS *int     `json:"model_proxy_queue_timeout_ms"`
 }
 
 type modelRequestTestPayload struct {
@@ -456,6 +459,24 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) error {
 			}
 			cfg.Collector.RetryIntervalSeconds = *payload.RetryIntervalSeconds
 		}
+		if payload.ModelProxyMaxConcurrency != nil {
+			if *payload.ModelProxyMaxConcurrency < 0 || *payload.ModelProxyMaxConcurrency > 4096 {
+				return validationError("model_proxy_max_concurrency 超出范围")
+			}
+			cfg.ModelProxy.MaxConcurrency = *payload.ModelProxyMaxConcurrency
+		}
+		if payload.ModelProxyQueueSize != nil {
+			if *payload.ModelProxyQueueSize < 0 || *payload.ModelProxyQueueSize > 4096 {
+				return validationError("model_proxy_queue_size 超出范围")
+			}
+			cfg.ModelProxy.QueueSize = *payload.ModelProxyQueueSize
+		}
+		if payload.ModelProxyQueueTimeoutMS != nil {
+			if *payload.ModelProxyQueueTimeoutMS < 100 || *payload.ModelProxyQueueTimeoutMS > 60000 {
+				return validationError("model_proxy_queue_timeout_ms 超出范围")
+			}
+			cfg.ModelProxy.QueueTimeoutMS = *payload.ModelProxyQueueTimeoutMS
+		}
 		if err := a.saveConfig(r.Context(), cfg); err != nil {
 			return err
 		}
@@ -469,16 +490,19 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) error {
 func settingsResponse(cfg AppConfig) map[string]any {
 	collector := cfg.Collector
 	return map[string]any{
-		"cliaproxy_url":          collector.CLIProxyURL,
-		"model_request_url":      cfg.ModelRequestURL,
-		"management_key":         "",
-		"management_key_set":     strings.TrimSpace(collector.ManagementKey) != "",
-		"management_key_preview": maskAPIKey(collector.ManagementKey),
-		"collector_enabled":      collector.Enabled,
-		"queue_name":             collector.QueueName,
-		"batch_size":             collector.BatchSize,
-		"poll_interval_seconds":  collector.PollIntervalSeconds,
-		"retry_interval_seconds": collector.RetryIntervalSeconds,
+		"cliaproxy_url":                collector.CLIProxyURL,
+		"model_request_url":            cfg.ModelRequestURL,
+		"management_key":               "",
+		"management_key_set":           strings.TrimSpace(collector.ManagementKey) != "",
+		"management_key_preview":       maskAPIKey(collector.ManagementKey),
+		"collector_enabled":            collector.Enabled,
+		"queue_name":                   collector.QueueName,
+		"batch_size":                   collector.BatchSize,
+		"poll_interval_seconds":        collector.PollIntervalSeconds,
+		"retry_interval_seconds":       collector.RetryIntervalSeconds,
+		"model_proxy_max_concurrency":  cfg.ModelProxy.MaxConcurrency,
+		"model_proxy_queue_size":       cfg.ModelProxy.QueueSize,
+		"model_proxy_queue_timeout_ms": cfg.ModelProxy.QueueTimeoutMS,
 	}
 }
 

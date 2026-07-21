@@ -25,6 +25,7 @@ const selectedBatchType = ref<string | null>(null)
 const selectedProviderChannel = ref<string | null>(null)
 const selectedAccountTypes = ref<string[]>([])
 const poolSchedulingStrategy = ref<AuthPoolSchedulingStrategy>('round-robin')
+const poolMaxConcurrency = ref(0)
 const poolVisibility = ref<AuthPoolVisibility>('admins_only')
 const selectedAllowedUserIDs = ref<number[]>([])
 const apiKeyProvider = ref<'gemini' | 'grok'>('gemini')
@@ -131,6 +132,7 @@ const columns = computed<DataTableColumns<AuthPool>>(() => [
   { title: t('ID', 'ID'), key: 'id' },
   { title: t('\u8d26\u53f7\u6570', 'Accounts'), key: 'auth_ids', render: (row) => String(manualAccountCount(row.auth_ids) + dynamicTypeAccountCount(row.account_types ?? [], row.auth_ids)) },
   { title: t('调度策略', 'Scheduling'), key: 'scheduling_strategy', render: (row) => schedulingStrategyLabel(row.scheduling_strategy) },
+  { title: t('总并发', 'Concurrency'), key: 'max_concurrency', render: (row) => row.max_concurrency > 0 ? String(row.max_concurrency) : t('不限', 'Unlimited') },
   { title: t('可见范围', 'Visibility'), key: 'visibility', render: (row) => visibilityLabel(row) },
   {
     title: t('\u53f7\u6c60\u8d26\u53f7', 'Pool accounts'),
@@ -275,6 +277,7 @@ function openCreate() {
   selectedProviderChannel.value = null
   selectedAccountTypes.value = []
   poolSchedulingStrategy.value = 'round-robin'
+  poolMaxConcurrency.value = 0
   poolVisibility.value = 'admins_only'
   selectedAllowedUserIDs.value = []
   editorVisible.value = true
@@ -310,6 +313,7 @@ function editPool(pool: AuthPool) {
   selectedProviderChannel.value = null
   selectedAccountTypes.value = [...(pool.account_types ?? [])]
   poolSchedulingStrategy.value = pool.scheduling_strategy === 'fill-first' ? 'fill-first' : 'round-robin'
+  poolMaxConcurrency.value = Math.max(0, pool.max_concurrency ?? 0)
   poolVisibility.value = pool.visibility || ((pool.allowed_user_ids?.length ?? 0) > 0 ? 'selected_users' : 'admins_only')
   selectedAllowedUserIDs.value = [...(pool.allowed_user_ids ?? [])]
   editorVisible.value = true
@@ -328,7 +332,7 @@ async function savePool() {
   }
   isSaving.value = true
   try {
-    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, scheduling_strategy: poolSchedulingStrategy.value, visibility: poolVisibility.value, allowed_user_ids: poolVisibility.value === 'selected_users' ? selectedAllowedUserIDs.value : [] })
+    await saveAuthPool({ id, name, description: poolDescription.value.trim(), auth_ids: selectedAuthIDs.value, account_types: selectedAccountTypes.value, scheduling_strategy: poolSchedulingStrategy.value, max_concurrency: poolMaxConcurrency.value, visibility: poolVisibility.value, allowed_user_ids: poolVisibility.value === 'selected_users' ? selectedAllowedUserIDs.value : [] })
     message.success(t('\u53f7\u6c60\u5df2\u4fdd\u5b58', 'Pool saved'))
     editorVisible.value = false
     await refresh()
@@ -459,6 +463,10 @@ onMounted(refresh)
               {{ option.label }}
             </NRadioButton>
           </NRadioGroup>
+        </NFormItem>
+        <NFormItem :label="t('号池总并发上限', 'Pool concurrency limit')">
+          <NInputNumber v-model:value="poolMaxConcurrency" :min="0" :max="4096" :disabled="isSaving" />
+          <p class="form-help">{{ t('0 表示不限；该限制独立于单账号并发上限。', '0 means unlimited; this is independent of per-account limits.') }}</p>
         </NFormItem>
         <NFormItem :label="t('用户可见范围', 'User visibility')">
           <NRadioGroup v-model:value="poolVisibility" class="visibility-options" :disabled="isSaving">

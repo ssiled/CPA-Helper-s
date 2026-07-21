@@ -42,6 +42,7 @@ type authPool struct {
 	Providers          []string `json:"providers,omitempty"`
 	Models             []string `json:"models,omitempty"`
 	SchedulingStrategy string   `json:"scheduling_strategy"`
+	MaxConcurrency     int      `json:"max_concurrency"`
 	Visibility         string   `json:"visibility,omitempty"`
 	AllowedUserIDs     []int    `json:"allowed_user_ids"`
 	Enabled            bool     `json:"enabled"`
@@ -138,6 +139,7 @@ type authPoolPayload struct {
 	Providers          []string `json:"providers,omitempty"`
 	Models             []string `json:"models,omitempty"`
 	SchedulingStrategy *string  `json:"scheduling_strategy"`
+	MaxConcurrency     *int     `json:"max_concurrency"`
 	Visibility         string   `json:"visibility"`
 	AllowedUserIDs     []int    `json:"allowed_user_ids"`
 }
@@ -882,7 +884,11 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	if err != nil {
 		return authPool{}, err
 	}
-	pool := authPool{ID: poolID, Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Providers: payload.Providers, Models: payload.Models, SchedulingStrategy: schedulingStrategy, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
+	maxConcurrency, err := a.resolveAuthPoolMaxConcurrency(ctx, poolID, payload.MaxConcurrency)
+	if err != nil {
+		return authPool{}, err
+	}
+	pool := authPool{ID: poolID, Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description), AuthIDs: payload.AuthIDs, AccountTypes: payload.AccountTypes, Providers: payload.Providers, Models: payload.Models, SchedulingStrategy: schedulingStrategy, MaxConcurrency: maxConcurrency, Visibility: visibility, AllowedUserIDs: allowedUserIDs, Enabled: true}
 	if pool.ID == "" || pool.Name == "" {
 		return authPool{}, validationError("pool id and name are required")
 	}
@@ -911,6 +917,9 @@ func (a *App) upsertAuthPool(ctx context.Context, payload authPoolPayload) (auth
 	}
 	if strings.TrimSpace(response.Pool.SchedulingStrategy) == "" && pool.SchedulingStrategy == authPoolSchedulingFillFirst {
 		return authPool{}, validationError("CPA cpa-auth-pool plugin version is too old: missing fill-first scheduling support")
+	}
+	if pool.MaxConcurrency > 0 && response.Pool.MaxConcurrency != pool.MaxConcurrency {
+		return authPool{}, validationError("CPA cpa-auth-pool plugin version is too old: missing pool concurrency limit support")
 	}
 	response.Pool.SchedulingStrategy, err = normalizeAuthPoolSchedulingStrategy(response.Pool.SchedulingStrategy)
 	if err != nil {
@@ -948,6 +957,28 @@ func (a *App) resolveAuthPoolSchedulingStrategy(ctx context.Context, poolID stri
 		return authPoolSchedulingRoundRobin, nil
 	default:
 		return "", err
+	}
+}
+
+func (a *App) resolveAuthPoolMaxConcurrency(ctx context.Context, poolID string, requested *int) (int, error) {
+	if requested != nil {
+		if *requested < 0 || *requested > 4096 {
+			return 0, validationError("auth pool max_concurrency must be between 0 and 4096")
+		}
+		return *requested, nil
+	}
+	if poolID == "" {
+		return 0, nil
+	}
+	var stored int
+	err := a.db.QueryRowContext(ctx, `SELECT max_concurrency FROM auth_pools WHERE id = ?`, poolID).Scan(&stored)
+	switch {
+	case err == nil:
+		return stored, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, nil
+	default:
+		return 0, err
 	}
 }
 
@@ -1025,8 +1056,8 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 	}
 	now := dbTime(time.Now())
 	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, visibility, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_pools (id, name, description, auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, max_concurrency, visibility, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
@@ -1036,16 +1067,17 @@ func (a *App) saveLocalAuthPool(ctx context.Context, pool authPool) error {
 			providers_json = excluded.providers_json,
 			models_json = excluded.models_json,
 			scheduling_strategy = excluded.scheduling_strategy,
+			max_concurrency = excluded.max_concurrency,
 			visibility = excluded.visibility,
 			enabled = excluded.enabled,
 			updated_at = excluded.updated_at
-	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON, pool.SchedulingStrategy, pool.Visibility, pool.Enabled, now, now)
+	`, pool.ID, pool.Name, strings.TrimSpace(pool.Description), authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON, pool.SchedulingStrategy, pool.MaxConcurrency, pool.Visibility, pool.Enabled, now, now)
 	return err
 }
 
 func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, visibility, enabled
+		SELECT id, name, COALESCE(description, ''), auth_ids_json, resolved_auth_ids_json, account_types_json, providers_json, models_json, scheduling_strategy, max_concurrency, visibility, enabled
 		FROM auth_pools
 		ORDER BY id
 	`)
@@ -1057,7 +1089,7 @@ func (a *App) localAuthPools(ctx context.Context) ([]authPool, error) {
 	for rows.Next() {
 		var pool authPool
 		var authIDsJSON, resolvedAuthIDsJSON, accountTypesJSON, providersJSON, modelsJSON string
-		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &providersJSON, &modelsJSON, &pool.SchedulingStrategy, &pool.Visibility, &pool.Enabled); err != nil {
+		if err := rows.Scan(&pool.ID, &pool.Name, &pool.Description, &authIDsJSON, &resolvedAuthIDsJSON, &accountTypesJSON, &providersJSON, &modelsJSON, &pool.SchedulingStrategy, &pool.MaxConcurrency, &pool.Visibility, &pool.Enabled); err != nil {
 			return nil, err
 		}
 		pool.AuthIDs = unmarshalStringList(authIDsJSON)

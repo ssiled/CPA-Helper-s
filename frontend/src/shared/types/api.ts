@@ -38,6 +38,9 @@ export interface SettingsResponse {
   batch_size: number
   poll_interval_seconds: number
   retry_interval_seconds: number
+  model_proxy_max_concurrency: number
+  model_proxy_queue_size: number
+  model_proxy_queue_timeout_ms: number
 }
 
 export interface SettingsUpdatePayload {
@@ -49,6 +52,9 @@ export interface SettingsUpdatePayload {
   batch_size?: number
   poll_interval_seconds?: number
   retry_interval_seconds?: number
+  model_proxy_max_concurrency?: number
+  model_proxy_queue_size?: number
+  model_proxy_queue_timeout_ms?: number
 }
 
 export interface ModelRequestGuide {
@@ -272,6 +278,7 @@ export interface AuthPool {
   providers?: string[]
   models?: string[]
   scheduling_strategy: AuthPoolSchedulingStrategy
+  max_concurrency: number
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
   enabled: boolean
@@ -428,6 +435,7 @@ export interface AuthPoolPayload {
   providers?: string[]
   models?: string[]
   scheduling_strategy: AuthPoolSchedulingStrategy
+  max_concurrency: number
   visibility: AuthPoolVisibility
   allowed_user_ids: number[]
 }

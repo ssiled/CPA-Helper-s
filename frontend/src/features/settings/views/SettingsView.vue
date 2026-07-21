@@ -41,6 +41,9 @@ const settingsForm = reactive({
   batch_size: 100,
   poll_interval_seconds: 2,
   retry_interval_seconds: 10,
+  model_proxy_max_concurrency: 64,
+  model_proxy_queue_size: 32,
+  model_proxy_queue_timeout_ms: 2000,
 })
 
 const remoteStatusType = computed(() => {
@@ -82,6 +85,9 @@ async function refresh() {
     settingsForm.batch_size = settings.batch_size
     settingsForm.poll_interval_seconds = settings.poll_interval_seconds
     settingsForm.retry_interval_seconds = settings.retry_interval_seconds
+    settingsForm.model_proxy_max_concurrency = settings.model_proxy_max_concurrency
+    settingsForm.model_proxy_queue_size = settings.model_proxy_queue_size
+    settingsForm.model_proxy_queue_timeout_ms = settings.model_proxy_queue_timeout_ms
     collectorStatus.value = status
   } catch (error) {
     message.error(errorText(error, '加载设置失败', 'Failed to load settings'))
@@ -100,6 +106,9 @@ async function saveSettings() {
       batch_size: settingsForm.batch_size,
       poll_interval_seconds: settingsForm.poll_interval_seconds,
       retry_interval_seconds: settingsForm.retry_interval_seconds,
+      model_proxy_max_concurrency: settingsForm.model_proxy_max_concurrency,
+      model_proxy_queue_size: settingsForm.model_proxy_queue_size,
+      model_proxy_queue_timeout_ms: settingsForm.model_proxy_queue_timeout_ms,
     }
     if (settingsForm.management_key.trim()) {
       payload.management_key = settingsForm.management_key.trim()
@@ -206,6 +215,16 @@ onMounted(refresh)
               </NFormItem>
               <NFormItem :label="t('重试间隔（秒）', 'Retry interval (seconds)')">
                 <NInputNumber v-model:value="settingsForm.retry_interval_seconds" :min="1" />
+              </NFormItem>
+              <NFormItem :label="t('模型请求全局并发', 'Global model concurrency')">
+                <NInputNumber v-model:value="settingsForm.model_proxy_max_concurrency" :min="0" :max="4096" />
+                <div class="form-help">{{ t('0 表示不限制；建议结合服务器内存调整。', '0 disables the limit; tune it to available server memory.') }}</div>
+              </NFormItem>
+              <NFormItem :label="t('模型请求等待队列', 'Model request queue')">
+                <NInputNumber v-model:value="settingsForm.model_proxy_queue_size" :min="0" :max="4096" />
+              </NFormItem>
+              <NFormItem :label="t('队列等待超时（毫秒）', 'Queue timeout (ms)')">
+                <NInputNumber v-model:value="settingsForm.model_proxy_queue_timeout_ms" :min="100" :max="60000" :step="100" />
               </NFormItem>
             </div>
           </NForm>

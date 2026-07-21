@@ -96,6 +96,7 @@ type App struct {
 	usageAttributionEvents   []authPoolPluginEvent
 	loginMu                  sync.Mutex
 	loginAttempts            map[string]loginAttemptState
+	modelProxyAdmission      *modelProxyAdmissionController
 }
 
 type AppError struct {
@@ -165,14 +166,15 @@ func NewWithOptions(ctx context.Context, options NewOptions) (*App, error) {
 	frontendFS, _ := web.DistFS()
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	app := &App{
-		db:               db,
-		repoRoot:         paths.RepoRoot,
-		dataDir:          paths.DataDir,
-		frontendDist:     frontendDist,
-		frontendFS:       frontendFS,
-		frontendEnv:      frontendEnv,
-		backgroundCtx:    backgroundCtx,
-		backgroundCancel: backgroundCancel,
+		db:                  db,
+		repoRoot:            paths.RepoRoot,
+		dataDir:             paths.DataDir,
+		frontendDist:        frontendDist,
+		frontendFS:          frontendFS,
+		frontendEnv:         frontendEnv,
+		backgroundCtx:       backgroundCtx,
+		backgroundCancel:    backgroundCancel,
+		modelProxyAdmission: newModelProxyAdmissionController(),
 	}
 	if options.Migrate {
 		if err := app.runMigrations(ctx); err != nil {
@@ -604,11 +606,18 @@ type LiteLLMProxyConfig struct {
 	ProxyURL string `json:"proxy_url"`
 }
 
+type ModelProxyConfig struct {
+	MaxConcurrency int `json:"max_concurrency"`
+	QueueSize      int `json:"queue_size"`
+	QueueTimeoutMS int `json:"queue_timeout_ms"`
+}
+
 type AppConfig struct {
 	Collector               CollectorConfig             `json:"collector"`
 	CodexKeeper             KeeperConfig                `json:"codex_keeper"`
 	CodexKeeperPriorityRule map[string]int              `json:"codex_keeper_priority_rules"`
 	LiteLLMProxy            LiteLLMProxyConfig          `json:"litellm_proxy"`
+	ModelProxy              ModelProxyConfig            `json:"model_proxy"`
 	ModelRequestURL         string                      `json:"model_request_url"`
 	AuthPoolProxyAPIKey     string                      `json:"auth_pool_proxy_api_key"`
 	AuthPoolProxyTargets    []AuthPoolProxyTargetConfig `json:"auth_pool_proxy_targets"`
@@ -657,6 +666,11 @@ func defaultConfigWithSessionSecret(secret string) (AppConfig, error) {
 			Enabled:  false,
 			ProxyURL: "",
 		},
+		ModelProxy: ModelProxyConfig{
+			MaxConcurrency: defaultModelProxyMaxConcurrency,
+			QueueSize:      defaultModelProxyQueueSize,
+			QueueTimeoutMS: defaultModelProxyQueueTimeoutMS,
+		},
 		ModelRequestURL:      defaultCPAURL,
 		AuthPoolProxyAPIKey:  "",
 		AuthPoolProxyTargets: []AuthPoolProxyTargetConfig{},
@@ -693,14 +707,16 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 		       poll_interval_seconds, retry_interval_seconds, codex_keeper_settings,
 		       codex_keeper_priority_rules, litellm_proxy_enabled, litellm_proxy_url,
 		       model_request_url, COALESCE(auth_pool_proxy_api_key, ''),
-		       COALESCE(auth_pool_proxy_targets, '[]'), session_secret
+		       COALESCE(auth_pool_proxy_targets, '[]'),
+		       model_proxy_max_concurrency, model_proxy_queue_size,
+		       model_proxy_queue_timeout_ms, session_secret
 		FROM app_settings WHERE id = 1
 	`)
 	var collectorEnabled, litellmProxyEnabled bool
 	var cliaproxyURL, managementKey, queueName, keeperJSON, rulesJSON, litellmProxyURL, modelRequestURL, authPoolProxyAPIKey, authPoolProxyTargetsJSON, sessionSecret string
-	var batchSize int
+	var batchSize, modelProxyMaxConcurrency, modelProxyQueueSize, modelProxyQueueTimeoutMS int
 	var pollInterval, retryInterval float64
-	if err := row.Scan(&collectorEnabled, &cliaproxyURL, &managementKey, &queueName, &batchSize, &pollInterval, &retryInterval, &keeperJSON, &rulesJSON, &litellmProxyEnabled, &litellmProxyURL, &modelRequestURL, &authPoolProxyAPIKey, &authPoolProxyTargetsJSON, &sessionSecret); err != nil {
+	if err := row.Scan(&collectorEnabled, &cliaproxyURL, &managementKey, &queueName, &batchSize, &pollInterval, &retryInterval, &keeperJSON, &rulesJSON, &litellmProxyEnabled, &litellmProxyURL, &modelRequestURL, &authPoolProxyAPIKey, &authPoolProxyTargetsJSON, &modelProxyMaxConcurrency, &modelProxyQueueSize, &modelProxyQueueTimeoutMS, &sessionSecret); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AppConfig{}, fmt.Errorf("%w: app_settings id=1 is missing; run `cpa-helper migrate`", ErrAppSettingsMissing)
 		}
@@ -736,6 +752,11 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 	cfg.ModelRequestURL = nonBlank(strings.TrimRight(strings.TrimSpace(modelRequestURL), "/"), cfg.Collector.CLIProxyURL)
 	cfg.AuthPoolProxyAPIKey = strings.TrimSpace(authPoolProxyAPIKey)
 	cfg.AuthPoolProxyTargets = decodeAuthPoolProxyTargetsJSON(authPoolProxyTargetsJSON)
+	cfg.ModelProxy = ModelProxyConfig{
+		MaxConcurrency: clampInt(modelProxyMaxConcurrency, 0, 4096, defaultModelProxyMaxConcurrency),
+		QueueSize:      clampInt(modelProxyQueueSize, 0, 4096, defaultModelProxyQueueSize),
+		QueueTimeoutMS: clampInt(modelProxyQueueTimeoutMS, 100, 60000, defaultModelProxyQueueTimeoutMS),
+	}
 	cached := cloneAppConfig(cfg)
 	a.configCache = &cached
 	return cloneAppConfig(cfg), nil
@@ -868,9 +889,10 @@ func (a *App) saveConfig(ctx context.Context, cfg AppConfig) error {
 		    codex_keeper_settings = ?, codex_keeper_priority_rules = ?,
 		    litellm_proxy_enabled = ?, litellm_proxy_url = ?,
 		    model_request_url = ?, auth_pool_proxy_api_key = ?, auth_pool_proxy_targets = ?,
+		    model_proxy_max_concurrency = ?, model_proxy_queue_size = ?, model_proxy_queue_timeout_ms = ?,
 		    session_secret = ?, updated_at = ?
 		WHERE id = 1
-	`, cfg.Collector.Enabled, strings.TrimRight(strings.TrimSpace(cfg.Collector.CLIProxyURL), "/"), strings.TrimSpace(cfg.Collector.ManagementKey), strings.TrimSpace(cfg.Collector.QueueName), cfg.Collector.BatchSize, cfg.Collector.PollIntervalSeconds, cfg.Collector.RetryIntervalSeconds, string(keeperBytes), string(rulesBytes), cfg.LiteLLMProxy.Enabled, strings.TrimSpace(cfg.LiteLLMProxy.ProxyURL), strings.TrimRight(strings.TrimSpace(cfg.ModelRequestURL), "/"), strings.TrimSpace(cfg.AuthPoolProxyAPIKey), encodeAuthPoolProxyTargetsJSON(cfg.AuthPoolProxyTargets), cfg.SessionSecret, dbTime(time.Now()))
+	`, cfg.Collector.Enabled, strings.TrimRight(strings.TrimSpace(cfg.Collector.CLIProxyURL), "/"), strings.TrimSpace(cfg.Collector.ManagementKey), strings.TrimSpace(cfg.Collector.QueueName), cfg.Collector.BatchSize, cfg.Collector.PollIntervalSeconds, cfg.Collector.RetryIntervalSeconds, string(keeperBytes), string(rulesBytes), cfg.LiteLLMProxy.Enabled, strings.TrimSpace(cfg.LiteLLMProxy.ProxyURL), strings.TrimRight(strings.TrimSpace(cfg.ModelRequestURL), "/"), strings.TrimSpace(cfg.AuthPoolProxyAPIKey), encodeAuthPoolProxyTargetsJSON(cfg.AuthPoolProxyTargets), cfg.ModelProxy.MaxConcurrency, cfg.ModelProxy.QueueSize, cfg.ModelProxy.QueueTimeoutMS, cfg.SessionSecret, dbTime(time.Now()))
 	if err == nil {
 		a.invalidateConfigCache()
 	}
