@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"cpa-helper/backend/internal/platform/cpahttp"
 )
 
 const modelProxyBodyLimit = 32 << 20
@@ -206,9 +209,10 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	request.Header.Set("X-Request-Id", requestID)
 	request.Header.Set("X-CPA-Helper-Request-Id", requestID)
 	startedAt := time.Now()
-	response, err := httpClient(0).Do(request)
+	responseHeaderTimeout := a.modelProxyResponseHeaderTimeout(r.Context(), cfg, proxyTarget)
+	response, err := cpahttp.ModelProxyClient(responseHeaderTimeout).Do(request)
 	if err != nil {
-		return validationError("CPA request failed: " + err.Error())
+		return modelProxyUpstreamError(err)
 	}
 	defer response.Body.Close()
 	completedAt := time.Now()
@@ -251,6 +255,15 @@ func (a *App) handleModelProxyForward(w http.ResponseWriter, r *http.Request, ap
 	}
 	streamModelProxyResponse(w, response)
 	return nil
+}
+
+func modelProxyUpstreamError(err error) error {
+	message := "CPA request failed: " + err.Error()
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return appError("gateway_timeout", http.StatusGatewayTimeout, message)
+	}
+	return appError("bad_gateway", http.StatusBadGateway, message)
 }
 
 func modelProxyRequestEndpoint(r *http.Request) string {

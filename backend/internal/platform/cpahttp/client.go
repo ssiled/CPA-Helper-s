@@ -17,6 +17,7 @@ import (
 const (
 	maxResponseBodyBytes = 8 << 20
 	maxCachedClients     = 32
+	defaultHeaderTimeout = 30 * time.Second
 )
 
 var (
@@ -29,11 +30,13 @@ var (
 		MaxConnsPerHost:       128,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: defaultHeaderTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
-	clientMu    sync.RWMutex
-	clientCache = map[time.Duration]*http.Client{}
+	clientMu              sync.RWMutex
+	clientCache           = map[time.Duration]*http.Client{}
+	modelProxyClientMu    sync.RWMutex
+	modelProxyClientCache = map[time.Duration]*http.Client{}
 )
 
 func Client(timeout time.Duration) *http.Client {
@@ -51,6 +54,32 @@ func Client(timeout time.Duration) *http.Client {
 	client = &http.Client{Transport: sharedTransport, Timeout: timeout}
 	if len(clientCache) < maxCachedClients {
 		clientCache[timeout] = client
+	}
+	return client
+}
+
+// ModelProxyClient uses a dedicated connection pool because model requests may
+// need a much longer response-header timeout than management API requests.
+func ModelProxyClient(responseHeaderTimeout time.Duration) *http.Client {
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = defaultHeaderTimeout
+	}
+	modelProxyClientMu.RLock()
+	client := modelProxyClientCache[responseHeaderTimeout]
+	modelProxyClientMu.RUnlock()
+	if client != nil {
+		return client
+	}
+	modelProxyClientMu.Lock()
+	defer modelProxyClientMu.Unlock()
+	if client = modelProxyClientCache[responseHeaderTimeout]; client != nil {
+		return client
+	}
+	transport := sharedTransport.Clone()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	client = &http.Client{Transport: transport}
+	if len(modelProxyClientCache) < maxCachedClients {
+		modelProxyClientCache[responseHeaderTimeout] = client
 	}
 	return client
 }

@@ -97,6 +97,8 @@ type App struct {
 	loginMu                  sync.Mutex
 	loginAttempts            map[string]loginAttemptState
 	modelProxyAdmission      *modelProxyAdmissionController
+	modelProxyCPAConfigMu    sync.Mutex
+	modelProxyCPAConfigCache map[string]modelProxyCPAConfigCacheEntry
 }
 
 type AppError struct {

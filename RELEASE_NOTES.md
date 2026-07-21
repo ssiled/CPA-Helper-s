@@ -1,4 +1,21 @@
-# CPA-Helper 0.3.38
+# CPA-Helper 0.3.39
+
+This release synchronizes model-proxy response-header timeouts with the active CPA streaming configuration without changing CLIProxyAPI / CPA.
+
+## CPA streaming synchronization
+
+- Read `streaming.keepalive-seconds`, `streaming.bootstrap-retries`, and `nonstream-keepalive-interval` from the active CPA management API.
+- Cache successful configuration reads for 60 seconds and retain the last good configuration across transient refresh failures.
+- Use a dedicated model-proxy HTTP transport so long-running requests do not inherit the shared 30-second management timeout.
+- Return HTTP 504 for upstream response-header timeouts and HTTP 502 for other CPA connection failures.
+- Keep a bounded 30-second fallback when CPA management configuration has never been available.
+
+## Validation
+
+- Backend: `go test ./...`, `go build ./cmd/cpa-helper`
+- Concurrency: 20 simultaneous cache misses perform one CPA management request
+
+## Previous 0.3.38
 
 This release fixes auth-pool concurrency capability detection.
 
