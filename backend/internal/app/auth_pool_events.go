@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	authPoolPluginEventDefaultLimit = 100
-	authPoolPluginEventMaxLimit     = 500
+	authPoolPluginEventDefaultLimit   = 100
+	authPoolPluginEventMaxLimit       = 500
+	authPoolPluginAttributionCacheTTL = 2 * time.Second
+	authPoolPluginAttributionTimeout  = 3 * time.Second
 )
 
 type authPoolPluginEventCandidate struct {
@@ -23,39 +25,61 @@ type authPoolPluginEventCandidate struct {
 }
 
 type authPoolPluginEvent struct {
-	ID               uint64                         `json:"id"`
-	Timestamp        string                         `json:"timestamp"`
-	Phase            string                         `json:"phase"`
-	Status           string                         `json:"status"`
-	Reason           string                         `json:"reason,omitempty"`
-	ErrorCode        string                         `json:"error_code,omitempty"`
-	ErrorMessage     string                         `json:"error_message,omitempty"`
-	ErrorDetail      string                         `json:"error_detail,omitempty"`
-	PlanType         string                         `json:"plan_type,omitempty"`
-	ResetsAt         int64                          `json:"resets_at,omitempty"`
-	ResetsInSeconds  int64                          `json:"resets_in_seconds,omitempty"`
-	HTTPStatus       int                            `json:"http_status,omitempty"`
-	DurationMS       int64                          `json:"duration_ms,omitempty"`
-	Provider         string                         `json:"provider,omitempty"`
-	Model            string                         `json:"model,omitempty"`
-	Stream           bool                           `json:"stream,omitempty"`
-	PoolID           string                         `json:"pool_id,omitempty"`
-	PoolName         string                         `json:"pool_name,omitempty"`
-	UserID           int                            `json:"user_id,omitempty"`
-	Username         string                         `json:"username,omitempty"`
-	SelectedAuthID   string                         `json:"selected_auth_id,omitempty"`
-	SelectedPriority *int                           `json:"selected_priority,omitempty"`
-	SelectedState    string                         `json:"selected_state,omitempty"`
-	CandidateCount   int                            `json:"candidate_count"`
-	MatchedCount     int                            `json:"matched_count"`
-	InputCandidates  int                            `json:"input_candidates"`
-	PoolMatched      int                            `json:"pool_matched_candidates"`
-	Eligible         int                            `json:"eligible_candidates"`
-	MatchedAuthIDs   []string                       `json:"matched_auth_ids,omitempty"`
-	AccountTypes     []string                       `json:"account_types,omitempty"`
-	Candidates       []authPoolPluginEventCandidate `json:"candidates,omitempty"`
-	TargetID         string                         `json:"target_id"`
-	TargetName       string                         `json:"target_name"`
+	ID                uint64                         `json:"id"`
+	AttributionID     uint64                         `json:"attribution_id,omitempty"`
+	Timestamp         string                         `json:"timestamp"`
+	Phase             string                         `json:"phase"`
+	Status            string                         `json:"status"`
+	Reason            string                         `json:"reason,omitempty"`
+	ErrorCode         string                         `json:"error_code,omitempty"`
+	ErrorMessage      string                         `json:"error_message,omitempty"`
+	ErrorDetail       string                         `json:"error_detail,omitempty"`
+	PlanType          string                         `json:"plan_type,omitempty"`
+	ResetsAt          int64                          `json:"resets_at,omitempty"`
+	ResetsInSeconds   int64                          `json:"resets_in_seconds,omitempty"`
+	HTTPStatus        int                            `json:"http_status,omitempty"`
+	DurationMS        int64                          `json:"duration_ms,omitempty"`
+	Provider          string                         `json:"provider,omitempty"`
+	Model             string                         `json:"model,omitempty"`
+	Stream            bool                           `json:"stream,omitempty"`
+	PoolID            string                         `json:"pool_id,omitempty"`
+	PoolName          string                         `json:"pool_name,omitempty"`
+	APIKeyHash        string                         `json:"api_key_hash,omitempty"`
+	APIKeyDescription string                         `json:"api_key_description,omitempty"`
+	UserID            int                            `json:"user_id,omitempty"`
+	Username          string                         `json:"username,omitempty"`
+	SelectedAuthID    string                         `json:"selected_auth_id,omitempty"`
+	SelectedPriority  *int                           `json:"selected_priority,omitempty"`
+	SelectedState     string                         `json:"selected_state,omitempty"`
+	CandidateCount    int                            `json:"candidate_count"`
+	MatchedCount      int                            `json:"matched_count"`
+	InputCandidates   int                            `json:"input_candidates"`
+	PoolMatched       int                            `json:"pool_matched_candidates"`
+	Eligible          int                            `json:"eligible_candidates"`
+	MatchedAuthIDs    []string                       `json:"matched_auth_ids,omitempty"`
+	AccountTypes      []string                       `json:"account_types,omitempty"`
+	Candidates        []authPoolPluginEventCandidate `json:"candidates,omitempty"`
+	TargetID          string                         `json:"target_id"`
+	TargetName        string                         `json:"target_name"`
+}
+
+func (a *App) cachedAuthPoolPluginEventsForAttribution(ctx context.Context) []authPoolPluginEvent {
+	now := time.Now()
+	a.usageAttributionMu.Lock()
+	defer a.usageAttributionMu.Unlock()
+	if !a.usageAttributionEventsAt.IsZero() && now.Sub(a.usageAttributionEventsAt) < authPoolPluginAttributionCacheTTL {
+		return append([]authPoolPluginEvent(nil), a.usageAttributionEvents...)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, authPoolPluginAttributionTimeout)
+	defer cancel()
+	response, err := a.authPoolPluginEvents(requestCtx, authPoolPluginEventMaxLimit)
+	a.usageAttributionEventsAt = now
+	if err != nil {
+		a.usageAttributionEvents = nil
+		return nil
+	}
+	a.usageAttributionEvents = append(a.usageAttributionEvents[:0], response.Items...)
+	return append([]authPoolPluginEvent(nil), a.usageAttributionEvents...)
 }
 
 type authPoolPluginEventTargetError struct {

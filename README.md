@@ -43,6 +43,7 @@ For clarity, model requests initiated by an Agent are still sent directly from t
 
 - **Usage analytics and cost estimation**: Track requests, tokens, success rate, latency, model distribution and estimated cost from global, per-user and current-account views.
 - **Request record tracing**: Admins can filter global request events by time, user, API key description, provider, model, endpoint and failure state; regular users inspect only their own account records.
+- **Request ownership repair**: Recover unknown user and API-key labels from auth-pool scheduler events, including multi-provider failover rows that share one CPA request ID, while leaving ambiguous concurrent traffic untouched.
 - **User and permission management**: Provide administrator and regular-user views; admins can create or disable regular accounts and manage nicknames, login accounts, passwords and roles.
 - **User balances and automatic key pause**: Users are unlimited by default; admins can configure monthly balance and lifetime balance, usage is priced in USD with current model prices, monthly balance is consumed first, and exhausted users only have their CPA API keys paused.
 - **API key lifecycle management**: Each user can independently create, edit, copy and delete their own API keys and synchronize them to CPA, with usage counted per user and per-key request guidance plus live request testing.

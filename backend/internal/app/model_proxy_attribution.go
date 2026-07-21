@@ -341,7 +341,7 @@ func absDuration(value time.Duration) time.Duration {
 }
 
 func (a *App) repairRecentUsageOwnerSnapshots(ctx context.Context) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT id, CAST(timestamp AS TEXT), request_id, provider, model, endpoint, raw_json
+	rows, err := a.db.QueryContext(ctx, `SELECT id, CAST(timestamp AS TEXT), request_id, provider, model, endpoint, auth_index, latency_ms, raw_json
 		FROM usage_records
 		WHERE (usage_username IS NULL OR usage_username = '' OR api_key_description IS NULL OR api_key_description = '')
 		  AND timestamp >= ?
@@ -359,12 +359,14 @@ func (a *App) repairRecentUsageOwnerSnapshots(ctx context.Context) error {
 		Provider  sql.NullString
 		Model     sql.NullString
 		Endpoint  sql.NullString
+		AuthIndex sql.NullString
+		LatencyMS sql.NullFloat64
 		RawJSON   string
 	}
 	pending := []pendingUsageRecord{}
 	for rows.Next() {
 		var record pendingUsageRecord
-		if err := rows.Scan(&record.ID, &record.Timestamp, &record.RequestID, &record.Provider, &record.Model, &record.Endpoint, &record.RawJSON); err != nil {
+		if err := rows.Scan(&record.ID, &record.Timestamp, &record.RequestID, &record.Provider, &record.Model, &record.Endpoint, &record.AuthIndex, &record.LatencyMS, &record.RawJSON); err != nil {
 			return err
 		}
 		pending = append(pending, record)
@@ -372,6 +374,12 @@ func (a *App) repairRecentUsageOwnerSnapshots(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	pluginPending := make([]pluginUsageOwnerRepair, 0, len(pending))
+	knownRequestOwners := map[string]string{}
+	ambiguousRequestOwners := map[string]bool{}
 	for _, record := range pending {
 		normalized, err := normalizeUsage([]byte(record.RawJSON))
 		if err != nil {
@@ -401,9 +409,86 @@ func (a *App) repairRecentUsageOwnerSnapshots(ctx context.Context) error {
 			return err
 		}
 		if usageUsername == nil && description == nil {
+			pluginRecord := pluginUsageOwnerRepair{
+				ID:        record.ID,
+				Timestamp: normalized.Timestamp,
+				RequestID: stringPtrValue(normalized.RequestID),
+				Provider:  stringPtrValue(normalized.Provider),
+				Model:     stringPtrValue(normalized.Model),
+				AuthIndex: stringPtrValue(normalized.AuthIndex),
+			}
+			if record.AuthIndex.Valid {
+				pluginRecord.AuthIndex = strings.TrimSpace(record.AuthIndex.String)
+			}
+			if record.LatencyMS.Valid {
+				latency := record.LatencyMS.Float64
+				pluginRecord.LatencyMS = &latency
+			}
+			pluginPending = append(pluginPending, pluginRecord)
 			continue
 		}
 		if _, err := a.db.ExecContext(ctx, `UPDATE usage_records SET usage_username = COALESCE(NULLIF(usage_username, ''), ?), api_key_description = COALESCE(NULLIF(api_key_description, ''), ?) WHERE id = ?`, usageUsername, description, record.ID); err != nil {
+			return err
+		}
+		requestID := strings.TrimSpace(stringPtrValue(normalized.RequestID))
+		if requestID != "" && requestID != "-" {
+			if current := knownRequestOwners[requestID]; current != "" && current != ownerAPIKeyHash {
+				ambiguousRequestOwners[requestID] = true
+			} else {
+				knownRequestOwners[requestID] = ownerAPIKeyHash
+			}
+		}
+	}
+	remaining := pluginPending[:0]
+	for _, record := range pluginPending {
+		requestID := strings.TrimSpace(record.RequestID)
+		apiKeyHash := knownRequestOwners[requestID]
+		if requestID == "" || requestID == "-" || apiKeyHash == "" || ambiguousRequestOwners[requestID] {
+			remaining = append(remaining, record)
+			continue
+		}
+		usageUsername, description, err := a.usageOwnerSnapshot(ctx, apiKeyHash)
+		if err != nil {
+			return err
+		}
+		if _, err := a.db.ExecContext(ctx, `UPDATE usage_records SET usage_username = COALESCE(NULLIF(usage_username, ''), ?), api_key_description = COALESCE(NULLIF(api_key_description, ''), ?) WHERE id = ?`, usageUsername, description, record.ID); err != nil {
+			return err
+		}
+	}
+	pluginPending = remaining
+	if len(pluginPending) == 0 {
+		return nil
+	}
+	events := a.cachedAuthPoolPluginEventsForAttribution(ctx)
+	validEvents := make([]authPoolPluginEvent, 0, len(events))
+	validHashes := map[string]bool{}
+	for _, event := range events {
+		hash := strings.TrimSpace(event.APIKeyHash)
+		if hash == "" {
+			continue
+		}
+		valid, known := validHashes[hash]
+		if !known {
+			username, description, err := a.usageOwnerSnapshot(ctx, hash)
+			if err != nil {
+				return err
+			}
+			valid = username != nil || description != nil
+			validHashes[hash] = valid
+		}
+		if valid {
+			validEvents = append(validEvents, event)
+		}
+	}
+	for recordID, apiKeyHash := range matchPluginUsageAttributions(pluginPending, validEvents) {
+		usageUsername, description, err := a.usageOwnerSnapshot(ctx, apiKeyHash)
+		if err != nil {
+			return err
+		}
+		if usageUsername == nil && description == nil {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `UPDATE usage_records SET usage_username = COALESCE(NULLIF(usage_username, ''), ?), api_key_description = COALESCE(NULLIF(api_key_description, ''), ?) WHERE id = ?`, usageUsername, description, recordID); err != nil {
 			return err
 		}
 	}

@@ -49,10 +49,11 @@ type authPool struct {
 }
 
 type authPoolBinding struct {
-	APIKeyHash string `json:"api_key_hash"`
-	PoolID     string `json:"pool_id"`
-	UserID     int    `json:"user_id,omitempty"`
-	Username   string `json:"username,omitempty"`
+	APIKeyHash        string `json:"api_key_hash"`
+	APIKeyDescription string `json:"api_key_description,omitempty"`
+	PoolID            string `json:"pool_id"`
+	UserID            int    `json:"user_id,omitempty"`
+	Username          string `json:"username,omitempty"`
 }
 
 type authPoolStatus struct {
@@ -1156,7 +1157,7 @@ func (a *App) authPoolBindingsRevokedByVisibility(ctx context.Context, poolID, v
 		return nil, nil
 	}
 	query := `
-		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, '')
+		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, ''), COALESCE(k.description, '')
 		FROM user_api_key_pools p
 		JOIN user_api_keys k ON k.api_key_hash = p.api_key_hash
 		JOIN users u ON u.id = k.user_id
@@ -1180,7 +1181,7 @@ func (a *App) authPoolBindingsRevokedByVisibility(ctx context.Context, poolID, v
 	bindings := []authPoolBinding{}
 	for rows.Next() {
 		var binding authPoolBinding
-		if err := rows.Scan(&binding.APIKeyHash, &binding.PoolID, &binding.UserID, &binding.Username); err != nil {
+		if err := rows.Scan(&binding.APIKeyHash, &binding.PoolID, &binding.UserID, &binding.Username, &binding.APIKeyDescription); err != nil {
 			return nil, err
 		}
 		bindings = append(bindings, binding)
@@ -1682,7 +1683,11 @@ func (a *App) bindAPIKeyToAuthPool(ctx context.Context, user *AuthUser, payload 
 	if err := a.ensureAuthPoolBindingAccess(ctx, user, poolID); err != nil {
 		return authPoolBinding{}, err
 	}
-	binding := authPoolBinding{APIKeyHash: apiKeyHash, PoolID: poolID, UserID: user.ID, Username: user.Username}
+	var description string
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(description, '') FROM user_api_keys WHERE api_key_hash = ?`, apiKeyHash).Scan(&description); err != nil {
+		return authPoolBinding{}, err
+	}
+	binding := authPoolBinding{APIKeyHash: apiKeyHash, APIKeyDescription: strings.TrimSpace(description), PoolID: poolID, UserID: user.ID, Username: user.Username}
 	var response struct {
 		Binding authPoolBinding `json:"binding"`
 	}
@@ -1802,7 +1807,7 @@ func (a *App) localAuthPoolAvailability(ctx context.Context, poolID string) (boo
 
 func (a *App) localAuthPoolBindings(ctx context.Context, user *AuthUser) ([]authPoolBinding, error) {
 	query := `
-		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, '')
+		SELECT p.api_key_hash, p.pool_id, k.user_id, COALESCE(u.username, ''), COALESCE(k.description, '')
 		FROM user_api_key_pools p
 		JOIN user_api_keys k ON k.api_key_hash = p.api_key_hash
 		LEFT JOIN users u ON u.id = k.user_id
@@ -1821,7 +1826,7 @@ func (a *App) localAuthPoolBindings(ctx context.Context, user *AuthUser) ([]auth
 	bindings := []authPoolBinding{}
 	for rows.Next() {
 		var binding authPoolBinding
-		if err := rows.Scan(&binding.APIKeyHash, &binding.PoolID, &binding.UserID, &binding.Username); err != nil {
+		if err := rows.Scan(&binding.APIKeyHash, &binding.PoolID, &binding.UserID, &binding.Username, &binding.APIKeyDescription); err != nil {
 			return nil, err
 		}
 		bindings = append(bindings, binding)

@@ -1,4 +1,22 @@
-# CPA-Helper 0.3.35
+# CPA-Helper 0.3.36
+
+This release repairs unknown usage ownership without changing CLIProxyAPI / CPA.
+
+## Usage ownership
+
+- Read API-key ownership hashes from authenticated `cpa-auth-pool` scheduler and completion events.
+- Match usage by auth ID, model, provider and request timing, with a one-second ambiguity guard for concurrent cross-user traffic.
+- Propagate one verified owner across failed and successful provider attempts sharing the same CPA request ID.
+- Repair recent historical unknown rows while collecting usage and before serving usage pages.
+- Keep plugin event reads bounded, cached and limited to a three-second timeout.
+
+## Validation
+
+- Backend: `go test ./...`, `go vet ./...`
+- Plugin: `go test ./...`, `go vet ./...`
+- GitHub Actions: Linux amd64/arm64 release assets and multi-architecture container build
+
+## Previous 0.3.35
 
 本次发布完善号池调度策略、上游错误诊断以及限额账号自动切换。
 

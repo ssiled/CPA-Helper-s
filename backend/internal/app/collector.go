@@ -134,6 +134,9 @@ func (r *CollectorRunner) loop() {
 				inserted++
 			}
 		}
+		if inserted > 0 {
+			_ = r.app.repairRecentUsageOwnerSnapshots(ctx)
+		}
 		successAt := time.Now()
 		emptyError := ""
 		_ = r.updateState(ctx, collectorPatch{

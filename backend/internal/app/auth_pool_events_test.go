@@ -18,6 +18,7 @@ func TestAuthPoolPluginEventsAddsTargetContext(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]any{{
 					"id": 8, "timestamp": "2026-07-17T21:00:00+08:00", "phase": "completion", "status": "failed", "pool_id": "002", "selected_auth_id": "auth-a",
+					"attribution_id": 3, "api_key_hash": "owner-hash", "api_key_description": "VSCode",
 					"error_code": "usage_limit_reached", "error_message": "The usage limit has been reached", "error_detail": `{"error":{"type":"usage_limit_reached"}}`,
 					"plan_type": "free", "resets_at": 1787123950, "resets_in_seconds": 2588673,
 				}},
@@ -47,6 +48,9 @@ func TestAuthPoolPluginEventsAddsTargetContext(t *testing.T) {
 		t.Fatalf("event = %#v, want default target auth-a", response.Items[0])
 	}
 	event := response.Items[0]
+	if event.AttributionID != 3 || event.APIKeyHash != "owner-hash" || event.APIKeyDescription != "VSCode" {
+		t.Fatalf("ownership event = %#v", event)
+	}
 	if event.ErrorCode != "usage_limit_reached" || event.PlanType != "free" || event.ResetsAt != 1787123950 || event.ResetsInSeconds != 2588673 || event.ErrorDetail == "" {
 		t.Fatalf("structured failure event = %#v", event)
 	}

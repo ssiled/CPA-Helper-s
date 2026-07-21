@@ -91,6 +91,9 @@ type App struct {
 	authPoolAuthOverrides    map[string]int
 	attributionMu            sync.Mutex
 	attributionNext          time.Time
+	usageAttributionMu       sync.Mutex
+	usageAttributionEventsAt time.Time
+	usageAttributionEvents   []authPoolPluginEvent
 	loginMu                  sync.Mutex
 	loginAttempts            map[string]loginAttemptState
 }
