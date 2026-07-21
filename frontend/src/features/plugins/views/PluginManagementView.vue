@@ -33,7 +33,10 @@ const targets = reactive<AuthPoolProxyTargetForm[]>([])
 const concurrencyLimits = reactive<Record<string, number | null>>({})
 const activeConcurrencySlots = computed(() => [...(config.value?.concurrency_slots || [])]
   .sort((left, right) => left.tier.localeCompare(right.tier) || left.auth_id.localeCompare(right.auth_id)))
-const hasPerAccountConcurrency = computed(() => config.value?.concurrency_scope === 'per_account')
+const hasPerAccountConcurrency = computed(() => {
+  const scope = config.value?.concurrency_scope
+  return scope === 'per_account' || scope === 'per_account_and_pool'
+})
 
 function emptyTarget(index: number): AuthPoolProxyTargetForm {
   return {

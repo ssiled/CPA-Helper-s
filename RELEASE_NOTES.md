@@ -1,4 +1,18 @@
-# CPA-Helper 0.3.37
+# CPA-Helper 0.3.38
+
+This release fixes auth-pool concurrency capability detection.
+
+## Auth-pool capability detection
+
+- Recognize both `per_account` and the newer `per_account_and_pool` concurrency scopes.
+- Stop showing the legacy-plugin warning for `cpa-auth-pool` v0.1.31, which atomically reserves per-account and pool-wide slots.
+
+## Validation
+
+- Frontend: `npm.cmd run build`, `npm.cmd run lint`, `npm.cmd run test:i18n`
+- Backend: `go test ./...`, `go vet ./...`
+
+## Previous 0.3.37
 
 This release adds bounded model-request admission and streaming safeguards without changing CLIProxyAPI / CPA.
 
